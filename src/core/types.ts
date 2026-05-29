@@ -116,6 +116,19 @@ export interface GoalRuntimeConfig {
   randomId?: () => string;
 }
 
+export interface BlockedAuditEvidence {
+  /** Number of recent goal turns inspected by the adapter. */
+  inspectedGoalTurns: number;
+  /** Number of consecutive recent goal turns carrying the same blocker signature. */
+  consecutiveMatchingTurns: number;
+  /** Stable adapter-derived description of the repeated blocker. */
+  blockerSignature?: string;
+  /** Human-readable explanation for diagnostics/rejections. */
+  reason?: string;
+  /** Where the evidence came from, e.g. pi-session-transcript. */
+  source: string;
+}
+
 export interface GoalToolResult {
   goal?: GoalRecord;
   message: string;

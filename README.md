@@ -11,7 +11,7 @@ This project provides the common framework first:
 - lifecycle hooks for turn/tool/accounting events
 - hidden continuation reservation + idempotent callback contract
 - model-visible `get_goal`, `create_goal`, and restricted `update_goal` behavior
-- Pi extension adapter
+- Pi extension adapter with transcript-aware blocked audit
 
 Other agent harness bridges are intentionally out of scope for this first implementation and should be added through separate changes.
 
@@ -79,3 +79,5 @@ Hidden continuation is implemented with Pi custom hidden messages using `pi.send
 ## Blocked rule
 
 `update_goal({ "status": "blocked" })` is restricted. The same blocking condition must recur for at least three consecutive goal turns before the goal can be marked blocked. This prevents early abandonment after a single failed command or ordinary difficulty.
+
+The core runtime always enforces the three-turn minimum when turn count is available. The Pi bridge adds a stricter transcript-aware audit for blocked updates: it derives normalized blocker signatures from recent failed tool results or explicit blocked/cannot-proceed assistant text and rejects `blocked` when the recent signatures do not match across the threshold. This preserves the Codex-style status-only tool schema while making Pi's adapter harder to misuse.

@@ -30,6 +30,38 @@ test("blocked requires three goal turns", async () => {
   assert.equal((await runtime.getGoal("s1")).goal?.status, "blocked");
 });
 
+test("blocked audit evidence can reject non-matching blockers even after three turns", async () => {
+  const runtime = new GoalRuntime({ store: new MemoryGoalStore(), config: { retryBaseDelayMs: 0, retryJitterMs: 0 } });
+  await runtime.createOrReplaceGoal("s1", "blocked evidence test");
+  await runtime.turnStarted({ sessionKey: "s1", turnId: "t1" });
+  await runtime.turnStarted({ sessionKey: "s1", turnId: "t2" });
+  await runtime.turnStarted({ sessionKey: "s1", turnId: "t3" });
+
+  await assert.rejects(
+    () =>
+      runtime.toolUpdateGoal("s1", "blocked", {
+        blockedAuditEvidence: {
+          inspectedGoalTurns: 3,
+          consecutiveMatchingTurns: 1,
+          blockerSignature: "tool:error-a",
+          reason: "recent blocker signatures are not the same",
+          source: "test",
+        },
+      }),
+    /matching blocker evidence/,
+  );
+
+  await runtime.toolUpdateGoal("s1", "blocked", {
+    blockedAuditEvidence: {
+      inspectedGoalTurns: 3,
+      consecutiveMatchingTurns: 3,
+      blockerSignature: "tool:error-a",
+      source: "test",
+    },
+  });
+  assert.equal((await runtime.getGoal("s1")).goal?.status, "blocked");
+});
+
 test("idle active goal starts hidden continuation once", async () => {
   const store = new MemoryGoalStore();
   const requests: HiddenGoalTurnRequest[] = [];
@@ -54,6 +86,34 @@ test("idle active goal starts hidden continuation once", async () => {
   const second = await runtime.maybeContinueIfIdle("s1");
   assert.deepEqual(second, { kind: "notEligible", reason: "continuation already reserved" });
   assert.equal(requests.length, 1);
+});
+
+test("active goal starts another hidden continuation after a hidden turn finishes", async () => {
+  const requests: HiddenGoalTurnRequest[] = [];
+  const runtime = new GoalRuntime({
+    store: new MemoryGoalStore(),
+    config: { retryBaseDelayMs: 0, retryJitterMs: 0 },
+    callbacks: {
+      readHarnessState: () => ({
+        materialized: true,
+        queuedUserInput: false,
+        queuedTriggerTurn: false,
+        continuationSuppressed: false,
+      }),
+      startHiddenGoalTurn: (request) => {
+        requests.push(request);
+        return { kind: "started", hostTurnId: `h${requests.length}` };
+      },
+    },
+  });
+
+  await runtime.createOrReplaceGoal("s1", "continue until done");
+  assert.equal(requests.length, 1);
+
+  await runtime.turnStarted({ sessionKey: "s1", turnId: "hidden-1" });
+  await runtime.turnFinished({ sessionKey: "s1", turnId: "hidden-1" }, true);
+  assert.equal(requests.length, 2);
+  assert.notEqual(requests[0]?.attemptId, requests[1]?.attemptId);
 });
 
 test("retryable hidden-turn failure retries within bounds", async () => {

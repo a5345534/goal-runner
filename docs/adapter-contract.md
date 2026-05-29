@@ -51,5 +51,8 @@ The included Pi adapter maps:
 - model tools through `pi.registerTool(...)`
 - turn/tool lifecycle through Pi events
 - hidden continuation through `pi.sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })`
+- blocked updates through transcript-aware evidence derived from recent failed tool results or explicit blocked/cannot-proceed assistant text
+
+The blocked audit does not add model-visible fields to `update_goal`; the tool still only accepts `complete` or `blocked`. The adapter computes evidence out-of-band and passes it to the runtime so a first failure or mismatched recent blockers cannot be marked as strictly blocked.
 
 Other harness adapters are intentionally deferred to separate changes.

@@ -11,6 +11,7 @@ import type {
   GoalStore,
   GoalToolResult,
   HarnessState,
+  BlockedAuditEvidence,
   HiddenGoalTurnResult,
   TokenUsageSnapshot,
   TurnContext,
@@ -178,7 +179,11 @@ export class GoalRuntime {
     return this.createOrReplaceGoal(sessionKey, objective, { tokenBudget, confirmReplace: false });
   }
 
-  async toolUpdateGoal(sessionKey: string, statusInput: GoalStatusInput): Promise<GoalToolResult> {
+  async toolUpdateGoal(
+    sessionKey: string,
+    statusInput: GoalStatusInput,
+    options: { blockedAuditEvidence?: BlockedAuditEvidence } = {},
+  ): Promise<GoalToolResult> {
     const status = normalizeGoalStatus(statusInput);
     if (status !== "complete" && status !== "blocked") {
       throw new Error("update_goal only accepts status complete or blocked");
@@ -186,10 +191,19 @@ export class GoalRuntime {
     const goal = await this.requireGoal(sessionKey);
     await this.accountUsage(sessionKey);
 
-    if (status === "blocked" && goal.goalTurnsSinceAuditReset < this.config.blockedTurnsThreshold) {
-      throw new Error(
-        `blocked requires the same blocker for at least ${this.config.blockedTurnsThreshold} consecutive goal turns`,
-      );
+    if (status === "blocked") {
+      if (goal.goalTurnsSinceAuditReset < this.config.blockedTurnsThreshold) {
+        throw new Error(
+          `blocked requires the same blocker for at least ${this.config.blockedTurnsThreshold} consecutive goal turns`,
+        );
+      }
+      const evidence = options.blockedAuditEvidence;
+      if (evidence && evidence.consecutiveMatchingTurns < this.config.blockedTurnsThreshold) {
+        const detail = evidence.reason ? `: ${evidence.reason}` : "";
+        throw new Error(
+          `blocked requires matching blocker evidence for at least ${this.config.blockedTurnsThreshold} consecutive goal turns${detail}`,
+        );
+      }
     }
 
     const updated = await this.setGoalStatus(goal, status);

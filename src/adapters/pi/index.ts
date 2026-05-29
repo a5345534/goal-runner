@@ -1,7 +1,13 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { GoalRuntime, SQLiteGoalStore, type GoalRecord, type HiddenGoalTurnRequest } from "../../core/index.js";
+import {
+  GoalRuntime,
+  SQLiteGoalStore,
+  type BlockedAuditEvidence,
+  type GoalRecord,
+  type HiddenGoalTurnRequest,
+} from "../../core/index.js";
 
 const EXTENSION_MESSAGE_TYPE = "agent-goal-runtime";
 const HIDDEN_CONTEXT_KIND = "goal_continuation";
@@ -139,7 +145,11 @@ export default function goalPiExtension(pi: ExtensionAPI) {
     ],
     async execute(_toolCallId: string, params: { status: "complete" | "blocked" }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
       lastCtx = ctx;
-      const result = await runtime.toolUpdateGoal(resolveSessionKey(ctx), params.status);
+      const sessionKey = resolveSessionKey(ctx);
+      const current = await runtime.getGoal(sessionKey);
+      const blockedAuditEvidence =
+        params.status === "blocked" && current.goal ? buildBlockedAuditEvidence(ctx, current.goal, 3) : undefined;
+      const result = await runtime.toolUpdateGoal(sessionKey, params.status, { blockedAuditEvidence });
       return { content: [{ type: "text", text: result.message }], details: result.goal ?? null };
     },
   });
@@ -194,6 +204,131 @@ function requireContext<T extends ExtensionContext | ExtensionCommandContext>(ct
 function readTokenUsage(ctx: ExtensionContext): { totalTokens?: number } | undefined {
   const usage = ctx.getContextUsage?.();
   return usage?.tokens === undefined ? undefined : { totalTokens: usage.tokens };
+}
+
+function buildBlockedAuditEvidence(
+  ctx: ExtensionContext,
+  goal: GoalRecord,
+  threshold: number,
+): BlockedAuditEvidence {
+  type TurnEvidence = { signatures: string[]; hasUpdateGoalCall: boolean; timestamp?: string };
+  const entries = (ctx.sessionManager?.getBranch?.() ?? []) as Array<Record<string, unknown>>;
+  const turns: TurnEvidence[] = [];
+  let current: TurnEvidence | undefined;
+
+  for (const entry of entries) {
+    const timestamp = typeof entry.timestamp === "string" ? entry.timestamp : undefined;
+    if (timestamp && timestamp < goal.createdAt) continue;
+    const message = entry.message as Record<string, unknown> | undefined;
+    if (!message) continue;
+
+    if (message.role === "assistant") {
+      if (current) turns.push(current);
+      current = { signatures: [], hasUpdateGoalCall: false, timestamp };
+      const content = Array.isArray(message.content) ? (message.content as Array<Record<string, unknown>>) : [];
+      for (const block of content) {
+        if (block.type === "toolCall" && block.name === "update_goal") current.hasUpdateGoalCall = true;
+        if (block.type === "text" && typeof block.text === "string") {
+          const signature = signatureFromAssistantText(block.text);
+          if (signature) current.signatures.push(signature);
+        }
+      }
+      continue;
+    }
+
+    if (!current) continue;
+    if (message.role === "toolResult" && message.isError === true) {
+      const signature = signatureFromToolResult(message);
+      if (signature) current.signatures.push(signature);
+    }
+  }
+  if (current) turns.push(current);
+
+  // Exclude the current assistant turn that is performing update_goal; evidence must come from the recent work turns.
+  const evidenceTurns = turns.filter((turn) => !turn.hasUpdateGoalCall);
+  const recentTurns = evidenceTurns.slice(-threshold);
+  const signatures = recentTurns.map((turn) => turn.signatures[0]).filter((signature): signature is string => Boolean(signature));
+
+  if (recentTurns.length < threshold) {
+    return {
+      inspectedGoalTurns: recentTurns.length,
+      consecutiveMatchingTurns: 0,
+      reason: `only ${recentTurns.length} recent goal turn(s) available for transcript audit`,
+      source: "pi-session-transcript",
+    };
+  }
+
+  if (signatures.length !== recentTurns.length) {
+    return {
+      inspectedGoalTurns: recentTurns.length,
+      consecutiveMatchingTurns: 0,
+      reason: "not every recent goal turn contains a recognizable blocker signature",
+      source: "pi-session-transcript",
+    };
+  }
+
+  const [latestSignature] = signatures.slice(-1);
+  let consecutive = 0;
+  for (let index = signatures.length - 1; index >= 0; index -= 1) {
+    if (signatures[index] !== latestSignature) break;
+    consecutive += 1;
+  }
+
+  return {
+    inspectedGoalTurns: recentTurns.length,
+    consecutiveMatchingTurns: consecutive,
+    blockerSignature: latestSignature,
+    reason: consecutive >= threshold ? undefined : "recent blocker signatures are not the same",
+    source: "pi-session-transcript",
+  };
+}
+
+function signatureFromToolResult(message: Record<string, unknown>): string | undefined {
+  const toolName = typeof message.toolName === "string" ? message.toolName : "tool";
+  const text = textFromContent(message.content);
+  const line = firstDiagnosticLine(text);
+  return line ? `${toolName}:${normalizeSignature(line)}` : undefined;
+}
+
+function signatureFromAssistantText(text: string): string | undefined {
+  if (!/(blocked|cannot proceed|can't proceed|need user|external state|無法|不能|需要使用者|阻塞|卡住)/i.test(text)) {
+    return undefined;
+  }
+  return `assistant:${normalizeSignature(firstDiagnosticLine(text) ?? text)}`;
+}
+
+function textFromContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) => {
+      if (!block || typeof block !== "object") return "";
+      const value = block as Record<string, unknown>;
+      return value.type === "text" && typeof value.text === "string" ? value.text : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function firstDiagnosticLine(text: string): string | undefined {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return (
+    lines.find((line) => /(error|fail|failed|panic|blocked|cannot|can't|couldn't|not found|missing|denied|無法|錯誤|失敗|缺少)/i.test(line)) ??
+    lines[0]
+  );
+}
+
+function normalizeSignature(line: string): string {
+  return line
+    .toLowerCase()
+    .replace(/\/[\w./:@-]+/g, "<path>")
+    .replace(/[a-f0-9]{8,}/g, "<hex>")
+    .replace(/\b\d+\b/g, "<num>")
+    .replace(/\s+/g, " ")
+    .slice(0, 240);
 }
 
 async function startHiddenGoalTurn(
