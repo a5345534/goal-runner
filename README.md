@@ -62,6 +62,12 @@ pi install /home/shawn/projects/active/agent-goal-runtime
 pi -e /home/shawn/projects/active/agent-goal-runtime/dist/adapters/pi/index.js
 ```
 
+After the GitHub repository is published, install the pinned release from GitHub:
+
+```bash
+pi install git:github.com/a5345534/agent-goal-runtime@v0.1.0
+```
+
 The Pi bridge registers:
 
 - `/goal`

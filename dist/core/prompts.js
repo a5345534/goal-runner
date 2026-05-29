@@ -1,0 +1,50 @@
+export function renderContinuationPrompt(goal) {
+    const remaining = goal.tokenBudget === undefined ? "unbounded" : String(Math.max(goal.tokenBudget - goal.tokensUsed, 0));
+    const budget = goal.tokenBudget === undefined ? "not set" : String(goal.tokenBudget);
+    return `Continue working toward the active goal for this agent session.
+
+Goal objective (preserve exactly; do not narrow or rewrite success criteria):
+${goal.objective}
+
+Goal accounting:
+- status: ${goal.status}
+- tokens used: ${goal.tokensUsed}
+- token budget: ${budget}
+- tokens remaining: ${remaining}
+- elapsed time used: ${goal.timeUsedSeconds}s
+
+Use the current workspace, tool results, and external state as authoritative. Inspect current state before relying on earlier context. If the objective has multiple explicit requirements, audit every requirement before deciding that the goal is complete.
+
+Completion rules:
+- Call update_goal({"status":"complete"}) only when the full objective is achieved and verified.
+- Weak, indirect, missing, or incomplete evidence is not enough for completion.
+- Do not redefine success around only the work that is already done.
+
+Blocked rules:
+- Call update_goal({"status":"blocked"}) only when the same blocking condition has recurred for at least three consecutive goal turns, counting the original/user-triggered goal turn and automatic continuations.
+- A blocker means meaningful progress is impossible without user input or an external state change.
+- Ordinary difficulty, a single failed command, uncertainty, missing first-pass context, or work that would benefit from clarification is not enough.
+- If a new path can make meaningful progress, keep working instead of marking blocked.
+
+If neither complete nor strictly blocked, continue making meaningful progress toward the full objective.`;
+}
+export function renderBudgetLimitPrompt(goal) {
+    return `The active goal has reached or exceeded its token budget.
+
+Objective:
+${goal.objective}
+
+Tokens used: ${goal.tokensUsed}
+Token budget: ${goal.tokenBudget ?? "not set"}
+
+Do not mark the goal complete merely because the budget is exhausted. Summarize current progress and wait for user/system direction, or use update_goal only if the normal complete/blocked criteria are truly satisfied.`;
+}
+export function renderObjectiveUpdatedPrompt(goal) {
+    return `The active goal objective was updated by the user/system.
+
+New objective (preserve exactly):
+${goal.objective}
+
+Re-evaluate current workspace state against this full objective. Do not continue pursuing stale success criteria from the previous objective.`;
+}
+//# sourceMappingURL=prompts.js.map

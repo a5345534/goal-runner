@@ -1,0 +1,132 @@
+import { mkdirSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { resolveDefaultStateRoot } from "./state-root.js";
+export class SQLiteGoalStore {
+    dbPath;
+    db;
+    constructor(options = {}) {
+        this.dbPath = options.dbPath ? resolve(options.dbPath) : resolve(resolveDefaultStateRoot(options.stateRoot), "goals.sqlite");
+        mkdirSync(dirname(this.dbPath), { recursive: true });
+        this.db = new DatabaseSync(this.dbPath);
+        this.migrate();
+    }
+    async getCurrentGoal(sessionKey) {
+        const row = this.db.prepare("SELECT * FROM goals WHERE session_key = ?").get(sessionKey);
+        return row ? rowToGoal(row) : undefined;
+    }
+    async saveGoal(goal) {
+        this.db
+            .prepare(`INSERT INTO goals (
+          session_key, goal_id, objective, status, token_budget, tokens_used, time_used_seconds,
+          created_at, updated_at, goal_turns_since_audit_reset
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_key) DO UPDATE SET
+          goal_id = excluded.goal_id,
+          objective = excluded.objective,
+          status = excluded.status,
+          token_budget = excluded.token_budget,
+          tokens_used = excluded.tokens_used,
+          time_used_seconds = excluded.time_used_seconds,
+          created_at = excluded.created_at,
+          updated_at = excluded.updated_at,
+          goal_turns_since_audit_reset = excluded.goal_turns_since_audit_reset`)
+            .run(goal.sessionKey, goal.goalId, goal.objective, goal.status, goal.tokenBudget ?? null, goal.tokensUsed, goal.timeUsedSeconds, goal.createdAt, goal.updatedAt, goal.goalTurnsSinceAuditReset);
+    }
+    async clearGoal(sessionKey) {
+        this.db.prepare("DELETE FROM goals WHERE session_key = ?").run(sessionKey);
+        this.db.prepare("DELETE FROM continuation_reservations WHERE session_key = ?").run(sessionKey);
+    }
+    async getReservation(sessionKey) {
+        const row = this.db
+            .prepare("SELECT * FROM continuation_reservations WHERE session_key = ?")
+            .get(sessionKey);
+        return row ? rowToReservation(row) : undefined;
+    }
+    async saveReservation(reservation) {
+        this.db
+            .prepare(`INSERT INTO continuation_reservations (
+          session_key, attempt_id, goal_id, goal_updated_at, attempt_count, status,
+          host_turn_id, created_at, updated_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_key) DO UPDATE SET
+          attempt_id = excluded.attempt_id,
+          goal_id = excluded.goal_id,
+          goal_updated_at = excluded.goal_updated_at,
+          attempt_count = excluded.attempt_count,
+          status = excluded.status,
+          host_turn_id = excluded.host_turn_id,
+          created_at = excluded.created_at,
+          updated_at = excluded.updated_at,
+          expires_at = excluded.expires_at`)
+            .run(reservation.sessionKey, reservation.attemptId, reservation.goalId, reservation.goalUpdatedAt, reservation.attemptCount, reservation.status, reservation.hostTurnId ?? null, reservation.createdAt, reservation.updatedAt, reservation.expiresAt);
+    }
+    async clearReservation(sessionKey) {
+        this.db.prepare("DELETE FROM continuation_reservations WHERE session_key = ?").run(sessionKey);
+    }
+    async clearExpiredReservations(now = new Date()) {
+        const result = this.db.prepare("DELETE FROM continuation_reservations WHERE expires_at <= ?").run(now.toISOString());
+        return Number(result.changes ?? 0);
+    }
+    close() {
+        this.db.close();
+    }
+    migrate() {
+        this.db.exec(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE IF NOT EXISTS goals (
+        session_key TEXT PRIMARY KEY,
+        goal_id TEXT NOT NULL,
+        objective TEXT NOT NULL,
+        status TEXT NOT NULL,
+        token_budget INTEGER,
+        tokens_used INTEGER NOT NULL DEFAULT 0,
+        time_used_seconds INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        goal_turns_since_audit_reset INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS continuation_reservations (
+        session_key TEXT PRIMARY KEY,
+        attempt_id TEXT NOT NULL,
+        goal_id TEXT NOT NULL,
+        goal_updated_at TEXT NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL,
+        host_turn_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
+    `);
+    }
+}
+function rowToGoal(row) {
+    return {
+        sessionKey: row.session_key,
+        goalId: row.goal_id,
+        objective: row.objective,
+        status: row.status,
+        tokenBudget: row.token_budget ?? undefined,
+        tokensUsed: row.tokens_used,
+        timeUsedSeconds: row.time_used_seconds,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        goalTurnsSinceAuditReset: row.goal_turns_since_audit_reset,
+    };
+}
+function rowToReservation(row) {
+    return {
+        sessionKey: row.session_key,
+        attemptId: row.attempt_id,
+        goalId: row.goal_id,
+        goalUpdatedAt: row.goal_updated_at,
+        attemptCount: row.attempt_count,
+        status: row.status,
+        hostTurnId: row.host_turn_id ?? undefined,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        expiresAt: row.expires_at,
+    };
+}
+//# sourceMappingURL=sqlite-store.js.map

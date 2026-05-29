@@ -1,7 +1,6 @@
 {
   "name": "agent-goal-runtime",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "Portable Codex-compatible /goal runtime with a Pi adapter.",
   "keywords": [
@@ -27,22 +26,37 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "node --test dist/tests/*.test.js",
-    "check": "npm run build && npm test"
+    "check": "npm run build && npm test",
+    "prepack": "npm run build"
   },
   "pi": {
     "extensions": [
       "./dist/adapters/pi/index.js"
     ]
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/a5345534/agent-goal-runtime.git"
+  },
+  "bugs": {
+    "url": "https://github.com/a5345534/agent-goal-runtime/issues"
+  },
+  "homepage": "https://github.com/a5345534/agent-goal-runtime#readme",
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   },
   "peerDependenciesMeta": {
-    "@earendil-works/pi-ai": { "optional": true },
-    "@earendil-works/pi-coding-agent": { "optional": true },
-    "typebox": { "optional": true }
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^24.10.0",
