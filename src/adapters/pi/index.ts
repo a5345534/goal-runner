@@ -4,6 +4,8 @@ import { Type } from "typebox";
 import {
   GoalRuntime,
   SQLiteGoalStore,
+  parseGoalCommand,
+  renderActiveGoalReminderPrompt,
   type BlockedAuditEvidence,
   type GoalRecord,
   type HiddenGoalTurnRequest,
@@ -20,14 +22,14 @@ export default function goalPiExtension(pi: ExtensionAPI) {
   const runtime = new GoalRuntime({
     store,
     callbacks: {
-      readHarnessState: async (sessionKey) => {
+      readHarnessState: async (_sessionKey) => {
         const ctx = requireContext(lastCtx);
         return {
           materialized: Boolean(resolveSessionKey(ctx)),
           activeTurnId: ctx.isIdle?.() === false ? "pi-active-turn" : undefined,
           queuedUserInput: Boolean(ctx.hasPendingMessages?.()),
           queuedTriggerTurn: false,
-          continuationSuppressed: false,
+          continuationSuppressed: ctx.hasUI === false,
         };
       },
       startHiddenGoalTurn: async (request) => startHiddenGoalTurn(pi, requireContext(lastCtx), request, startedAttempts),
@@ -54,9 +56,9 @@ export default function goalPiExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("goal", {
-    description: "Codex-compatible persistent goal: /goal, /goal <objective>, /goal edit|pause|resume|clear",
+    description: "Codex-compatible persistent goal: /goal [--tokens 100k] <objective>, /goal edit|pause|resume|clear",
     getArgumentCompletions: (prefix: string) => {
-      const commands = ["edit", "pause", "resume", "clear"];
+      const commands = ["--tokens", "edit", "pause", "resume", "clear"];
       const matches = commands.filter((command) => command.startsWith(prefix));
       return matches.length ? matches.map((value) => ({ value, label: value })) : null;
     },
@@ -65,7 +67,9 @@ export default function goalPiExtension(pi: ExtensionAPI) {
       const sessionKey = resolveSessionKey(ctx);
       const trimmed = args.trim();
       try {
-        if (trimmed === "edit") {
+        const command = parseGoalCommand(trimmed);
+
+        if (command.kind === "edit" && command.objective === undefined) {
           const current = await runtime.getGoal(sessionKey);
           if (!current.goal) {
             ctx.ui.notify("No current goal to edit", "warning");
@@ -73,15 +77,21 @@ export default function goalPiExtension(pi: ExtensionAPI) {
           }
           const nextObjective = await ctx.ui.editor("Edit /goal objective", current.goal.objective);
           if (nextObjective === undefined) return;
-          const result = await runtime.executeCommand(sessionKey, "edit", { editObjective: nextObjective });
+          const result = await runtime.executeParsedCommand(sessionKey, command, { editObjective: nextObjective });
           ctx.ui.notify(result.message, "info");
+          if (result.goal) showGoalDetails(ctx, result.goal);
           return;
         }
 
-        if (trimmed && !["pause", "resume", "clear"].includes(trimmed)) {
+        if (command.kind === "start") {
           const existing = await runtime.getGoal(sessionKey);
           if (existing.goal) {
-            const ok = await ctx.ui.confirm("Replace current goal?", `${existing.goal.objective}\n\nNew goal:\n${trimmed}`);
+            const ok = await ctx.ui.confirm(
+              "Replace current goal?",
+              `${existing.goal.objective}\n\nNew goal:\n${command.objective}${
+                command.tokenBudget === undefined ? "" : `\n\nToken budget: ${formatTokenCount(command.tokenBudget)}`
+              }`,
+            );
             if (!ok) {
               ctx.ui.notify("Goal unchanged", "info");
               return;
@@ -89,7 +99,7 @@ export default function goalPiExtension(pi: ExtensionAPI) {
           }
         }
 
-        const result = await runtime.executeCommand(sessionKey, trimmed, { confirmReplace: true });
+        const result = await runtime.executeParsedCommand(sessionKey, command, { confirmReplace: true });
         if (result.goal) showGoalDetails(ctx, result.goal);
         else ctx.ui.notify(result.message, "info");
       } catch (error) {
@@ -162,6 +172,25 @@ export default function goalPiExtension(pi: ExtensionAPI) {
     if (result.goal) showGoalStatus(ctx, result.goal);
   });
 
+  pi.on("before_agent_start", async (event: { systemPrompt: string }, ctx: ExtensionContext) => {
+    lastCtx = ctx;
+    const goal = (await runtime.getGoal(resolveSessionKey(ctx))).goal;
+    if (!goal || goal.status !== "active") return;
+    return { systemPrompt: `${event.systemPrompt}\n\n${renderActiveGoalReminderPrompt(goal)}` };
+  });
+
+  pi.on("context", async (event: { messages: Array<Record<string, unknown>> }, ctx: ExtensionContext) => {
+    lastCtx = ctx;
+    const goal = (await runtime.getGoal(resolveSessionKey(ctx))).goal;
+    let filtered = false;
+    const messages = event.messages.filter((message) => {
+      if (!isStaleGoalContinuationMessage(message, goal)) return true;
+      filtered = true;
+      return false;
+    });
+    return filtered ? { messages } : undefined;
+  });
+
   pi.on("turn_start", async (event: { turnIndex?: number; timestamp?: number }, ctx: ExtensionContext) => {
     lastCtx = ctx;
     await runtime.turnStarted({
@@ -180,9 +209,22 @@ export default function goalPiExtension(pi: ExtensionAPI) {
     }
   });
 
-  pi.on("turn_end", async (_event: unknown, ctx: ExtensionContext) => {
+  pi.on("turn_end", async (event: { message?: Record<string, unknown> }, ctx: ExtensionContext) => {
     lastCtx = ctx;
-    await runtime.turnFinished({ sessionKey: resolveSessionKey(ctx), tokenUsage: readTokenUsage(ctx) }, true);
+    const sessionKey = resolveSessionKey(ctx);
+    const tokenUsage = readTokenUsage(ctx);
+
+    if (isFailedAssistantTurn(event.message)) {
+      const current = await runtime.getGoal(sessionKey);
+      if (current.goal?.status === "active") {
+        await runtime.pauseGoal(sessionKey);
+        ctx.ui?.notify?.(`Goal paused after ${event.message?.stopReason === "aborted" ? "interruption" : "agent error"}. Run /goal resume to continue.`, "warning");
+      }
+      await runtime.turnFinished({ sessionKey, tokenUsage }, false);
+      return;
+    }
+
+    await runtime.turnFinished({ sessionKey, tokenUsage }, true);
   });
 
   pi.on("session_shutdown", async () => {
@@ -202,8 +244,25 @@ function requireContext<T extends ExtensionContext | ExtensionCommandContext>(ct
 }
 
 function readTokenUsage(ctx: ExtensionContext): { totalTokens?: number } | undefined {
+  const entries = (ctx.sessionManager?.getBranch?.() ?? []) as Array<Record<string, unknown>>;
+  let totalTokens = 0;
+
+  for (const entry of entries) {
+    const message = entry.message as Record<string, unknown> | undefined;
+    if (entry.type !== "message" || message?.role !== "assistant") continue;
+    const usage = message.usage as Record<string, unknown> | undefined;
+    if (!usage) continue;
+    if (typeof usage.totalTokens === "number") totalTokens += usage.totalTokens;
+    else totalTokens += numberValue(usage.input) + numberValue(usage.output);
+  }
+
+  if (totalTokens > 0) return { totalTokens };
   const usage = ctx.getContextUsage?.();
-  return usage?.tokens === undefined ? undefined : { totalTokens: usage.tokens };
+  return typeof usage?.tokens === "number" ? { totalTokens: usage.tokens } : undefined;
+}
+
+function numberValue(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 function buildBlockedAuditEvidence(
@@ -361,20 +420,80 @@ async function startHiddenGoalTurn(
       { triggerTurn: true, deliverAs: "followUp" },
     );
     startedAttempts.set(request.attemptId, hostTurnId);
-    ctx.ui?.setStatus?.("goal", "goal: continuing");
+    ctx.ui?.setStatus?.("goal", "🎯 continuing");
     return { kind: "started" as const, hostTurnId };
   } catch (error) {
     return { kind: "retryableFailure" as const, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
+function isFailedAssistantTurn(message: Record<string, unknown> | undefined): boolean {
+  return message?.role === "assistant" && (message.stopReason === "aborted" || message.stopReason === "error");
+}
+
+function isStaleGoalContinuationMessage(message: Record<string, unknown>, goal: GoalRecord | undefined): boolean {
+  if (message.role !== "custom" || message.customType !== EXTENSION_MESSAGE_TYPE) return false;
+  const details = message.details as Record<string, unknown> | undefined;
+  if (details?.kind !== HIDDEN_CONTEXT_KIND) return false;
+  return !goal || goal.status !== "active" || details.goalId !== goal.goalId || details.goalUpdatedAt !== goal.updatedAt;
+}
+
 function showGoalStatus(ctx: ExtensionContext | ExtensionCommandContext, goal: GoalRecord): void {
-  ctx.ui?.setStatus?.("goal", `goal: ${goal.status}`);
+  ctx.ui?.setStatus?.("goal", compactGoalStatus(goal));
   ctx.ui?.setWidget?.("goal", [`/goal ${goal.status}: ${goal.objective}`], { placement: "belowEditor" });
 }
 
 function showGoalDetails(ctx: ExtensionContext | ExtensionCommandContext, goal: GoalRecord): void {
   showGoalStatus(ctx, goal);
-  const budget = goal.tokenBudget === undefined ? "none" : String(goal.tokenBudget);
-  ctx.ui?.notify?.(`Goal ${goal.status}\n${goal.objective}\nTokens: ${goal.tokensUsed}/${budget}`, "info");
+  ctx.ui?.notify?.(goalSummary(goal), "info");
+}
+
+function goalSummary(goal: GoalRecord): string {
+  return [
+    `Goal: ${goal.objective}`,
+    `Status: ${goal.status}`,
+    `Goal turns since audit reset: ${goal.goalTurnsSinceAuditReset}`,
+    `Elapsed: ${formatDuration(goal.timeUsedSeconds)}`,
+    `Tokens: ${goal.tokenBudget === undefined ? formatTokenCount(goal.tokensUsed) : `${formatTokenCount(goal.tokensUsed)}/${formatTokenCount(goal.tokenBudget)}`}`,
+    `Commands: ${goalCommandHint(goal.status)}`,
+  ].join("\n");
+}
+
+function compactGoalStatus(goal: GoalRecord): string {
+  switch (goal.status) {
+    case "active":
+      return goal.tokenBudget === undefined
+        ? `🎯 active ${formatDuration(goal.timeUsedSeconds)}`
+        : `🎯 active ${formatTokenCount(goal.tokensUsed)}/${formatTokenCount(goal.tokenBudget)}`;
+    case "paused":
+      return "🎯 paused";
+    case "blocked":
+      return "🎯 blocked";
+    case "budgetLimited":
+      return `🎯 budget ${formatTokenCount(goal.tokensUsed)}/${formatTokenCount(goal.tokenBudget ?? 0)}`;
+    case "usageLimited":
+      return "🎯 usage limited";
+    case "complete":
+      return "🎯 complete";
+  }
+}
+
+function goalCommandHint(status: GoalRecord["status"]): string {
+  if (status === "active") return "/goal edit <objective>, /goal pause, /goal clear";
+  if (status === "paused" || status === "budgetLimited") return "/goal edit <objective>, /goal resume, /goal clear";
+  return "/goal edit <objective>, /goal clear";
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h${minutes % 60}m`;
+}
+
+function formatTokenCount(value: number): string {
+  if (value < 1_000) return `${value}`;
+  if (value < 1_000_000) return `${Number.isInteger(value / 1_000) ? value / 1_000 : (value / 1_000).toFixed(1)}k`;
+  return `${Number.isInteger(value / 1_000_000) ? value / 1_000_000 : (value / 1_000_000).toFixed(1)}m`;
 }

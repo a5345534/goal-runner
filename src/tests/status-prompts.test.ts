@@ -1,6 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fromCodexWireStatus, normalizeGoalStatus, renderBudgetLimitPrompt, renderContinuationPrompt, renderObjectiveUpdatedPrompt, type GoalRecord } from "../core/index.js";
+import {
+  fromCodexWireStatus,
+  normalizeGoalStatus,
+  renderActiveGoalReminderPrompt,
+  renderBudgetLimitPrompt,
+  renderContinuationPrompt,
+  renderObjectiveUpdatedPrompt,
+  type GoalRecord,
+} from "../core/index.js";
 
 const goal: GoalRecord = {
   sessionKey: "test-session",
@@ -30,6 +38,14 @@ test("continuation prompt preserves objective and blocked threshold", () => {
   assert.match(prompt, /three consecutive goal turns/);
   assert.match(prompt, /update_goal\(\{"status":"complete"\}\)/);
   assert.match(prompt, /update_goal\(\{"status":"blocked"\}\)/);
+});
+
+test("active goal reminder preserves objective and policy priority", () => {
+  const prompt = renderActiveGoalReminderPrompt(goal);
+  assert.match(prompt, /Finish the goal and verify it/);
+  assert.match(prompt, /user-provided task data/);
+  assert.match(prompt, /Respect all system, developer, workspace, and tool policies above this goal objective/);
+  assert.match(prompt, /tokens remaining: 60/);
 });
 
 test("budget and objective update prompts include goal context", () => {

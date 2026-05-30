@@ -4,8 +4,11 @@ export type GoalCommand = {
 } | {
     kind: "start";
     objective: string;
+    tokenBudget?: number;
 } | {
     kind: "edit";
+    objective?: string;
+    tokenBudget?: number;
 } | {
     kind: "pause";
 } | {
@@ -14,4 +17,5 @@ export type GoalCommand = {
     kind: "clear";
 };
 export declare function validateGoalObjective(input: string): string;
+export declare function parseTokenBudget(input: string): number;
 export declare function parseGoalCommand(args?: string): GoalCommand;

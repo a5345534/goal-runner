@@ -23,7 +23,9 @@ export declare class GoalRuntime {
         tokenBudget?: number;
         confirmReplace?: boolean;
     }): Promise<GoalToolResult>;
-    editGoal(sessionKey: string, objectiveInput: string): Promise<GoalToolResult>;
+    editGoal(sessionKey: string, objectiveInput: string, options?: {
+        tokenBudget?: number;
+    }): Promise<GoalToolResult>;
     pauseGoal(sessionKey: string): Promise<GoalToolResult>;
     resumeGoal(sessionKey: string): Promise<GoalToolResult>;
     clearGoal(sessionKey: string): Promise<GoalToolResult>;

@@ -143,4 +143,74 @@ test("queued user input suppresses continuation", async () => {
     assert.equal(result.goal?.status, "active");
     assert.equal(attempts, 0);
 });
+test("goal edit can update token budget without resetting usage", async () => {
+    const runtime = new GoalRuntime({ store: new MemoryGoalStore() });
+    await runtime.createOrReplaceGoal("s1", "old objective", { tokenBudget: 1_000 });
+    await runtime.turnStarted({ sessionKey: "s1", turnId: "t1", tokenUsage: { totalTokens: 0 } });
+    await runtime.toolCompleted({ sessionKey: "s1", tokenUsage: { totalTokens: 250 } });
+    const result = await runtime.executeCommand("s1", "edit --tokens 500 new objective");
+    assert.equal(result.goal?.objective, "new objective");
+    assert.equal(result.goal?.tokenBudget, 500);
+    assert.equal(result.goal?.tokensUsed, 250);
+    assert.equal(result.goal?.status, "active");
+});
+test("goal edit becomes budget-limited when the new budget is already exhausted", async () => {
+    const runtime = new GoalRuntime({ store: new MemoryGoalStore() });
+    await runtime.createOrReplaceGoal("s1", "old objective", { tokenBudget: 1_000 });
+    await runtime.turnStarted({ sessionKey: "s1", turnId: "t1", tokenUsage: { totalTokens: 0 } });
+    await runtime.toolCompleted({ sessionKey: "s1", tokenUsage: { totalTokens: 250 } });
+    const result = await runtime.executeCommand("s1", "edit --tokens 100 new objective");
+    assert.equal(result.goal?.tokenBudget, 100);
+    assert.equal(result.goal?.tokensUsed, 250);
+    assert.equal(result.goal?.status, "budgetLimited");
+});
+test("budget-limited resume does not continue while budget remains exhausted", async () => {
+    let attempts = 0;
+    const runtime = new GoalRuntime({
+        store: new MemoryGoalStore(),
+        callbacks: {
+            readHarnessState: () => ({
+                materialized: true,
+                queuedUserInput: false,
+                queuedTriggerTurn: false,
+                continuationSuppressed: false,
+            }),
+            startHiddenGoalTurn: () => {
+                attempts += 1;
+                return { kind: "started" };
+            },
+        },
+    });
+    await runtime.createOrReplaceGoal("s1", "budgeted", { tokenBudget: 100 });
+    await runtime.turnStarted({ sessionKey: "s1", turnId: "t1", tokenUsage: { totalTokens: 0 } });
+    await runtime.toolCompleted({ sessionKey: "s1", tokenUsage: { totalTokens: 150 } });
+    attempts = 0;
+    const result = await runtime.resumeGoal("s1");
+    assert.equal(result.goal?.status, "budgetLimited");
+    assert.equal(result.message, "Goal token budget is still exhausted.");
+    assert.equal(attempts, 0);
+});
+test("unfinished failed turns do not auto-continue", async () => {
+    let attempts = 0;
+    const runtime = new GoalRuntime({
+        store: new MemoryGoalStore(),
+        callbacks: {
+            readHarnessState: () => ({
+                materialized: true,
+                queuedUserInput: true,
+                queuedTriggerTurn: false,
+                continuationSuppressed: false,
+            }),
+            startHiddenGoalTurn: () => {
+                attempts += 1;
+                return { kind: "started" };
+            },
+        },
+    });
+    await runtime.createOrReplaceGoal("s1", "do not continue on abort");
+    await runtime.turnStarted({ sessionKey: "s1", turnId: "t1" });
+    await runtime.turnFinished({ sessionKey: "s1", turnId: "t1" }, false);
+    assert.equal(attempts, 0);
+    assert.equal((await runtime.getGoal("s1")).goal?.status, "active");
+});
 //# sourceMappingURL=runtime.test.js.map

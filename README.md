@@ -11,7 +11,7 @@ This project provides the common framework first:
 - lifecycle hooks for turn/tool/accounting events
 - hidden continuation reservation + idempotent callback contract
 - model-visible `get_goal`, `create_goal`, and restricted `update_goal` behavior
-- Pi extension adapter with transcript-aware blocked audit
+- Pi extension adapter with transcript-aware blocked audit, slash-command token budgets, active-goal reminders, abort/error pausing, and stale-continuation guards
 
 Other agent harness bridges are intentionally out of scope for this first implementation and should be added through separate changes.
 
@@ -72,7 +72,9 @@ The Pi bridge registers:
 
 - `/goal`
 - `/goal <objective>`
+- `/goal --tokens 100k <objective>`
 - `/goal edit`
+- `/goal edit --tokens 250k <objective>`
 - `/goal pause`
 - `/goal resume`
 - `/goal clear`
@@ -80,7 +82,9 @@ The Pi bridge registers:
 - `create_goal`
 - `update_goal`
 
-Hidden continuation is implemented with Pi custom hidden messages using `pi.sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })`, guarded by runtime continuation reservations and adapter-side `attemptId` idempotency.
+`/goal --tokens <budget> ...` accepts positive numbers with optional `k` or `m` suffixes, for example `100k` or `1.5m`. Bare `/goal` shows the objective, status, elapsed time, token usage/budget, goal-turn count, and currently useful subcommands. The Pi status line uses compact status strings such as `🎯 active 18k/100k`, `🎯 paused`, `🎯 blocked`, `🎯 budget 100k/100k`, or `🎯 complete`.
+
+Hidden continuation is implemented with Pi custom hidden messages using `pi.sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })`, guarded by runtime continuation reservations and adapter-side `attemptId` idempotency. While a goal is active, the Pi bridge also injects an ordinary-turn reminder that preserves the full objective as user-provided task data and explicitly keeps system/developer/workspace/tool policy above the goal. If Pi reports a goal turn ending with `aborted` or `error`, the bridge pauses the goal and requires `/goal resume` before automatic continuation resumes. Queued hidden continuations are filtered by goal id and observed update timestamp so stale continuations cannot revive replaced, paused, cleared, completed, blocked, or budget-limited goals.
 
 ## Blocked rule
 

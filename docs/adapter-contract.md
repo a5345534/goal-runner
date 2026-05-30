@@ -47,10 +47,13 @@ Rules:
 
 The included Pi adapter maps:
 
-- slash commands through `pi.registerCommand("goal", ...)`
+- slash commands through `pi.registerCommand("goal", ...)`, including `/goal --tokens <budget> <objective>` with `k` / `m` suffix parsing
 - model tools through `pi.registerTool(...)`
 - turn/tool lifecycle through Pi events
+- ordinary-turn active goal reminders through `before_agent_start`
 - hidden continuation through `pi.sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })`
+- stale hidden continuation filtering through the Pi `context` hook
+- aborted/error turn handling by pausing the active goal until `/goal resume`
 - blocked updates through transcript-aware evidence derived from recent failed tool results or explicit blocked/cannot-proceed assistant text
 
 The blocked audit does not add model-visible fields to `update_goal`; the tool still only accepts `complete` or `blocked`. The adapter computes evidence out-of-band and passes it to the runtime so a first failure or mismatched recent blockers cannot be marked as strictly blocked.

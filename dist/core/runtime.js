@@ -30,11 +30,15 @@ export class GoalRuntime {
             case "show":
                 return this.getGoal(sessionKey);
             case "start":
-                return this.createOrReplaceGoal(sessionKey, command.objective, { confirmReplace: options.confirmReplace ?? true });
+                return this.createOrReplaceGoal(sessionKey, command.objective, {
+                    tokenBudget: command.tokenBudget,
+                    confirmReplace: options.confirmReplace ?? true,
+                });
             case "edit": {
-                if (options.editObjective === undefined)
+                const objective = options.editObjective ?? command.objective;
+                if (objective === undefined)
                     throw new Error("edit objective is required for /goal edit");
-                return this.editGoal(sessionKey, options.editObjective);
+                return this.editGoal(sessionKey, objective, { tokenBudget: command.tokenBudget });
             }
             case "pause":
                 return this.pauseGoal(sessionKey);
@@ -82,16 +86,19 @@ export class GoalRuntime {
         await this.maybeContinueIfIdle(sessionKey);
         return { goal, message: existing ? "Goal updated." : "Goal created." };
     }
-    async editGoal(sessionKey, objectiveInput) {
-        const goal = await this.requireGoal(sessionKey);
+    async editGoal(sessionKey, objectiveInput, options = {}) {
+        await this.requireGoal(sessionKey);
         await this.accountUsage(sessionKey);
-        const updated = {
-            ...goal,
+        const accounted = await this.requireGoal(sessionKey);
+        const nextTokenBudget = options.tokenBudget ?? accounted.tokenBudget;
+        const updated = normalizeBudgetLimited({
+            ...accounted,
             objective: validateGoalObjective(objectiveInput),
             status: "active",
+            tokenBudget: nextTokenBudget,
             updatedAt: this.nowIso(),
             goalTurnsSinceAuditReset: 0,
-        };
+        });
         await this.store.saveGoal(updated);
         await this.store.clearReservation(sessionKey);
         await this.callbacks.notifyGoalUpdated?.(updated);
@@ -112,18 +119,23 @@ export class GoalRuntime {
         return { goal: updated, message: "Goal paused." };
     }
     async resumeGoal(sessionKey) {
-        const goal = await this.requireGoal(sessionKey);
-        const updated = {
-            ...goal,
+        await this.requireGoal(sessionKey);
+        await this.accountUsage(sessionKey);
+        const accounted = await this.requireGoal(sessionKey);
+        const updated = normalizeBudgetLimited({
+            ...accounted,
             status: "active",
             updatedAt: this.nowIso(),
-            goalTurnsSinceAuditReset: goal.status === "blocked" ? 0 : goal.goalTurnsSinceAuditReset,
-        };
+            goalTurnsSinceAuditReset: accounted.status === "blocked" ? 0 : accounted.goalTurnsSinceAuditReset,
+        });
         await this.store.saveGoal(updated);
         await this.store.clearReservation(sessionKey);
         await this.callbacks.notifyGoalUpdated?.(updated);
         await this.maybeContinueIfIdle(sessionKey);
-        return { goal: updated, message: "Goal resumed." };
+        return {
+            goal: updated,
+            message: updated.status === "budgetLimited" ? "Goal token budget is still exhausted." : "Goal resumed.",
+        };
     }
     async clearGoal(sessionKey) {
         await this.store.clearGoal(sessionKey);
@@ -375,6 +387,12 @@ function formatGoalSummary(goal) {
         `Tokens: ${goal.tokensUsed} used / ${budget} budget / ${remaining} remaining`,
         `Elapsed: ${goal.timeUsedSeconds}s`,
     ].join("\n");
+}
+function normalizeBudgetLimited(goal) {
+    if (goal.status === "active" && goal.tokenBudget !== undefined && goal.tokensUsed >= goal.tokenBudget) {
+        return { ...goal, status: "budgetLimited" };
+    }
+    return goal;
 }
 function explainHarnessIneligible(state) {
     if (!state.materialized)

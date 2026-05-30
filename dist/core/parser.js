@@ -10,21 +10,102 @@ export function validateGoalObjective(input) {
     }
     return objective;
 }
+export function parseTokenBudget(input) {
+    const raw = input.trim();
+    const match = /^(\d+(?:\.\d+)?)([km])?$/iu.exec(raw);
+    if (!match) {
+        throw new Error(`invalid token budget: ${input}`);
+    }
+    const amount = Number(match[1]);
+    if (!Number.isFinite(amount) || amount <= 0) {
+        throw new Error(`invalid token budget: ${input}`);
+    }
+    const suffix = match[2]?.toLowerCase();
+    const multiplier = suffix === "m" ? 1_000_000 : suffix === "k" ? 1_000 : 1;
+    const budget = Math.floor(amount * multiplier);
+    if (!Number.isSafeInteger(budget) || budget <= 0) {
+        throw new Error(`invalid token budget: ${input}`);
+    }
+    return budget;
+}
 export function parseGoalCommand(args = "") {
     const trimmed = args.trim();
     if (!trimmed)
         return { kind: "show" };
-    switch (trimmed) {
-        case "edit":
-            return { kind: "edit" };
+    const tokens = tokenize(trimmed);
+    const [first, ...rest] = tokens;
+    switch (first) {
+        case "edit": {
+            if (rest.length === 0)
+                return { kind: "edit" };
+            const parsed = parseBudgetAndObjective(rest, "edit");
+            return { kind: "edit", ...parsed };
+        }
         case "pause":
+            ensureNoExtraArgs(first, rest);
             return { kind: "pause" };
         case "resume":
+            ensureNoExtraArgs(first, rest);
             return { kind: "resume" };
         case "clear":
+            ensureNoExtraArgs(first, rest);
             return { kind: "clear" };
-        default:
-            return { kind: "start", objective: validateGoalObjective(trimmed) };
+        default: {
+            const parsed = parseBudgetAndObjective(tokens, "start");
+            return { kind: "start", objective: parsed.objective, tokenBudget: parsed.tokenBudget };
+        }
     }
+}
+function parseBudgetAndObjective(tokens, command) {
+    const remaining = [...tokens];
+    let tokenBudget;
+    if (remaining[0] === "--tokens") {
+        const rawBudget = remaining[1];
+        if (!rawBudget) {
+            throw new Error("missing token budget after --tokens");
+        }
+        tokenBudget = parseTokenBudget(rawBudget);
+        remaining.splice(0, 2);
+    }
+    if (remaining.length === 0) {
+        throw new Error(command === "edit" ? "goal edit objective must not be empty" : "goal objective must not be empty");
+    }
+    return { objective: validateGoalObjective(remaining.join(" ")), tokenBudget };
+}
+function ensureNoExtraArgs(command, rest) {
+    if (rest.length > 0) {
+        throw new Error(`/goal ${command} does not accept extra arguments`);
+    }
+}
+function tokenize(input) {
+    const tokens = [];
+    let current = "";
+    let quote;
+    for (const char of input) {
+        if (quote) {
+            if (char === quote)
+                quote = undefined;
+            else
+                current += char;
+            continue;
+        }
+        if (char === '"' || char === "'") {
+            quote = char;
+            continue;
+        }
+        if (/\s/.test(char)) {
+            if (current)
+                tokens.push(current);
+            current = "";
+            continue;
+        }
+        current += char;
+    }
+    if (quote) {
+        throw new Error("unterminated quote in /goal command");
+    }
+    if (current)
+        tokens.push(current);
+    return tokens;
 }
 //# sourceMappingURL=parser.js.map
