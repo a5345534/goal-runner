@@ -1,5 +1,5 @@
 import { type GoalCommand } from "./parser.js";
-import type { GoalAdapterCallbacks, GoalRuntimeConfig, GoalStatusInput, GoalStore, GoalToolResult, BlockedAuditEvidence, HiddenGoalTurnResult, TurnContext } from "./types.js";
+import type { BlockedAuditEvidence, GoalAdapterCallbacks, GoalLedgerEvent, GoalRuntimeConfig, GoalStatusInput, GoalStore, GoalToolResult, GoalTurnStop, HiddenGoalTurnResult, TurnContext } from "./types.js";
 export declare class GoalRuntime {
     private readonly store;
     private readonly callbacks;
@@ -19,6 +19,8 @@ export declare class GoalRuntime {
         confirmReplace?: boolean;
     }): Promise<GoalToolResult>;
     getGoal(sessionKey: string): Promise<GoalToolResult>;
+    listLedgerEvents(sessionKey: string, goalId?: string): Promise<GoalLedgerEvent[]>;
+    getCurrentTurnStop(sessionKey: string): GoalTurnStop | undefined;
     createOrReplaceGoal(sessionKey: string, objectiveInput: string, options?: {
         tokenBudget?: number;
         confirmReplace?: boolean;
@@ -48,5 +50,9 @@ export declare class GoalRuntime {
     private setGoalStatus;
     private accountUsage;
     private readHarnessState;
+    private runCompletionAuditIfConfigured;
+    private markMeaningfulProgress;
+    private markTurnStopped;
+    private appendLedger;
     private nowIso;
 }

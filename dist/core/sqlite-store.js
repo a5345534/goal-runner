@@ -68,6 +68,22 @@ export class SQLiteGoalStore {
         const result = this.db.prepare("DELETE FROM continuation_reservations WHERE expires_at <= ?").run(now.toISOString());
         return Number(result.changes ?? 0);
     }
+    async appendLedgerEvent(event) {
+        this.db
+            .prepare(`INSERT INTO goal_ledger (event_id, session_key, goal_id, type, at, details_json)
+         VALUES (?, ?, ?, ?, ?, ?)`)
+            .run(event.eventId ?? fallbackEventId(event), event.sessionKey, event.goalId ?? null, event.type, event.at, event.details === undefined ? null : JSON.stringify(event.details));
+    }
+    async listLedgerEvents(sessionKey, goalId) {
+        const rows = goalId === undefined
+            ? this.db
+                .prepare("SELECT * FROM goal_ledger WHERE session_key = ? ORDER BY id ASC")
+                .all(sessionKey)
+            : this.db
+                .prepare("SELECT * FROM goal_ledger WHERE session_key = ? AND goal_id = ? ORDER BY id ASC")
+                .all(sessionKey, goalId);
+        return rows.map(rowToLedgerEvent);
+    }
     close() {
         this.db.close();
     }
@@ -98,6 +114,16 @@ export class SQLiteGoalStore {
         updated_at TEXT NOT NULL,
         expires_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS goal_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id TEXT NOT NULL UNIQUE,
+        session_key TEXT NOT NULL,
+        goal_id TEXT,
+        type TEXT NOT NULL,
+        at TEXT NOT NULL,
+        details_json TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_goal_ledger_session_goal ON goal_ledger(session_key, goal_id, id);
     `);
     }
 }
@@ -128,5 +154,29 @@ function rowToReservation(row) {
         updatedAt: row.updated_at,
         expiresAt: row.expires_at,
     };
+}
+function rowToLedgerEvent(row) {
+    return {
+        eventId: row.event_id,
+        sessionKey: row.session_key,
+        goalId: row.goal_id ?? undefined,
+        type: row.type,
+        at: row.at,
+        details: parseDetails(row.details_json),
+    };
+}
+function parseDetails(json) {
+    if (!json)
+        return undefined;
+    try {
+        const parsed = JSON.parse(json);
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
+function fallbackEventId(event) {
+    return `${event.at}:${event.sessionKey}:${event.goalId ?? "none"}:${event.type}:${Math.random().toString(36).slice(2)}`;
 }
 //# sourceMappingURL=sqlite-store.js.map

@@ -5,6 +5,7 @@ import {
   normalizeGoalStatus,
   renderActiveGoalReminderPrompt,
   renderBudgetLimitPrompt,
+  renderCompletionAuditPrompt,
   renderContinuationPrompt,
   renderObjectiveUpdatedPrompt,
   type GoalRecord,
@@ -35,6 +36,7 @@ test("status normalization preserves Codex wire names and legacy aliases", () =>
 test("continuation prompt preserves objective and blocked threshold", () => {
   const prompt = renderContinuationPrompt(goal);
   assert.match(prompt, /Finish the goal and verify it/);
+  assert.match(prompt, /untrusted user-provided task data/);
   assert.match(prompt, /three consecutive goal turns/);
   assert.match(prompt, /update_goal\(\{"status":"complete"\}\)/);
   assert.match(prompt, /update_goal\(\{"status":"blocked"\}\)/);
@@ -48,9 +50,22 @@ test("active goal reminder preserves objective and policy priority", () => {
   assert.match(prompt, /tokens remaining: 60/);
 });
 
-test("budget and objective update prompts include goal context", () => {
+test("budget and objective update prompts include untrusted goal context", () => {
   assert.match(renderBudgetLimitPrompt(goal), /token budget/i);
   assert.match(renderBudgetLimitPrompt(goal), /Finish the goal and verify it/);
+  assert.match(renderBudgetLimitPrompt(goal), /untrusted user-provided task data/);
   assert.match(renderObjectiveUpdatedPrompt(goal), /objective was updated/i);
   assert.match(renderObjectiveUpdatedPrompt(goal), /Finish the goal and verify it/);
+  assert.match(renderObjectiveUpdatedPrompt(goal), /untrusted user-provided task data/);
+});
+
+test("completion audit prompt treats objective as untrusted data", () => {
+  const prompt = renderCompletionAuditPrompt({
+    goal,
+    ledgerEvents: [],
+    completionEvidence: { source: "test", verificationSignals: ["npm test passed"] },
+  });
+  assert.match(prompt, /Finish the goal and verify it/);
+  assert.match(prompt, /untrusted user-provided task data/);
+  assert.match(prompt, /higher-priority policy/);
 });

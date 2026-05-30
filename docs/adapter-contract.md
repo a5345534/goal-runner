@@ -11,7 +11,10 @@ A full adapter connects the portable runtime to a host harness.
 5. Map host lifecycle events into runtime hooks.
 6. Implement hidden continuation through `startHiddenGoalTurn`.
 7. Show visible goal update/clear/status feedback.
-8. Provide a smoke/conformance report.
+8. Classify meaningful progress so automatic continuation does not loop after pure chat/status turns.
+9. Enforce same-turn post-stop tool guarding where the host can intercept tool calls.
+10. Optionally provide a completion auditor behind `update_goal({"status":"complete"})`.
+11. Provide a smoke/conformance report.
 
 ## Hidden turn callback
 
@@ -43,6 +46,24 @@ Rules:
 - Fatal/skipped outcomes do not mark a goal complete or blocked.
 - Stale goal versions must not launch hidden continuation.
 
+## Completion audit callback
+
+`update_goal({"status":"complete"})` remains the model-visible completion path. A runtime or adapter may provide:
+
+- `collectCompletionEvidence(goal)` — extracts out-of-band evidence from transcript, tool results, host state, or policy context.
+- `getCompletionPolicyContext(goal)` — supplies host/workspace policy such as OpenSpec validation expectations.
+- `auditCompletion(request)` — approves or rejects terminal completion.
+
+If the auditor rejects, the goal remains non-terminal and the runtime records the rejection in the ledger. Adapters should report the rejection and prevent immediate same-turn mutation/continuation.
+
+## Progress-gated continuation
+
+`toolCompleted(context)` accepts optional `toolName`, `meaningfulProgress`, and `progressSummary` fields. Full adapters should set `meaningfulProgress=false` for status-only or bookkeeping tools such as `get_goal`, and true for task-relevant read/write/edit/bash/test activity. `turnFinished(..., true)` only schedules another hidden continuation when the just-finished turn made meaningful progress.
+
+## Execution ledger
+
+Stores must persist goal ledger events through `appendLedgerEvent` and `listLedgerEvents`. The default SQLite store uses a `goal_ledger` table. Alternate stores should preserve equivalent event semantics so compaction, handoff, and audit can inspect lifecycle and evidence without relying only on chat transcript.
+
 ## Pi adapter status
 
 The included Pi adapter maps:
@@ -55,7 +76,10 @@ The included Pi adapter maps:
 - stale hidden continuation filtering through the Pi `context` hook
 - aborted/error turn handling by pausing the active goal until `/goal resume`
 - blocked updates through transcript-aware evidence derived from recent failed tool results or explicit blocked/cannot-proceed assistant text
+- completion audit through a lightweight Pi transcript heuristic unless `AGENT_GOAL_COMPLETION_AUDIT=off` or `PI_GOAL_COMPLETION_AUDIT=off`
+- same-turn post-stop tool guarding through Pi `tool_call` interception when available
+- progress-gated continuation by classifying task-relevant tool completions
 
-The blocked audit does not add model-visible fields to `update_goal`; the tool still only accepts `complete` or `blocked`. The adapter computes evidence out-of-band and passes it to the runtime so a first failure or mismatched recent blockers cannot be marked as strictly blocked.
+The blocked and completion audits do not add model-visible fields to `update_goal`; the tool still only accepts `complete` or `blocked`. The adapter computes evidence out-of-band and passes it to the runtime so a first failure, mismatched recent blockers, or completion without task evidence cannot silently become terminal.
 
 Other harness adapters are intentionally deferred to separate changes.

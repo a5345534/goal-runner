@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { resolveDefaultStateRoot } from "./state-root.js";
-import type { ContinuationReservation, GoalRecord, GoalStore } from "./types.js";
+import type { ContinuationReservation, GoalLedgerEvent, GoalRecord, GoalStore } from "./types.js";
 
 interface SqliteGoalRow {
   session_key: string;
@@ -28,6 +28,15 @@ interface SqliteReservationRow {
   created_at: string;
   updated_at: string;
   expires_at: string;
+}
+
+interface SqliteLedgerRow {
+  event_id: string;
+  session_key: string;
+  goal_id: string | null;
+  type: GoalLedgerEvent["type"];
+  at: string;
+  details_json: string | null;
 }
 
 export class SQLiteGoalStore implements GoalStore {
@@ -131,6 +140,33 @@ export class SQLiteGoalStore implements GoalStore {
     return Number(result.changes ?? 0);
   }
 
+  async appendLedgerEvent(event: GoalLedgerEvent): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO goal_ledger (event_id, session_key, goal_id, type, at, details_json)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        event.eventId ?? fallbackEventId(event),
+        event.sessionKey,
+        event.goalId ?? null,
+        event.type,
+        event.at,
+        event.details === undefined ? null : JSON.stringify(event.details),
+      );
+  }
+
+  async listLedgerEvents(sessionKey: string, goalId?: string): Promise<GoalLedgerEvent[]> {
+    const rows = goalId === undefined
+      ? this.db
+          .prepare("SELECT * FROM goal_ledger WHERE session_key = ? ORDER BY id ASC")
+          .all(sessionKey) as unknown as SqliteLedgerRow[]
+      : this.db
+          .prepare("SELECT * FROM goal_ledger WHERE session_key = ? AND goal_id = ? ORDER BY id ASC")
+          .all(sessionKey, goalId) as unknown as SqliteLedgerRow[];
+    return rows.map(rowToLedgerEvent);
+  }
+
   close(): void {
     this.db.close();
   }
@@ -162,6 +198,16 @@ export class SQLiteGoalStore implements GoalStore {
         updated_at TEXT NOT NULL,
         expires_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS goal_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id TEXT NOT NULL UNIQUE,
+        session_key TEXT NOT NULL,
+        goal_id TEXT,
+        type TEXT NOT NULL,
+        at TEXT NOT NULL,
+        details_json TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_goal_ledger_session_goal ON goal_ledger(session_key, goal_id, id);
     `);
   }
 }
@@ -194,4 +240,29 @@ function rowToReservation(row: SqliteReservationRow): ContinuationReservation {
     updatedAt: row.updated_at,
     expiresAt: row.expires_at,
   };
+}
+
+function rowToLedgerEvent(row: SqliteLedgerRow): GoalLedgerEvent {
+  return {
+    eventId: row.event_id,
+    sessionKey: row.session_key,
+    goalId: row.goal_id ?? undefined,
+    type: row.type,
+    at: row.at,
+    details: parseDetails(row.details_json),
+  };
+}
+
+function parseDetails(json: string | null): Record<string, unknown> | undefined {
+  if (!json) return undefined;
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function fallbackEventId(event: GoalLedgerEvent): string {
+  return `${event.at}:${event.sessionKey}:${event.goalId ?? "none"}:${event.type}:${Math.random().toString(36).slice(2)}`;
 }

@@ -1,8 +1,11 @@
+import * as fs from "node:fs";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { GoalRuntime, SQLiteGoalStore, parseGoalCommand, renderActiveGoalReminderPrompt, } from "../../core/index.js";
 const EXTENSION_MESSAGE_TYPE = "agent-goal-runtime";
 const HIDDEN_CONTEXT_KIND = "goal_continuation";
+const POST_STOP_ALLOWED_TOOL_SET = new Set(["get_goal", "read", "grep", "find", "ls"]);
+const MEANINGFUL_PROGRESS_TOOL_SET = new Set(["write", "edit", "bash", "read", "grep", "find", "ls"]);
 export default function goalPiExtension(pi) {
     const store = new SQLiteGoalStore();
     let lastCtx;
@@ -37,6 +40,9 @@ export default function goalPiExtension(pi) {
                 ctx.ui?.notify?.("Goal cleared", "info");
             },
             notifyGoalWarning: async (_sessionKey, message) => requireContext(lastCtx).ui?.notify?.(message, "warning"),
+            collectCompletionEvidence: async (goal) => buildCompletionEvidence(requireContext(lastCtx), goal),
+            getCompletionPolicyContext: async (goal) => buildCompletionPolicyContext(requireContext(lastCtx), goal),
+            auditCompletion: completionAuditEnabled() ? heuristicCompletionAudit : undefined,
         },
     });
     pi.registerCommand("goal", {
@@ -174,10 +180,29 @@ export default function goalPiExtension(pi) {
             now: event.timestamp ? new Date(event.timestamp) : undefined,
         });
     });
+    pi.on("tool_call", async (event, ctx) => {
+        lastCtx = ctx;
+        const stop = runtime.getCurrentTurnStop(resolveSessionKey(ctx));
+        const toolName = event.toolName ?? "unknown";
+        if (stop && !POST_STOP_ALLOWED_TOOL_SET.has(toolName)) {
+            return {
+                block: true,
+                reason: `The active goal already stopped in this turn (${stop.reason}). Do not call more write-capable tools; summarize the result and yield to the user.`,
+            };
+        }
+        return;
+    });
     pi.on("tool_execution_end", async (event, ctx) => {
         lastCtx = ctx;
-        await runtime.toolCompleted({ sessionKey: resolveSessionKey(ctx), tokenUsage: readTokenUsage(ctx) });
-        if (event.toolName === "get_goal" || event.toolName === "create_goal" || event.toolName === "update_goal") {
+        const toolName = event.toolName;
+        await runtime.toolCompleted({
+            sessionKey: resolveSessionKey(ctx),
+            tokenUsage: readTokenUsage(ctx),
+            toolName,
+            meaningfulProgress: toolName === undefined ? false : isMeaningfulProgressTool(toolName),
+            progressSummary: toolName,
+        });
+        if (toolName === "get_goal" || toolName === "create_goal" || toolName === "update_goal") {
             // Goal tool handlers already performed semantic state transitions; this hook keeps accounting fresh.
         }
     });
@@ -348,6 +373,122 @@ function normalizeSignature(line) {
         .replace(/\b\d+\b/g, "<num>")
         .replace(/\s+/g, " ")
         .slice(0, 240);
+}
+function completionAuditEnabled() {
+    const value = String(process.env.AGENT_GOAL_COMPLETION_AUDIT ?? process.env.PI_GOAL_COMPLETION_AUDIT ?? "heuristic").toLowerCase();
+    return value !== "0" && value !== "false" && value !== "off" && value !== "disabled";
+}
+function isMeaningfulProgressTool(toolName) {
+    return MEANINGFUL_PROGRESS_TOOL_SET.has(toolName);
+}
+function buildCompletionEvidence(ctx, goal) {
+    const entries = (ctx.sessionManager?.getBranch?.() ?? []);
+    const toolNames = new Set();
+    const commands = [];
+    const verificationSignals = [];
+    for (const entry of entries) {
+        const timestamp = typeof entry.timestamp === "string" ? entry.timestamp : undefined;
+        if (timestamp && timestamp < goal.createdAt)
+            continue;
+        const message = entry.message;
+        if (!message)
+            continue;
+        if (message.role === "assistant") {
+            const content = Array.isArray(message.content) ? message.content : [];
+            for (const block of content) {
+                if (block.type === "toolCall" && typeof block.name === "string") {
+                    toolNames.add(block.name);
+                    const args = block.args;
+                    const command = typeof args?.command === "string" ? args.command : undefined;
+                    if (command) {
+                        commands.push(command);
+                        if (isVerificationCommand(command))
+                            verificationSignals.push(`command:${command}`);
+                    }
+                }
+                if (block.type === "text" && typeof block.text === "string") {
+                    const signal = verificationSignalFromText(block.text);
+                    if (signal)
+                        verificationSignals.push(signal);
+                }
+            }
+            continue;
+        }
+        if (message.role === "toolResult") {
+            const toolName = typeof message.toolName === "string" ? message.toolName : undefined;
+            if (toolName)
+                toolNames.add(toolName);
+            const text = textFromContent(message.content);
+            const signal = verificationSignalFromText(text);
+            if (signal)
+                verificationSignals.push(signal);
+        }
+    }
+    const uniqueCommands = unique(commands).slice(-10);
+    const uniqueSignals = unique(verificationSignals).slice(-20);
+    const uniqueTools = [...toolNames].sort();
+    return {
+        source: "pi-session-transcript",
+        summary: uniqueSignals.length > 0
+            ? `Found ${uniqueSignals.length} verification signal(s) in the Pi transcript.`
+            : `Found ${uniqueTools.length} task tool(s) in the Pi transcript.`,
+        verificationSignals: uniqueSignals,
+        commands: uniqueCommands,
+        toolNames: uniqueTools,
+    };
+}
+function buildCompletionPolicyContext(ctx, goal) {
+    const cwd = ctx.cwd ?? process.cwd();
+    const hasOpenSpec = fs.existsSync(`${cwd}/openspec/project.md`) || fs.existsSync(`${cwd}/openspec/specs`);
+    if (!hasOpenSpec && !/openspec/i.test(goal.objective))
+        return undefined;
+    return {
+        source: "pi-adapter-openspec-policy-context",
+        openspecWorkspaceDetected: hasOpenSpec,
+        guidance: [
+            "If this goal executes an OpenSpec change, completion evidence should include finished tasks and relevant openspec validation.",
+            "If this goal closes or archives a change, completion evidence should include archive-preflight/readiness results.",
+            "OpenSpec remains the planning/specification source of truth; /goal is only the execution persistence layer.",
+        ],
+    };
+}
+function heuristicCompletionAudit(request) {
+    const evidence = request.completionEvidence;
+    const signals = Array.isArray(evidence?.verificationSignals) ? evidence.verificationSignals : [];
+    const toolNames = Array.isArray(evidence?.toolNames) ? evidence.toolNames.filter((value) => typeof value === "string") : [];
+    const commands = Array.isArray(evidence?.commands) ? evidence.commands.filter((value) => typeof value === "string") : [];
+    const hasTaskTool = toolNames.some((toolName) => MEANINGFUL_PROGRESS_TOOL_SET.has(toolName));
+    const hasVerification = signals.length > 0 || commands.some(isVerificationCommand);
+    if (hasVerification || hasTaskTool) {
+        return {
+            approved: true,
+            source: "pi-transcript-heuristic-auditor",
+            summary: hasVerification
+                ? "Completion approved: transcript contains verification evidence."
+                : "Completion approved: transcript contains task-relevant tool evidence.",
+            evidence,
+        };
+    }
+    return {
+        approved: false,
+        source: "pi-transcript-heuristic-auditor",
+        summary: "No task-relevant tool use or verification evidence was found in the Pi transcript for this goal.",
+        report: "Inspect current artifacts, run or cite verification, then request completion again.",
+        evidence,
+    };
+}
+function isVerificationCommand(command) {
+    return /(^|\s)(npm\s+run\s+(check|test|build)|npm\s+test|pnpm\s+(test|build|check)|yarn\s+(test|build|check)|mvn\s+test|gradle\s+test|pytest|go\s+test|cargo\s+test|openspec\s+validate|archive-preflight|tsc|eslint)\b/i.test(command);
+}
+function verificationSignalFromText(text) {
+    const line = text
+        .split(/\r?\n/)
+        .map((value) => value.trim())
+        .find((value) => /(pass(ed)?|valid|success|succeeded|ok|no errors|0 failing|build success|change .* is valid|通過|成功)/i.test(value));
+    return line ? `text:${line.slice(0, 240)}` : undefined;
+}
+function unique(values) {
+    return [...new Set(values)];
 }
 async function startHiddenGoalTurn(pi, ctx, request, startedAttempts) {
     if (startedAttempts.has(request.attemptId)) {

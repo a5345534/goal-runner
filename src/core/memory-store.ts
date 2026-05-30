@@ -1,8 +1,9 @@
-import type { ContinuationReservation, GoalRecord, GoalStore } from "./types.js";
+import type { ContinuationReservation, GoalLedgerEvent, GoalRecord, GoalStore } from "./types.js";
 
 export class MemoryGoalStore implements GoalStore {
   private goals = new Map<string, GoalRecord>();
   private reservations = new Map<string, ContinuationReservation>();
+  private ledger: GoalLedgerEvent[] = [];
 
   async getCurrentGoal(sessionKey: string): Promise<GoalRecord | undefined> {
     const goal = this.goals.get(sessionKey);
@@ -41,4 +42,21 @@ export class MemoryGoalStore implements GoalStore {
     }
     return cleared;
   }
+
+  async appendLedgerEvent(event: GoalLedgerEvent): Promise<void> {
+    this.ledger.push(cloneLedgerEvent(event));
+  }
+
+  async listLedgerEvents(sessionKey: string, goalId?: string): Promise<GoalLedgerEvent[]> {
+    return this.ledger
+      .filter((event) => event.sessionKey === sessionKey && (goalId === undefined || event.goalId === goalId))
+      .map(cloneLedgerEvent);
+  }
+}
+
+function cloneLedgerEvent(event: GoalLedgerEvent): GoalLedgerEvent {
+  return {
+    ...event,
+    details: event.details ? { ...event.details } : undefined,
+  };
 }

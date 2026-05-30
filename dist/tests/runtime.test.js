@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { GoalRuntime, MemoryGoalStore } from "../core/index.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { GoalRuntime, MemoryGoalStore, SQLiteGoalStore } from "../core/index.js";
 test("runtime keeps one current goal per session", async () => {
     const runtime = new GoalRuntime({ store: new MemoryGoalStore() });
     await runtime.createOrReplaceGoal("s1", "first");
@@ -97,6 +100,7 @@ test("active goal starts another hidden continuation after a hidden turn finishe
     await runtime.createOrReplaceGoal("s1", "continue until done");
     assert.equal(requests.length, 1);
     await runtime.turnStarted({ sessionKey: "s1", turnId: "hidden-1" });
+    await runtime.toolCompleted({ sessionKey: "s1", turnId: "hidden-1", toolName: "bash", meaningfulProgress: true });
     await runtime.turnFinished({ sessionKey: "s1", turnId: "hidden-1" }, true);
     assert.equal(requests.length, 2);
     assert.notEqual(requests[0]?.attemptId, requests[1]?.attemptId);
@@ -212,5 +216,81 @@ test("unfinished failed turns do not auto-continue", async () => {
     await runtime.turnFinished({ sessionKey: "s1", turnId: "t1" }, false);
     assert.equal(attempts, 0);
     assert.equal((await runtime.getGoal("s1")).goal?.status, "active");
+});
+test("completed turns without meaningful progress do not auto-continue", async () => {
+    let attempts = 0;
+    const store = new MemoryGoalStore();
+    const runtime = new GoalRuntime({
+        store,
+        callbacks: {
+            readHarnessState: () => ({
+                materialized: true,
+                queuedUserInput: false,
+                queuedTriggerTurn: false,
+                continuationSuppressed: false,
+            }),
+            startHiddenGoalTurn: () => {
+                attempts += 1;
+                return { kind: "started" };
+            },
+        },
+    });
+    await runtime.createOrReplaceGoal("s1", "continue only after progress");
+    assert.equal(attempts, 1);
+    await runtime.turnStarted({ sessionKey: "s1", turnId: "t1" });
+    await runtime.turnFinished({ sessionKey: "s1", turnId: "t1" }, true);
+    assert.equal(attempts, 1);
+    const ledger = await store.listLedgerEvents("s1");
+    assert.equal(ledger.some((event) => event.type === "no_progress_continuation_suppressed"), true);
+});
+test("completion audit rejection keeps goal active and records evidence", async () => {
+    const store = new MemoryGoalStore();
+    const runtime = new GoalRuntime({
+        store,
+        callbacks: {
+            collectCompletionEvidence: () => ({ source: "test", summary: "no tests" }),
+            auditCompletion: () => ({ approved: false, source: "test-auditor", summary: "missing verification" }),
+        },
+    });
+    await runtime.createOrReplaceGoal("s1", "finish with evidence");
+    await runtime.turnStarted({ sessionKey: "s1", turnId: "t1" });
+    const result = await runtime.toolUpdateGoal("s1", "complete");
+    assert.equal(result.goal?.status, "active");
+    assert.match(result.message, /rejected/);
+    assert.equal(runtime.getCurrentTurnStop("s1")?.reason, "completionRejected");
+    const ledger = await store.listLedgerEvents("s1", result.goal?.goalId);
+    assert.equal(ledger.some((event) => event.type === "completion_audit_result" && event.details?.approved === false), true);
+});
+test("completion audit approval marks complete and records terminal event", async () => {
+    const store = new MemoryGoalStore();
+    const runtime = new GoalRuntime({
+        store,
+        callbacks: {
+            collectCompletionEvidence: () => ({ source: "test", verificationSignals: ["npm test passed"] }),
+            auditCompletion: () => ({ approved: true, source: "test-auditor", summary: "verified" }),
+        },
+    });
+    await runtime.createOrReplaceGoal("s1", "finish with evidence");
+    const result = await runtime.toolUpdateGoal("s1", "complete");
+    assert.equal(result.goal?.status, "complete");
+    const ledger = await store.listLedgerEvents("s1", result.goal?.goalId);
+    assert.equal(ledger.some((event) => event.type === "goal_completed"), true);
+});
+test("sqlite store persists ledger events across reopen", async () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-goal-runtime-test-"));
+    const dbPath = join(root, "goals.sqlite");
+    try {
+        const store = new SQLiteGoalStore({ dbPath });
+        const runtime = new GoalRuntime({ store });
+        const created = await runtime.createOrReplaceGoal("s1", "persist ledger");
+        store.close();
+        const reopened = new SQLiteGoalStore({ dbPath });
+        const ledger = await reopened.listLedgerEvents("s1", created.goal?.goalId);
+        assert.equal(ledger.some((event) => event.type === "goal_created"), true);
+        reopened.close();
+    }
+    finally {
+        rmSync(root, { recursive: true, force: true });
+    }
 });
 //# sourceMappingURL=runtime.test.js.map

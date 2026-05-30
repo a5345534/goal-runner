@@ -1,4 +1,4 @@
-import type { ContinuationReservation, GoalRecord, GoalStore } from "./types.js";
+import type { ContinuationReservation, GoalLedgerEvent, GoalRecord, GoalStore } from "./types.js";
 export declare class SQLiteGoalStore implements GoalStore {
     readonly dbPath: string;
     private db;
@@ -13,6 +13,8 @@ export declare class SQLiteGoalStore implements GoalStore {
     saveReservation(reservation: ContinuationReservation): Promise<void>;
     clearReservation(sessionKey: string): Promise<void>;
     clearExpiredReservations(now?: Date): Promise<number>;
+    appendLedgerEvent(event: GoalLedgerEvent): Promise<void>;
+    listLedgerEvents(sessionKey: string, goalId?: string): Promise<GoalLedgerEvent[]>;
     close(): void;
     private migrate;
 }

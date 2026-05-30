@@ -3,15 +3,20 @@ import { parseGoalCommand, validateGoalObjective, type GoalCommand } from "./par
 import { renderBudgetLimitPrompt, renderContinuationPrompt, renderObjectiveUpdatedPrompt } from "./prompts.js";
 import { isAutoContinuableStatus, normalizeGoalStatus } from "./status.js";
 import type {
+  BlockedAuditEvidence,
+  CompletionAuditResult,
   ContinuationReservation,
   GoalAdapterCallbacks,
+  GoalLedgerEvent,
+  GoalLedgerEventType,
   GoalRecord,
   GoalRuntimeConfig,
   GoalStatusInput,
   GoalStore,
   GoalToolResult,
+  GoalTurnStop,
+  GoalTurnStopReason,
   HarnessState,
-  BlockedAuditEvidence,
   HiddenGoalTurnResult,
   TokenUsageSnapshot,
   TurnContext,
@@ -22,6 +27,8 @@ interface ActiveTurnState {
   sessionKey: string;
   startedAt: Date;
   lastTokenTotal?: number;
+  madeMeaningfulProgress: boolean;
+  stopped?: GoalTurnStop;
 }
 
 export class GoalRuntime {
@@ -78,6 +85,15 @@ export class GoalRuntime {
     return { goal, message: goal ? formatGoalSummary(goal) : "No current goal." };
   }
 
+  async listLedgerEvents(sessionKey: string, goalId?: string): Promise<GoalLedgerEvent[]> {
+    return this.store.listLedgerEvents(sessionKey, goalId);
+  }
+
+  getCurrentTurnStop(sessionKey: string): GoalTurnStop | undefined {
+    const stop = this.activeTurns.get(sessionKey)?.stopped;
+    return stop ? { ...stop } : undefined;
+  }
+
   async createOrReplaceGoal(
     sessionKey: string,
     objectiveInput: string,
@@ -114,6 +130,11 @@ export class GoalRuntime {
         };
 
     await this.store.saveGoal(goal);
+    await this.appendLedger(existing ? "goal_replaced" : "goal_created", sessionKey, goal.goalId, {
+      objective,
+      tokenBudget: goal.tokenBudget,
+      previousGoalId: existing?.goalId,
+    });
     await this.store.clearReservation(sessionKey);
     await this.callbacks.notifyGoalUpdated?.(goal);
     await this.maybeContinueIfIdle(sessionKey);
@@ -138,6 +159,11 @@ export class GoalRuntime {
       goalTurnsSinceAuditReset: 0,
     });
     await this.store.saveGoal(updated);
+    await this.appendLedger("goal_edited", sessionKey, updated.goalId, {
+      objective: updated.objective,
+      tokenBudget: updated.tokenBudget,
+      status: updated.status,
+    });
     await this.store.clearReservation(sessionKey);
     await this.callbacks.notifyGoalUpdated?.(updated);
     await this.callbacks.injectSteeringContext?.({
@@ -154,7 +180,9 @@ export class GoalRuntime {
     const goal = await this.requireGoal(sessionKey);
     await this.accountUsage(sessionKey);
     const updated = await this.setGoalStatus(goal, "paused");
+    await this.appendLedger("goal_paused", sessionKey, updated.goalId);
     await this.store.clearReservation(sessionKey);
+    this.markTurnStopped(sessionKey, "pause", updated.goalId, "Goal paused.");
     return { goal: updated, message: "Goal paused." };
   }
 
@@ -169,6 +197,7 @@ export class GoalRuntime {
       goalTurnsSinceAuditReset: accounted.status === "blocked" ? 0 : accounted.goalTurnsSinceAuditReset,
     });
     await this.store.saveGoal(updated);
+    await this.appendLedger("goal_resumed", sessionKey, updated.goalId, { status: updated.status });
     await this.store.clearReservation(sessionKey);
     await this.callbacks.notifyGoalUpdated?.(updated);
     await this.maybeContinueIfIdle(sessionKey);
@@ -179,8 +208,10 @@ export class GoalRuntime {
   }
 
   async clearGoal(sessionKey: string): Promise<GoalToolResult> {
+    const existing = await this.store.getCurrentGoal(sessionKey);
     await this.store.clearGoal(sessionKey);
     this.activeTurns.delete(sessionKey);
+    await this.appendLedger("goal_cleared", sessionKey, existing?.goalId);
     await this.callbacks.notifyGoalCleared?.(sessionKey);
     return { message: "Goal cleared." };
   }
@@ -204,8 +235,9 @@ export class GoalRuntime {
     if (status !== "complete" && status !== "blocked") {
       throw new Error("update_goal only accepts status complete or blocked");
     }
-    const goal = await this.requireGoal(sessionKey);
+    await this.requireGoal(sessionKey);
     await this.accountUsage(sessionKey);
+    const goal = await this.requireGoal(sessionKey);
 
     if (status === "blocked") {
       if (goal.goalTurnsSinceAuditReset < this.config.blockedTurnsThreshold) {
@@ -220,11 +252,27 @@ export class GoalRuntime {
           `blocked requires matching blocker evidence for at least ${this.config.blockedTurnsThreshold} consecutive goal turns${detail}`,
         );
       }
+      const updated = await this.setGoalStatus(goal, "blocked");
+      await this.appendLedger("goal_blocked", sessionKey, updated.goalId, { evidence });
+      await this.store.clearReservation(sessionKey);
+      this.markTurnStopped(sessionKey, "blocked", updated.goalId, "Goal marked blocked.");
+      return { goal: updated, message: "Goal marked blocked." };
     }
 
-    const updated = await this.setGoalStatus(goal, status);
+    const audit = await this.runCompletionAuditIfConfigured(goal);
+    if (audit && !audit.approved) {
+      await this.store.clearReservation(sessionKey);
+      const message = audit.summary || audit.report || "Completion audit did not approve the goal.";
+      this.markTurnStopped(sessionKey, "completionRejected", goal.goalId, message);
+      await this.callbacks.notifyGoalWarning?.(sessionKey, `Goal completion rejected: ${message}`);
+      return { goal, message: `Goal completion rejected: ${message}` };
+    }
+
+    const updated = await this.setGoalStatus(goal, "complete");
+    await this.appendLedger("goal_completed", sessionKey, updated.goalId, { audit });
     await this.store.clearReservation(sessionKey);
-    return { goal: updated, message: status === "complete" ? "Goal marked complete." : "Goal marked blocked." };
+    this.markTurnStopped(sessionKey, "complete", updated.goalId, "Goal marked complete.");
+    return { goal: updated, message: "Goal marked complete." };
   }
 
   async turnStarted(context: TurnContext): Promise<void> {
@@ -235,8 +283,10 @@ export class GoalRuntime {
       turnId: context.turnId,
       startedAt: now,
       lastTokenTotal: context.tokenUsage?.totalTokens,
+      madeMeaningfulProgress: false,
     });
     await this.store.clearReservation(context.sessionKey);
+    await this.appendLedger("turn_started", context.sessionKey, goal?.goalId, { turnId: context.turnId }, now);
 
     if (goal && goal.status === "active") {
       await this.store.saveGoal({
@@ -250,11 +300,28 @@ export class GoalRuntime {
   async toolCompleted(context: TurnContext): Promise<void> {
     await this.accountUsage(context.sessionKey, context.tokenUsage);
     const goal = await this.store.getCurrentGoal(context.sessionKey);
-    if (!goal || goal.status !== "active" || goal.tokenBudget === undefined) return;
+    if (!goal) return;
+
+    const meaningfulProgress = context.meaningfulProgress ?? true;
+    if (meaningfulProgress && goal.status === "active") {
+      this.markMeaningfulProgress(context.sessionKey);
+      await this.appendLedger("meaningful_progress", context.sessionKey, goal.goalId, {
+        turnId: context.turnId,
+        toolName: context.toolName,
+        summary: context.progressSummary,
+      });
+    }
+
+    if (goal.status !== "active" || goal.tokenBudget === undefined) return;
     if (goal.tokensUsed < goal.tokenBudget) return;
 
     const updated = await this.setGoalStatus(goal, "budgetLimited");
+    await this.appendLedger("goal_budget_limited", context.sessionKey, updated.goalId, {
+      tokensUsed: updated.tokensUsed,
+      tokenBudget: updated.tokenBudget,
+    });
     await this.store.clearReservation(context.sessionKey);
+    this.markTurnStopped(context.sessionKey, "budgetLimited", updated.goalId, "Goal token budget exhausted.");
     await this.callbacks.injectSteeringContext?.({
       sessionKey: context.sessionKey,
       goalId: updated.goalId,
@@ -265,11 +332,24 @@ export class GoalRuntime {
 
   async turnFinished(context: TurnContext, completed = true): Promise<void> {
     await this.accountUsage(context.sessionKey, context.tokenUsage);
+    const turn = this.activeTurns.get(context.sessionKey);
     this.activeTurns.delete(context.sessionKey);
-    if (!completed) return;
     const goal = await this.store.getCurrentGoal(context.sessionKey);
+    await this.appendLedger("turn_finished", context.sessionKey, goal?.goalId, {
+      turnId: context.turnId ?? turn?.turnId,
+      completed,
+      madeMeaningfulProgress: turn?.madeMeaningfulProgress ?? false,
+      stopped: turn?.stopped,
+    });
+    if (!completed || turn?.stopped) return;
     if (goal && goal.status === "active") {
-      await this.maybeContinueIfIdle(context.sessionKey);
+      if (turn?.madeMeaningfulProgress) {
+        await this.maybeContinueIfIdle(context.sessionKey);
+      } else {
+        await this.appendLedger("no_progress_continuation_suppressed", context.sessionKey, goal.goalId, {
+          turnId: context.turnId ?? turn?.turnId,
+        });
+      }
     }
   }
 
@@ -286,8 +366,10 @@ export class GoalRuntime {
     const goal = await this.requireGoal(sessionKey);
     await this.accountUsage(sessionKey);
     const updated = await this.setGoalStatus(goal, "usageLimited");
+    await this.appendLedger("goal_usage_limited", sessionKey, updated.goalId);
     await this.store.clearReservation(sessionKey);
     this.activeTurns.delete(sessionKey);
+    this.markTurnStopped(sessionKey, "usageLimited", updated.goalId, "Goal stopped because a usage limit was reached.");
     return { goal: updated, message: "Goal stopped because a usage limit was reached." };
   }
 
@@ -327,12 +409,20 @@ export class GoalRuntime {
       expiresAt: this.nowIso(new Date(now.getTime() + this.config.continuationReservationTtlMs)),
     };
     await this.store.saveReservation(reservation);
+    await this.appendLedger("continuation_requested", sessionKey, goal.goalId, {
+      attemptId: reservation.attemptId,
+      goalUpdatedAt: reservation.goalUpdatedAt,
+    }, now);
 
     let lastResult: HiddenGoalTurnResult = { kind: "fatalFailure", error: "not attempted" };
     for (let attempt = 1; attempt <= this.config.maxContinuationAttempts; attempt += 1) {
       const latestGoal = await this.store.getCurrentGoal(sessionKey);
       if (!latestGoal || latestGoal.goalId !== reservation.goalId || latestGoal.updatedAt !== reservation.goalUpdatedAt || latestGoal.status !== "active") {
         await this.store.clearReservation(sessionKey);
+        await this.appendLedger("continuation_skipped", sessionKey, reservation.goalId, {
+          attemptId: reservation.attemptId,
+          reason: "goal changed before continuation launch",
+        });
         return { kind: "skipped", reason: "goal changed before continuation launch" };
       }
 
@@ -340,6 +430,10 @@ export class GoalRuntime {
       const latestIneligible = explainHarnessIneligible(latestHarnessState);
       if (latestIneligible) {
         await this.store.clearReservation(sessionKey);
+        await this.appendLedger("continuation_skipped", sessionKey, reservation.goalId, {
+          attemptId: reservation.attemptId,
+          reason: latestIneligible,
+        });
         return { kind: "skipped", reason: latestIneligible };
       }
 
@@ -363,20 +457,40 @@ export class GoalRuntime {
           hostTurnId: lastResult.hostTurnId,
           updatedAt: this.nowIso(),
         });
+        await this.appendLedger(lastResult.kind === "started" ? "continuation_started" : "continuation_already_started", sessionKey, reservation.goalId, {
+          attemptId: reservation.attemptId,
+          attempt,
+          hostTurnId: lastResult.hostTurnId,
+        });
         return lastResult;
       }
 
       if (lastResult.kind === "skipped") {
         await this.store.clearReservation(sessionKey);
+        await this.appendLedger("continuation_skipped", sessionKey, reservation.goalId, {
+          attemptId: reservation.attemptId,
+          attempt,
+          reason: lastResult.reason,
+        });
         return lastResult;
       }
 
       if (lastResult.kind === "fatalFailure") {
         await this.store.clearReservation(sessionKey);
+        await this.appendLedger("continuation_fatal_failure", sessionKey, reservation.goalId, {
+          attemptId: reservation.attemptId,
+          attempt,
+          error: lastResult.error,
+        });
         await this.callbacks.notifyGoalWarning?.(sessionKey, `Goal continuation failed: ${lastResult.error}`);
         return lastResult;
       }
 
+      await this.appendLedger("continuation_retryable_failure", sessionKey, reservation.goalId, {
+        attemptId: reservation.attemptId,
+        attempt,
+        error: lastResult.error,
+      });
       if (attempt < this.config.maxContinuationAttempts) {
         await delay(backoffMs(this.config.retryBaseDelayMs, this.config.retryJitterMs, attempt));
       }
@@ -443,6 +557,60 @@ export class GoalRuntime {
         continuationSuppressed: false,
       }
     );
+  }
+
+  private async runCompletionAuditIfConfigured(goal: GoalRecord): Promise<CompletionAuditResult | undefined> {
+    await this.appendLedger("completion_requested", goal.sessionKey, goal.goalId);
+    if (!this.callbacks.auditCompletion) return undefined;
+
+    const completionEvidence = await this.callbacks.collectCompletionEvidence?.(goal);
+    const policyContext = await this.callbacks.getCompletionPolicyContext?.(goal);
+    const ledgerEvents = await this.store.listLedgerEvents(goal.sessionKey, goal.goalId);
+    const result = await this.callbacks.auditCompletion({ goal, ledgerEvents, completionEvidence, policyContext });
+    await this.appendLedger("completion_audit_result", goal.sessionKey, goal.goalId, {
+      approved: result.approved,
+      summary: result.summary,
+      report: result.report,
+      source: result.source,
+      evidence: result.evidence,
+      completionEvidence,
+      policyContext,
+    });
+    return result;
+  }
+
+  private markMeaningfulProgress(sessionKey: string): void {
+    const turn = this.activeTurns.get(sessionKey);
+    if (turn) turn.madeMeaningfulProgress = true;
+  }
+
+  private markTurnStopped(sessionKey: string, reason: GoalTurnStopReason, goalId?: string, message?: string): void {
+    const turn = this.activeTurns.get(sessionKey);
+    if (!turn) return;
+    turn.stopped = {
+      sessionKey,
+      goalId,
+      reason,
+      at: this.nowIso(),
+      message,
+    };
+  }
+
+  private async appendLedger(
+    type: GoalLedgerEventType,
+    sessionKey: string,
+    goalId?: string,
+    details?: Record<string, unknown>,
+    date = this.config.now(),
+  ): Promise<void> {
+    await this.store.appendLedgerEvent({
+      eventId: this.config.randomId(),
+      sessionKey,
+      goalId,
+      type,
+      at: this.nowIso(date),
+      details,
+    });
   }
 
   private nowIso(date = this.config.now()): string {

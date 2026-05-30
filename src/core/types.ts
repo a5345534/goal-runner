@@ -36,6 +36,12 @@ export interface TurnContext {
   tokenUsage?: TokenUsageSnapshot;
   hiddenGoalAttemptId?: string;
   now?: Date;
+  /** Host tool name for tool-completion events, when available. */
+  toolName?: string;
+  /** Whether this event materially progressed the current goal. Defaults to true for generic tool-completed calls. */
+  meaningfulProgress?: boolean;
+  /** Optional human/debug summary for progress ledger entries. */
+  progressSummary?: string;
 }
 
 export interface HarnessState {
@@ -71,6 +77,89 @@ export interface GoalSteeringContextRequest {
   renderedPrompt: string;
 }
 
+export type GoalLedgerEventType =
+  | "goal_created"
+  | "goal_replaced"
+  | "goal_edited"
+  | "goal_paused"
+  | "goal_resumed"
+  | "goal_cleared"
+  | "turn_started"
+  | "turn_finished"
+  | "meaningful_progress"
+  | "no_progress_continuation_suppressed"
+  | "continuation_requested"
+  | "continuation_started"
+  | "continuation_already_started"
+  | "continuation_skipped"
+  | "continuation_retryable_failure"
+  | "continuation_fatal_failure"
+  | "completion_requested"
+  | "completion_audit_result"
+  | "goal_completed"
+  | "goal_blocked"
+  | "goal_budget_limited"
+  | "goal_usage_limited";
+
+export interface GoalLedgerEvent {
+  eventId?: string;
+  sessionKey: string;
+  goalId?: string;
+  type: GoalLedgerEventType;
+  at: string;
+  details?: Record<string, unknown>;
+}
+
+export interface GoalDecisionEvidence {
+  /** Where this evidence came from, e.g. pi-session-transcript, openspec-policy, auditor. */
+  source: string;
+  /** Human-readable summary safe to show in status/completion output. */
+  summary?: string;
+  /** Verification signals such as commands, passed checks, or inspected artifacts. */
+  verificationSignals?: string[];
+  /** Relevant command lines when the adapter can derive them. */
+  commands?: string[];
+  /** Relevant file/artifact paths when the adapter can derive them. */
+  artifacts?: string[];
+  /** Extra adapter-specific evidence. */
+  [key: string]: unknown;
+}
+
+export interface CompletionAuditRequest {
+  goal: GoalRecord;
+  ledgerEvents: GoalLedgerEvent[];
+  completionEvidence?: GoalDecisionEvidence;
+  policyContext?: Record<string, unknown> | string;
+}
+
+export interface CompletionAuditResult {
+  approved: boolean;
+  /** Short verdict summary. */
+  summary?: string;
+  /** Detailed auditor report, if any. */
+  report?: string;
+  /** Source of the verdict, e.g. pi-independent-auditor, heuristic, host-policy. */
+  source: string;
+  evidence?: GoalDecisionEvidence | Record<string, unknown>;
+}
+
+export type GoalTurnStopReason =
+  | "complete"
+  | "blocked"
+  | "completionRejected"
+  | "pause"
+  | "clear"
+  | "budgetLimited"
+  | "usageLimited";
+
+export interface GoalTurnStop {
+  sessionKey: string;
+  goalId?: string;
+  reason: GoalTurnStopReason;
+  at: string;
+  message?: string;
+}
+
 export interface GoalAdapterCallbacks {
   resolveSessionKey?: () => Promise<string> | string;
   readHarnessState?: (sessionKey: string) => Promise<HarnessState> | HarnessState;
@@ -79,6 +168,9 @@ export interface GoalAdapterCallbacks {
   notifyGoalUpdated?: (goal: GoalRecord) => Promise<void> | void;
   notifyGoalCleared?: (sessionKey: string) => Promise<void> | void;
   notifyGoalWarning?: (sessionKey: string, message: string) => Promise<void> | void;
+  collectCompletionEvidence?: (goal: GoalRecord) => Promise<GoalDecisionEvidence | undefined> | GoalDecisionEvidence | undefined;
+  getCompletionPolicyContext?: (goal: GoalRecord) => Promise<Record<string, unknown> | string | undefined> | Record<string, unknown> | string | undefined;
+  auditCompletion?: (request: CompletionAuditRequest) => Promise<CompletionAuditResult> | CompletionAuditResult;
 }
 
 export interface ContinuationReservation {
@@ -102,6 +194,8 @@ export interface GoalStore {
   saveReservation(reservation: ContinuationReservation): Promise<void>;
   clearReservation(sessionKey: string): Promise<void>;
   clearExpiredReservations(now?: Date): Promise<number>;
+  appendLedgerEvent(event: GoalLedgerEvent): Promise<void>;
+  listLedgerEvents(sessionKey: string, goalId?: string): Promise<GoalLedgerEvent[]>;
   close?(): Promise<void> | void;
 }
 
@@ -125,6 +219,8 @@ export interface BlockedAuditEvidence {
   blockerSignature?: string;
   /** Human-readable explanation for diagnostics/rejections. */
   reason?: string;
+  /** Suggested next user/system action, if the adapter can derive it. */
+  suggestedAction?: string;
   /** Where the evidence came from, e.g. pi-session-transcript. */
   source: string;
 }

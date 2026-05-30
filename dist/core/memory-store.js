@@ -1,6 +1,7 @@
 export class MemoryGoalStore {
     goals = new Map();
     reservations = new Map();
+    ledger = [];
     async getCurrentGoal(sessionKey) {
         const goal = this.goals.get(sessionKey);
         return goal ? { ...goal } : undefined;
@@ -32,5 +33,19 @@ export class MemoryGoalStore {
         }
         return cleared;
     }
+    async appendLedgerEvent(event) {
+        this.ledger.push(cloneLedgerEvent(event));
+    }
+    async listLedgerEvents(sessionKey, goalId) {
+        return this.ledger
+            .filter((event) => event.sessionKey === sessionKey && (goalId === undefined || event.goalId === goalId))
+            .map(cloneLedgerEvent);
+    }
+}
+function cloneLedgerEvent(event) {
+    return {
+        ...event,
+        details: event.details ? { ...event.details } : undefined,
+    };
 }
 //# sourceMappingURL=memory-store.js.map
