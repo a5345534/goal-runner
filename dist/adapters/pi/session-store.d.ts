@@ -1,4 +1,4 @@
-import type { ContinuationReservation, GoalLedgerEvent, GoalRecord, GoalStore } from "../../core/index.js";
+import type { ContinuationReservation, GoalLedgerEvent, GoalRecord, GoalSessionMetadata, GoalStore, GoalSummary, WorkspaceProfile } from "../../core/index.js";
 export declare const PI_GOAL_SESSION_ENTRY_TYPE = "agent-goal-runtime-state";
 export declare const PI_GOAL_SESSION_ENTRY_VERSION = 1;
 export type PiGoalSessionEntryData = {
@@ -30,6 +30,23 @@ export type PiGoalSessionEntryData = {
     goalId?: string;
     event: GoalLedgerEvent;
     at: string;
+} | {
+    version: 1;
+    kind: "goal_session_metadata";
+    sessionKey: string;
+    goalId: string;
+    metadata: GoalSessionMetadata;
+    at: string;
+} | {
+    version: 1;
+    kind: "workspace_profile";
+    profile: WorkspaceProfile;
+    at: string;
+} | {
+    version: 1;
+    kind: "workspace_profile_removed";
+    name: string;
+    at: string;
 };
 export interface PiSessionGoalMirrorStoreOptions {
     now?: () => Date;
@@ -57,6 +74,13 @@ export declare class PiSessionGoalMirrorStore implements GoalStore {
     clearExpiredReservations(now?: Date): Promise<number>;
     appendLedgerEvent(event: GoalLedgerEvent): Promise<void>;
     listLedgerEvents(sessionKey: string, goalId?: string): Promise<GoalLedgerEvent[]>;
+    saveGoalSessionMetadata(metadata: GoalSessionMetadata): Promise<void>;
+    getGoalSessionMetadata(sessionKey: string): Promise<GoalSessionMetadata | undefined>;
+    listGoalSummaries(): Promise<GoalSummary[]>;
+    saveWorkspaceProfile(profile: WorkspaceProfile): Promise<void>;
+    getWorkspaceProfile(name: string): Promise<WorkspaceProfile | undefined>;
+    listWorkspaceProfiles(): Promise<WorkspaceProfile[]>;
+    deleteWorkspaceProfile(name: string): Promise<boolean>;
     close(): Promise<void> | void;
     private mirror;
     private nowIso;

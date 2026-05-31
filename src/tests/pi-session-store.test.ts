@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MemoryGoalStore, type GoalLedgerEvent, type GoalRecord } from "../core/index.js";
+import { MemoryGoalStore, type GoalLedgerEvent, type GoalRecord, type GoalSessionMetadata, type WorkspaceProfile } from "../core/index.js";
 import {
   PI_GOAL_SESSION_ENTRY_TYPE,
   PiSessionGoalMirrorStore,
@@ -90,4 +90,35 @@ test("mirror append failures do not fail canonical store writes", async () => {
   await store.saveGoal(goal);
 
   assert.deepEqual(await store.getCurrentGoal("pi:s1"), goal);
+});
+
+test("Pi session mirror records goal metadata and workspace profiles", async () => {
+  const entries: PiGoalSessionEntryData[] = [];
+  const store = makeStore(entries);
+  const metadata: GoalSessionMetadata = {
+    sessionKey: "pi:goal",
+    goalId: "g1",
+    originSessionKey: "pi:controller",
+    executionWorkspace: "/workspace",
+    workspaceStatus: "configured",
+    branch: "feat/a",
+    branchVerificationStatus: "verified",
+    createdAt: fixedNow.toISOString(),
+    updatedAt: fixedNow.toISOString(),
+  };
+  const profile: WorkspaceProfile = {
+    name: "prepared",
+    path: "/workspace",
+    kind: "git",
+    branch: "feat/a",
+    createdAt: fixedNow.toISOString(),
+    updatedAt: fixedNow.toISOString(),
+  };
+
+  await store.saveGoalSessionMetadata(metadata);
+  await store.saveWorkspaceProfile(profile);
+  await store.deleteWorkspaceProfile("prepared");
+
+  assert.deepEqual(await store.getGoalSessionMetadata("pi:goal"), metadata);
+  assert.deepEqual(entries.map((entry) => entry.kind), ["goal_session_metadata", "workspace_profile", "workspace_profile_removed"]);
 });

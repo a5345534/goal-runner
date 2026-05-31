@@ -63,6 +63,39 @@ export class PiSessionGoalMirrorStore {
     listLedgerEvents(sessionKey, goalId) {
         return this.primary.listLedgerEvents(sessionKey, goalId);
     }
+    async saveGoalSessionMetadata(metadata) {
+        await this.primary.saveGoalSessionMetadata(metadata);
+        this.mirror({
+            version: 1,
+            kind: "goal_session_metadata",
+            sessionKey: metadata.sessionKey,
+            goalId: metadata.goalId,
+            metadata,
+            at: this.nowIso(),
+        });
+    }
+    getGoalSessionMetadata(sessionKey) {
+        return this.primary.getGoalSessionMetadata(sessionKey);
+    }
+    listGoalSummaries() {
+        return this.primary.listGoalSummaries();
+    }
+    async saveWorkspaceProfile(profile) {
+        await this.primary.saveWorkspaceProfile(profile);
+        this.mirror({ version: 1, kind: "workspace_profile", profile, at: this.nowIso() });
+    }
+    getWorkspaceProfile(name) {
+        return this.primary.getWorkspaceProfile(name);
+    }
+    listWorkspaceProfiles() {
+        return this.primary.listWorkspaceProfiles();
+    }
+    async deleteWorkspaceProfile(name) {
+        const deleted = await this.primary.deleteWorkspaceProfile(name);
+        if (deleted)
+            this.mirror({ version: 1, kind: "workspace_profile_removed", name, at: this.nowIso() });
+        return deleted;
+    }
     close() {
         return this.primary.close?.();
     }
@@ -95,18 +128,26 @@ function isPiGoalSessionEntryData(value) {
     const record = value;
     if (record.version !== PI_GOAL_SESSION_ENTRY_VERSION || typeof record.kind !== "string")
         return false;
-    if (typeof record.sessionKey !== "string" || typeof record.at !== "string")
+    if ("sessionKey" in record && typeof record.sessionKey !== "string")
+        return false;
+    if ("at" in record && typeof record.at !== "string")
         return false;
     switch (record.kind) {
         case "goal_snapshot":
-            return isRecord(record.goal);
+            return typeof record.sessionKey === "string" && isRecord(record.goal);
         case "goal_cleared":
         case "reservation_cleared":
-            return true;
+            return typeof record.sessionKey === "string" && typeof record.at === "string";
         case "reservation_snapshot":
-            return isRecord(record.reservation);
+            return typeof record.sessionKey === "string" && isRecord(record.reservation);
         case "ledger_event":
-            return isRecord(record.event);
+            return typeof record.sessionKey === "string" && isRecord(record.event);
+        case "goal_session_metadata":
+            return typeof record.sessionKey === "string" && typeof record.goalId === "string" && isRecord(record.metadata);
+        case "workspace_profile":
+            return isRecord(record.profile) && typeof record.at === "string";
+        case "workspace_profile_removed":
+            return typeof record.name === "string" && typeof record.at === "string";
         default:
             return false;
     }

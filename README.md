@@ -75,22 +75,27 @@ pi install git:github.com/a5345534/agent-goal-runtime@v0.1.0
 The Pi bridge registers:
 
 - `/goal`
-- `/goal <objective>`
-- `/goal --tokens 100k <objective>`
-- `/goal edit`
-- `/goal edit --tokens 250k <objective>`
-- `/goal pause`
-- `/goal resume`
-- `/goal clear`
+- `/goal --workspace <path-or-profile> --branch <branch> <objective>`
+- `/goal --workspace <path-or-profile> --ref <ref> <objective>`
+- `/goal --tokens 100k --workspace <path-or-profile> --branch <branch> <objective>`
+- `/goal workspace add <name> --path <path> [--branch <branch>|--ref <ref>]`
+- `/goal workspace list|show|remove`
+- `/goal list`
+- `/goal status|monitor|pause|resume|clear <goal-ref>`
+- `/goal edit <goal-ref> <objective>`
+- `/goal budget <goal-ref> <token-budget>`
+- session-local legacy `/goal edit`, `/goal pause`, `/goal resume`, `/goal clear`
 - `get_goal`
 - `create_goal`
 - `update_goal`
 
 It deliberately does **not** register `goal_complete`, `pause_goal`, or `abort_goal`; completion remains `update_goal({"status":"complete"})`.
 
-`/goal --tokens <budget> ...` accepts positive numbers with optional `k` or `m` suffixes, for example `100k` or `1.5m`. Bare `/goal` shows the objective, status, elapsed time, token usage/budget, goal-turn count, and currently useful subcommands. The Pi status line uses compact status strings such as `🎯 active 18k/100k`, `🎯 paused`, `🎯 blocked`, `🎯 budget 100k/100k`, or `🎯 complete`.
+`/goal --tokens <budget> ...` accepts positive numbers with optional `k` or `m` suffixes, for example `100k` or `1.5m`. New Pi goals require an explicit execution workspace binding. Git-backed workspaces also require an explicit branch/ref binding, either inline or supplied by a named workspace profile. The adapter validates the configured workspace with read-only filesystem/git inspection and refuses missing, inaccessible, non-git branch/ref, branch/ref-mismatched, or host-policy-disallowed bindings; it does not create/delete worktrees, create branches, or switch branches. Set `AGENT_GOAL_ALLOWED_WORKSPACE_ROOTS` to a colon-separated list of allowed roots (semicolon-separated on Windows) to restrict eligible execution workspaces.
 
-Hidden continuation is implemented with Pi custom hidden messages using `pi.sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })`, guarded by runtime continuation reservations and adapter-side `attemptId` idempotency. The Pi bridge keeps the portable SQLite store canonical and mirrors goal snapshots, reservations, clears, and ledger events into Pi custom session entries (`agent-goal-runtime-state`) so Pi session history can carry host-native goal traces without becoming mandatory storage for non-Pi adapters. While a goal is active, the Pi bridge also injects an ordinary-turn reminder that preserves the full objective as untrusted user-provided task data and explicitly keeps system/developer/workspace/tool policy above the goal. If Pi reports a goal turn ending with `aborted` or `error`, the bridge pauses the goal and requires `/goal resume` before automatic continuation resumes. When the failed turn includes partial assistant text or tool-call traces, the bridge preserves a hidden recovery context that treats the excerpt as untrusted transcript evidence for the later resume. Queued hidden continuations carry an adapter marker with goal id, observed update timestamp, and attempt id. Stale continuations are rewritten into non-runnable bookkeeping, and older duplicate continuations for the same active goal are superseded so only the latest matching continuation remains runnable.
+Bare `/goal` shows the current session's objective, status, elapsed time, token usage/budget, goal-turn count, and currently useful subcommands. `/goal list` lists recent materialized goals from the portable registry, including legacy session-bound goals. Targeted commands resolve full or short goal ids and reject ambiguous prefixes. The Pi status line uses compact status strings such as `🎯 active 18k/100k`, `🎯 paused`, `🎯 blocked`, `🎯 budget 100k/100k`, or `🎯 complete`.
+
+Hidden continuation is implemented with Pi custom hidden messages using `pi.sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })`, guarded by runtime continuation reservations and adapter-side `attemptId` idempotency. The Pi bridge keeps the portable SQLite store canonical and mirrors goal snapshots, reservations, metadata, workspace profiles, clears, and ledger events into Pi custom session entries (`agent-goal-runtime-state`) so Pi session history can carry host-native goal traces without becoming mandatory storage for non-Pi adapters. While a goal is active, the Pi bridge also injects an ordinary-turn reminder that preserves the full objective as untrusted user-provided task data and explicitly keeps system/developer/workspace/tool policy above the goal. If Pi reports a goal turn ending with `aborted` or `error`, the bridge pauses the goal and requires `/goal resume` before automatic continuation resumes. When the failed turn includes partial assistant text or tool-call traces, the bridge preserves a hidden recovery context that treats the excerpt as untrusted transcript evidence for the later resume. Queued hidden continuations carry an adapter marker with goal id, observed update timestamp, and attempt id. Stale continuations are rewritten into non-runnable bookkeeping, and older duplicate continuations for the same active goal are superseded so only the latest matching continuation remains runnable.
 
 Automatic continuation is progress-gated: a completed turn only queues another hidden continuation when the adapter reports meaningful progress such as task-relevant read/write/edit/bash/test activity. Pure chat, repeated status checks, or rejected completion attempts leave the goal active but return control to the user instead of spinning.
 

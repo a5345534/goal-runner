@@ -186,6 +186,66 @@ export interface ContinuationReservation {
   expiresAt: string;
 }
 
+export type WorkspaceStatus = "configured" | "missing" | "inaccessible" | "notAllowed" | "legacy" | "notConfigured";
+export type BranchVerificationStatus = "verified" | "mismatch" | "notGit" | "notApplicable" | "unknown";
+export type WorkspaceProfileKind = "git" | "nonGit";
+
+export interface GoalSessionMetadata {
+  sessionKey: string;
+  goalId: string;
+  originSessionKey?: string;
+  executionWorkspace?: string;
+  workspaceStatus?: WorkspaceStatus;
+  branch?: string;
+  ref?: string;
+  branchVerificationStatus?: BranchVerificationStatus;
+  sessionFile?: string;
+  sessionName?: string;
+  legacySessionBound?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GoalSummary {
+  sessionKey: string;
+  goalId: string;
+  shortGoalId: string;
+  objective: string;
+  objectiveSummary: string;
+  status: GoalStatus;
+  activityState?: string;
+  tokenBudget?: number;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: string;
+  updatedAt: string;
+  lastActivityAt: string;
+  originSessionKey?: string;
+  executionWorkspace?: string;
+  workspaceStatus?: WorkspaceStatus;
+  branch?: string;
+  ref?: string;
+  branchVerificationStatus?: BranchVerificationStatus;
+  sessionFile?: string;
+  sessionName?: string;
+  legacySessionBound?: boolean;
+}
+
+export type GoalReferenceResolution =
+  | { kind: "found"; goal: GoalSummary }
+  | { kind: "notFound"; reference: string }
+  | { kind: "ambiguous"; reference: string; matches: GoalSummary[] };
+
+export interface WorkspaceProfile {
+  name: string;
+  path: string;
+  kind: WorkspaceProfileKind;
+  branch?: string;
+  ref?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface GoalStore {
   getCurrentGoal(sessionKey: string): Promise<GoalRecord | undefined>;
   saveGoal(goal: GoalRecord): Promise<void>;
@@ -196,6 +256,13 @@ export interface GoalStore {
   clearExpiredReservations(now?: Date): Promise<number>;
   appendLedgerEvent(event: GoalLedgerEvent): Promise<void>;
   listLedgerEvents(sessionKey: string, goalId?: string): Promise<GoalLedgerEvent[]>;
+  saveGoalSessionMetadata(metadata: GoalSessionMetadata): Promise<void>;
+  getGoalSessionMetadata(sessionKey: string): Promise<GoalSessionMetadata | undefined>;
+  listGoalSummaries(): Promise<GoalSummary[]>;
+  saveWorkspaceProfile(profile: WorkspaceProfile): Promise<void>;
+  getWorkspaceProfile(name: string): Promise<WorkspaceProfile | undefined>;
+  listWorkspaceProfiles(): Promise<WorkspaceProfile[]>;
+  deleteWorkspaceProfile(name: string): Promise<boolean>;
   close?(): Promise<void> | void;
 }
 

@@ -15,7 +15,8 @@
   "exports": {
     ".": "./dist/core/index.js",
     "./pi": "./dist/adapters/pi/index.js",
-    "./pi/session-store": "./dist/adapters/pi/session-store.js"
+    "./pi/session-store": "./dist/adapters/pi/session-store.js",
+    "./pi/workspace": "./dist/adapters/pi/workspace.js"
   },
   "files": [
     "dist",

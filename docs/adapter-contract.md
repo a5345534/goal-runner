@@ -13,8 +13,10 @@ A full adapter connects the portable runtime to a host harness.
 7. Show visible goal update/clear/status feedback.
 8. Classify meaningful progress so automatic continuation does not loop after pure chat/status turns.
 9. Enforce same-turn post-stop tool guarding where the host can intercept tool calls.
-10. Optionally provide a completion auditor behind `update_goal({"status":"complete"})`.
-11. Provide a smoke/conformance report.
+10. Persist goal-session metadata and expose goal registry/listing/target-resolution UX without adding model-visible cross-goal tools.
+11. For harnesses that support goal-owned sessions, bind each new execution session to an explicit prepared workspace and verify branch/ref bindings read-only.
+12. Optionally provide a completion auditor behind `update_goal({"status":"complete"})`.
+13. Provide a smoke/conformance report.
 
 ## Hidden turn callback
 
@@ -70,16 +72,24 @@ The Pi adapter counts completed assistant `input + output` channels when availab
 
 Stores must persist goal ledger events through `appendLedgerEvent` and `listLedgerEvents`. The default SQLite store uses a `goal_ledger` table. Alternate stores should preserve equivalent event semantics so compaction, handoff, and audit can inspect lifecycle and evidence without relying only on chat transcript.
 
+## Goal registry and workspace binding
+
+The portable store contract includes goal summaries, metadata, and workspace profiles. Adapters may expose those through UI commands such as `/goal list` and targeted lifecycle operations, but model-visible tools remain `get_goal`, `create_goal`, and `update_goal` only.
+
+Pi goal-owned sessions require explicit workspace binding. For git-backed workspaces, a branch or ref must be provided inline or by a named profile. The adapter validates paths, allowed-root policy (`AGENT_GOAL_ALLOWED_WORKSPACE_ROOTS` when configured), and git state with read-only inspection and must not create worktrees, create branches, delete workspaces, or switch branches. Legacy session-bound goals remain visible in registry output with `legacy` workspace status.
+
 ## Pi adapter status
 
 The included Pi adapter maps:
 
-- slash commands through `pi.registerCommand("goal", ...)`, including `/goal --tokens <budget> <objective>` with `k` / `m` suffix parsing
+- slash commands through `pi.registerCommand("goal", ...)`, including `/goal --tokens <budget> --workspace <path-or-profile> --branch <branch> <objective>` with `k` / `m` suffix parsing
 - model tools through `pi.registerTool(...)`
 - turn/tool lifecycle through Pi events
 - ordinary-turn active goal reminders through `before_agent_start`
+- goal registry/list commands, targeted status/monitor/pause/resume/clear/edit/budget commands, and named workspace profile commands
+- explicit workspace/branch/ref binding validation without filesystem mutation, branch creation, or branch switching
 - Pi custom session-entry mirroring through append-only `agent-goal-runtime-state` entries while the portable store remains canonical
-- hidden continuation through `pi.sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })`
+- hidden continuation through `pi.sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })` in the materialized goal session`
 - stale hidden continuation rewriting through the Pi `context` hook, including non-runnable stale bookkeeping and superseding older duplicate active-goal continuations
 - stale hidden continuation abort suppression in `before_agent_start` / `turn_end` so cancelled old-goal continuations do not pause the current goal
 - failed-turn recovery context that preserves bounded partial assistant output/tool traces as untrusted hidden transcript evidence for a later `/goal resume`

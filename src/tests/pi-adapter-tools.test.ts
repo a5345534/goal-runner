@@ -1,0 +1,37 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import goalPiExtension from "../adapters/pi/index.js";
+
+test("Pi adapter keeps model-visible goal tools Codex-compatible", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "goal-tools-"));
+  const previousStateHome = process.env.AGENT_GOAL_STATE_HOME;
+  process.env.AGENT_GOAL_STATE_HOME = dir;
+  const tools: Array<{ name: string }> = [];
+  const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
+  const pi = {
+    registerTool(tool: { name: string }) {
+      tools.push(tool);
+    },
+    registerCommand() {},
+    on(event: string, handler: (...args: unknown[]) => unknown) {
+      const list = handlers.get(event) ?? [];
+      list.push(handler);
+      handlers.set(event, list);
+    },
+    appendEntry() {},
+    sendMessage() {},
+  };
+
+  try {
+    goalPiExtension(pi as never);
+    assert.deepEqual(tools.map((tool) => tool.name).sort(), ["create_goal", "get_goal", "update_goal"]);
+    for (const handler of handlers.get("session_shutdown") ?? []) await handler();
+  } finally {
+    if (previousStateHome === undefined) delete process.env.AGENT_GOAL_STATE_HOME;
+    else process.env.AGENT_GOAL_STATE_HOME = previousStateHome;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

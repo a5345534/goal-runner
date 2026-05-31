@@ -311,4 +311,123 @@ test("sqlite store persists ledger events across reopen", async () => {
         rmSync(root, { recursive: true, force: true });
     }
 });
+test("goal registry lists summaries and resolves short ids", async () => {
+    const runtime = new GoalRuntime({
+        store: new MemoryGoalStore(),
+        config: { randomId: () => "abcdef12-3456-7890-abcd-ef1234567890" },
+    });
+    const result = await runtime.createOrReplaceGoal("pi:/sessions/goal.jsonl", "implement goal-owned sessions");
+    assert.ok(result.goal);
+    await runtime.saveGoalSessionMetadata({
+        sessionKey: result.goal.sessionKey,
+        goalId: result.goal.goalId,
+        originSessionKey: "pi:/sessions/controller.jsonl",
+        executionWorkspace: "/workspace/prepared",
+        workspaceStatus: "configured",
+        branch: "feat/goal",
+        branchVerificationStatus: "verified",
+        sessionFile: "/sessions/goal.jsonl",
+        sessionName: "goal abcdef12",
+        createdAt: result.goal.createdAt,
+        updatedAt: result.goal.updatedAt,
+    });
+    const summaries = await runtime.listGoalSummaries();
+    assert.equal(summaries.length, 1);
+    assert.equal(summaries[0]?.shortGoalId, "abcdef12");
+    assert.equal(summaries[0]?.executionWorkspace, "/workspace/prepared");
+    assert.equal(summaries[0]?.branch, "feat/goal");
+    const resolved = await runtime.resolveGoalReference("abcdef12");
+    assert.equal(resolved.kind, "found");
+    if (resolved.kind === "found")
+        assert.equal(resolved.goal.goalId, result.goal.goalId);
+});
+test("goal reference resolution rejects ambiguous short ids", async () => {
+    let id = 0;
+    const runtime = new GoalRuntime({
+        store: new MemoryGoalStore(),
+        config: { randomId: () => (id++ === 0 ? "abc11111-0000" : "abc22222-0000") },
+    });
+    await runtime.createOrReplaceGoal("s1", "first");
+    await runtime.createOrReplaceGoal("s2", "second");
+    const resolved = await runtime.resolveGoalReference("abc");
+    assert.equal(resolved.kind, "ambiguous");
+    if (resolved.kind === "ambiguous")
+        assert.equal(resolved.matches.length, 2);
+});
+test("workspace profiles persist in memory store", async () => {
+    const runtime = new GoalRuntime({ store: new MemoryGoalStore() });
+    const profile = {
+        name: "migration",
+        path: "/workspace/migration",
+        kind: "git",
+        branch: "feat/migration",
+        createdAt: "2026-05-31T00:00:00.000Z",
+        updatedAt: "2026-05-31T00:00:00.000Z",
+    };
+    await runtime.saveWorkspaceProfile(profile);
+    assert.deepEqual(await runtime.getWorkspaceProfile("migration"), profile);
+    assert.deepEqual(await runtime.listWorkspaceProfiles(), [profile]);
+    assert.equal(await runtime.deleteWorkspaceProfile("migration"), true);
+    assert.equal(await runtime.getWorkspaceProfile("migration"), undefined);
+});
+test("sqlite store persists goal registry metadata and workspace profiles across reopen", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "goal-registry-"));
+    const dbPath = join(dir, "goals.sqlite");
+    try {
+        const store = new SQLiteGoalStore({ dbPath });
+        const runtime = new GoalRuntime({ store, config: { randomId: () => "fedcba98-0000" } });
+        const result = await runtime.createOrReplaceGoal("pi:/goal", "persist registry");
+        assert.ok(result.goal);
+        await runtime.saveGoalSessionMetadata({
+            sessionKey: result.goal.sessionKey,
+            goalId: result.goal.goalId,
+            executionWorkspace: "/workspace/persist",
+            workspaceStatus: "configured",
+            ref: "refs/heads/feat/persist",
+            branchVerificationStatus: "verified",
+            createdAt: result.goal.createdAt,
+            updatedAt: result.goal.updatedAt,
+        });
+        await runtime.saveWorkspaceProfile({
+            name: "persist",
+            path: "/workspace/persist",
+            kind: "git",
+            ref: "refs/heads/feat/persist",
+            createdAt: result.goal.createdAt,
+            updatedAt: result.goal.updatedAt,
+        });
+        store.close();
+        const reopened = new GoalRuntime({ store: new SQLiteGoalStore({ dbPath }) });
+        const summaries = await reopened.listGoalSummaries();
+        assert.equal(summaries[0]?.executionWorkspace, "/workspace/persist");
+        assert.equal(summaries[0]?.ref, "refs/heads/feat/persist");
+        assert.equal((await reopened.getWorkspaceProfile("persist"))?.path, "/workspace/persist");
+    }
+    finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+test("clearing a goal does not delete the configured execution workspace", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "goal-clear-workspace-"));
+    try {
+        const runtime = new GoalRuntime({ store: new MemoryGoalStore(), config: { randomId: () => "clear1234" } });
+        const created = await runtime.createOrReplaceGoal("s1", "clear safely");
+        assert.ok(created.goal);
+        await runtime.saveGoalSessionMetadata({
+            sessionKey: "s1",
+            goalId: created.goal.goalId,
+            executionWorkspace: dir,
+            workspaceStatus: "configured",
+            branchVerificationStatus: "notApplicable",
+            createdAt: created.goal.createdAt,
+            updatedAt: created.goal.updatedAt,
+        });
+        await runtime.executeParsedCommand("s1", { kind: "clear" });
+        assert.equal(await runtime.getGoal("s1").then((result) => result.goal), undefined);
+        assert.doesNotThrow(() => rmSync(dir, { recursive: true }));
+    }
+    finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
 //# sourceMappingURL=runtime.test.js.map

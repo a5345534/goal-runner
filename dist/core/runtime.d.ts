@@ -1,5 +1,5 @@
 import { type GoalCommand } from "./parser.js";
-import type { BlockedAuditEvidence, GoalAdapterCallbacks, GoalLedgerEvent, GoalRuntimeConfig, GoalStatusInput, GoalStore, GoalToolResult, GoalTurnStop, HiddenGoalTurnResult, TurnContext } from "./types.js";
+import type { BlockedAuditEvidence, GoalAdapterCallbacks, GoalLedgerEvent, GoalReferenceResolution, GoalRuntimeConfig, GoalSessionMetadata, GoalStatusInput, GoalStore, GoalSummary, GoalToolResult, WorkspaceProfile, GoalTurnStop, HiddenGoalTurnResult, TurnContext } from "./types.js";
 export declare class GoalRuntime {
     private readonly store;
     private readonly callbacks;
@@ -20,6 +20,13 @@ export declare class GoalRuntime {
     }): Promise<GoalToolResult>;
     getGoal(sessionKey: string): Promise<GoalToolResult>;
     listLedgerEvents(sessionKey: string, goalId?: string): Promise<GoalLedgerEvent[]>;
+    saveGoalSessionMetadata(metadata: GoalSessionMetadata): Promise<void>;
+    listGoalSummaries(): Promise<GoalSummary[]>;
+    resolveGoalReference(reference: string): Promise<GoalReferenceResolution>;
+    saveWorkspaceProfile(profile: WorkspaceProfile): Promise<void>;
+    getWorkspaceProfile(name: string): Promise<WorkspaceProfile | undefined>;
+    listWorkspaceProfiles(): Promise<WorkspaceProfile[]>;
+    deleteWorkspaceProfile(name: string): Promise<boolean>;
     getCurrentTurnStop(sessionKey: string): GoalTurnStop | undefined;
     createOrReplaceGoal(sessionKey: string, objectiveInput: string, options?: {
         tokenBudget?: number;

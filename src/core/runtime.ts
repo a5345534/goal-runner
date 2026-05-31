@@ -10,10 +10,14 @@ import type {
   GoalLedgerEvent,
   GoalLedgerEventType,
   GoalRecord,
+  GoalReferenceResolution,
   GoalRuntimeConfig,
+  GoalSessionMetadata,
   GoalStatusInput,
   GoalStore,
+  GoalSummary,
   GoalToolResult,
+  WorkspaceProfile,
   GoalTurnStop,
   GoalTurnStopReason,
   HarnessState,
@@ -87,6 +91,39 @@ export class GoalRuntime {
 
   async listLedgerEvents(sessionKey: string, goalId?: string): Promise<GoalLedgerEvent[]> {
     return this.store.listLedgerEvents(sessionKey, goalId);
+  }
+
+  async saveGoalSessionMetadata(metadata: GoalSessionMetadata): Promise<void> {
+    await this.store.saveGoalSessionMetadata(metadata);
+  }
+
+  async listGoalSummaries(): Promise<GoalSummary[]> {
+    return this.store.listGoalSummaries();
+  }
+
+  async resolveGoalReference(reference: string): Promise<GoalReferenceResolution> {
+    const trimmed = reference.trim();
+    const summaries = await this.store.listGoalSummaries();
+    const matches = summaries.filter((goal) => goal.goalId === trimmed || goal.goalId.startsWith(trimmed));
+    if (matches.length === 1) return { kind: "found", goal: matches[0] };
+    if (matches.length > 1) return { kind: "ambiguous", reference: trimmed, matches };
+    return { kind: "notFound", reference: trimmed };
+  }
+
+  async saveWorkspaceProfile(profile: WorkspaceProfile): Promise<void> {
+    await this.store.saveWorkspaceProfile(profile);
+  }
+
+  async getWorkspaceProfile(name: string): Promise<WorkspaceProfile | undefined> {
+    return this.store.getWorkspaceProfile(name);
+  }
+
+  async listWorkspaceProfiles(): Promise<WorkspaceProfile[]> {
+    return this.store.listWorkspaceProfiles();
+  }
+
+  async deleteWorkspaceProfile(name: string): Promise<boolean> {
+    return this.store.deleteWorkspaceProfile(name);
   }
 
   getCurrentTurnStop(sessionKey: string): GoalTurnStop | undefined {

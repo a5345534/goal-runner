@@ -73,4 +73,32 @@ test("mirror append failures do not fail canonical store writes", async () => {
     await store.saveGoal(goal);
     assert.deepEqual(await store.getCurrentGoal("pi:s1"), goal);
 });
+test("Pi session mirror records goal metadata and workspace profiles", async () => {
+    const entries = [];
+    const store = makeStore(entries);
+    const metadata = {
+        sessionKey: "pi:goal",
+        goalId: "g1",
+        originSessionKey: "pi:controller",
+        executionWorkspace: "/workspace",
+        workspaceStatus: "configured",
+        branch: "feat/a",
+        branchVerificationStatus: "verified",
+        createdAt: fixedNow.toISOString(),
+        updatedAt: fixedNow.toISOString(),
+    };
+    const profile = {
+        name: "prepared",
+        path: "/workspace",
+        kind: "git",
+        branch: "feat/a",
+        createdAt: fixedNow.toISOString(),
+        updatedAt: fixedNow.toISOString(),
+    };
+    await store.saveGoalSessionMetadata(metadata);
+    await store.saveWorkspaceProfile(profile);
+    await store.deleteWorkspaceProfile("prepared");
+    assert.deepEqual(await store.getGoalSessionMetadata("pi:goal"), metadata);
+    assert.deepEqual(entries.map((entry) => entry.kind), ["goal_session_metadata", "workspace_profile", "workspace_profile_removed"]);
+});
 //# sourceMappingURL=pi-session-store.test.js.map

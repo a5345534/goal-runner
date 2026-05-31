@@ -84,6 +84,78 @@ export class SQLiteGoalStore {
                 .all(sessionKey, goalId);
         return rows.map(rowToLedgerEvent);
     }
+    async saveGoalSessionMetadata(metadata) {
+        this.db
+            .prepare(`INSERT INTO goal_session_metadata (
+          session_key, goal_id, origin_session_key, execution_workspace, workspace_status,
+          branch, ref, branch_verification_status, session_file, session_name,
+          legacy_session_bound, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_key) DO UPDATE SET
+          goal_id = excluded.goal_id,
+          origin_session_key = excluded.origin_session_key,
+          execution_workspace = excluded.execution_workspace,
+          workspace_status = excluded.workspace_status,
+          branch = excluded.branch,
+          ref = excluded.ref,
+          branch_verification_status = excluded.branch_verification_status,
+          session_file = excluded.session_file,
+          session_name = excluded.session_name,
+          legacy_session_bound = excluded.legacy_session_bound,
+          created_at = excluded.created_at,
+          updated_at = excluded.updated_at`)
+            .run(metadata.sessionKey, metadata.goalId, metadata.originSessionKey ?? null, metadata.executionWorkspace ?? null, metadata.workspaceStatus ?? null, metadata.branch ?? null, metadata.ref ?? null, metadata.branchVerificationStatus ?? null, metadata.sessionFile ?? null, metadata.sessionName ?? null, metadata.legacySessionBound ? 1 : 0, metadata.createdAt, metadata.updatedAt);
+    }
+    async getGoalSessionMetadata(sessionKey) {
+        const row = this.db.prepare("SELECT * FROM goal_session_metadata WHERE session_key = ?").get(sessionKey);
+        return row ? rowToMetadata(row) : undefined;
+    }
+    async listGoalSummaries() {
+        const rows = this.db
+            .prepare(`SELECT g.*,
+          m.origin_session_key,
+          m.execution_workspace,
+          m.workspace_status,
+          m.branch,
+          m.ref,
+          m.branch_verification_status,
+          m.session_file,
+          m.session_name,
+          m.legacy_session_bound,
+          m.updated_at AS metadata_updated_at,
+          COALESCE(MAX(l.at), g.updated_at) AS last_activity_at
+        FROM goals g
+        LEFT JOIN goal_session_metadata m ON m.session_key = g.session_key
+        LEFT JOIN goal_ledger l ON l.session_key = g.session_key AND (l.goal_id = g.goal_id OR l.goal_id IS NULL)
+        GROUP BY g.session_key
+        ORDER BY last_activity_at DESC`)
+            .all();
+        return rows.map(rowToGoalSummary);
+    }
+    async saveWorkspaceProfile(profile) {
+        this.db
+            .prepare(`INSERT INTO workspace_profiles (name, path, kind, branch, ref, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(name) DO UPDATE SET
+           path = excluded.path,
+           kind = excluded.kind,
+           branch = excluded.branch,
+           ref = excluded.ref,
+           updated_at = excluded.updated_at`)
+            .run(profile.name, profile.path, profile.kind, profile.branch ?? null, profile.ref ?? null, profile.createdAt, profile.updatedAt);
+    }
+    async getWorkspaceProfile(name) {
+        const row = this.db.prepare("SELECT * FROM workspace_profiles WHERE name = ?").get(name);
+        return row ? rowToWorkspaceProfile(row) : undefined;
+    }
+    async listWorkspaceProfiles() {
+        const rows = this.db.prepare("SELECT * FROM workspace_profiles ORDER BY name ASC").all();
+        return rows.map(rowToWorkspaceProfile);
+    }
+    async deleteWorkspaceProfile(name) {
+        const result = this.db.prepare("DELETE FROM workspace_profiles WHERE name = ?").run(name);
+        return Number(result.changes ?? 0) > 0;
+    }
     close() {
         this.db.close();
     }
@@ -124,6 +196,31 @@ export class SQLiteGoalStore {
         details_json TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_goal_ledger_session_goal ON goal_ledger(session_key, goal_id, id);
+      CREATE TABLE IF NOT EXISTS goal_session_metadata (
+        session_key TEXT PRIMARY KEY,
+        goal_id TEXT NOT NULL,
+        origin_session_key TEXT,
+        execution_workspace TEXT,
+        workspace_status TEXT,
+        branch TEXT,
+        ref TEXT,
+        branch_verification_status TEXT,
+        session_file TEXT,
+        session_name TEXT,
+        legacy_session_bound INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_goal_session_metadata_goal_id ON goal_session_metadata(goal_id);
+      CREATE TABLE IF NOT EXISTS workspace_profiles (
+        name TEXT PRIMARY KEY,
+        path TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        branch TEXT,
+        ref TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
     }
 }
@@ -165,6 +262,60 @@ function rowToLedgerEvent(row) {
         details: parseDetails(row.details_json),
     };
 }
+function rowToMetadata(row) {
+    return {
+        sessionKey: row.session_key,
+        goalId: row.goal_id,
+        originSessionKey: row.origin_session_key ?? undefined,
+        executionWorkspace: row.execution_workspace ?? undefined,
+        workspaceStatus: row.workspace_status ?? undefined,
+        branch: row.branch ?? undefined,
+        ref: row.ref ?? undefined,
+        branchVerificationStatus: row.branch_verification_status ?? undefined,
+        sessionFile: row.session_file ?? undefined,
+        sessionName: row.session_name ?? undefined,
+        legacySessionBound: row.legacy_session_bound === 1,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+    };
+}
+function rowToGoalSummary(row) {
+    return {
+        sessionKey: row.session_key,
+        goalId: row.goal_id,
+        shortGoalId: row.goal_id.slice(0, 8),
+        objective: row.objective,
+        objectiveSummary: summarizeObjective(row.objective),
+        status: row.status,
+        activityState: row.status === "active" ? "idle-eligible" : row.status,
+        tokenBudget: row.token_budget ?? undefined,
+        tokensUsed: row.tokens_used,
+        timeUsedSeconds: row.time_used_seconds,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        lastActivityAt: row.last_activity_at ?? row.updated_at,
+        originSessionKey: row.origin_session_key ?? undefined,
+        executionWorkspace: row.execution_workspace ?? undefined,
+        workspaceStatus: row.workspace_status ?? (row.origin_session_key ? undefined : "legacy"),
+        branch: row.branch ?? undefined,
+        ref: row.ref ?? undefined,
+        branchVerificationStatus: row.branch_verification_status ?? undefined,
+        sessionFile: row.session_file ?? undefined,
+        sessionName: row.session_name ?? undefined,
+        legacySessionBound: row.legacy_session_bound === null ? true : row.legacy_session_bound === 1,
+    };
+}
+function rowToWorkspaceProfile(row) {
+    return {
+        name: row.name,
+        path: row.path,
+        kind: row.kind,
+        branch: row.branch ?? undefined,
+        ref: row.ref ?? undefined,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+    };
+}
 function parseDetails(json) {
     if (!json)
         return undefined;
@@ -178,5 +329,8 @@ function parseDetails(json) {
 }
 function fallbackEventId(event) {
     return `${event.at}:${event.sessionKey}:${event.goalId ?? "none"}:${event.type}:${Math.random().toString(36).slice(2)}`;
+}
+function summarizeObjective(objective) {
+    return objective.length <= 120 ? objective : `${objective.slice(0, 117)}...`;
 }
 //# sourceMappingURL=sqlite-store.js.map

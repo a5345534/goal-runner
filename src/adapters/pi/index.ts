@@ -12,9 +12,20 @@ import {
   type CompletionAuditResult,
   type GoalDecisionEvidence,
   type GoalRecord,
+  type GoalSummary,
   type HiddenGoalTurnRequest,
+  type WorkspaceProfile,
 } from "../../core/index.js";
 import { PI_GOAL_SESSION_ENTRY_TYPE, PiSessionGoalMirrorStore } from "./session-store.js";
+import {
+  parseGoalWorkspaceFlags,
+  parseWorkspaceProfileCommand,
+  resolveWorkspaceBinding,
+  tokenize,
+  validateExecutionWorkspace,
+  type ResolvedWorkspaceBinding,
+  type WorkspaceValidationResult,
+} from "./workspace.js";
 
 const EXTENSION_MESSAGE_TYPE = "agent-goal-runtime";
 const HIDDEN_CONTEXT_KIND = "goal_continuation";
@@ -75,52 +86,30 @@ export default function goalPiExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("goal", {
-    description: "Codex-compatible persistent goal: /goal [--tokens 100k] <objective>, /goal edit|pause|resume|clear",
+    description:
+      "Codex-compatible persistent goal: /goal --workspace <path-or-profile> --branch <branch> <objective>, /goal list, /goal status|monitor|pause|resume|clear <goal-ref>",
     getArgumentCompletions: (prefix: string) => {
-      const commands = ["--tokens", "edit", "pause", "resume", "clear"];
+      const commands = [
+        "--tokens",
+        "--workspace",
+        "--branch",
+        "--ref",
+        "list",
+        "status",
+        "monitor",
+        "edit",
+        "pause",
+        "resume",
+        "clear",
+        "workspace",
+      ];
       const matches = commands.filter((command) => command.startsWith(prefix));
       return matches.length ? matches.map((value) => ({ value, label: value })) : null;
     },
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       lastCtx = ctx;
-      const sessionKey = resolveSessionKey(ctx);
-      const trimmed = args.trim();
       try {
-        const command = parseGoalCommand(trimmed);
-
-        if (command.kind === "edit" && command.objective === undefined) {
-          const current = await runtime.getGoal(sessionKey);
-          if (!current.goal) {
-            ctx.ui.notify("No current goal to edit", "warning");
-            return;
-          }
-          const nextObjective = await ctx.ui.editor("Edit /goal objective", current.goal.objective);
-          if (nextObjective === undefined) return;
-          const result = await runtime.executeParsedCommand(sessionKey, command, { editObjective: nextObjective });
-          ctx.ui.notify(result.message, "info");
-          if (result.goal) showGoalDetails(ctx, result.goal);
-          return;
-        }
-
-        if (command.kind === "start") {
-          const existing = await runtime.getGoal(sessionKey);
-          if (existing.goal) {
-            const ok = await ctx.ui.confirm(
-              "Replace current goal?",
-              `${existing.goal.objective}\n\nNew goal:\n${command.objective}${
-                command.tokenBudget === undefined ? "" : `\n\nToken budget: ${formatTokenCount(command.tokenBudget)}`
-              }`,
-            );
-            if (!ok) {
-              ctx.ui.notify("Goal unchanged", "info");
-              return;
-            }
-          }
-        }
-
-        const result = await runtime.executeParsedCommand(sessionKey, command, { confirmReplace: true });
-        if (result.goal) showGoalDetails(ctx, result.goal);
-        else ctx.ui.notify(result.message, "info");
+        await handlePiGoalCommand(runtime, ctx, args);
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }
@@ -278,6 +267,314 @@ export default function goalPiExtension(pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     await store.close?.();
   });
+}
+
+async function handlePiGoalCommand(runtime: GoalRuntime, ctx: ExtensionCommandContext, args: string): Promise<void> {
+  const sessionKey = resolveSessionKey(ctx);
+  const trimmed = args.trim();
+
+  const workspaceCommand = parseWorkspaceProfileCommand(trimmed, ctx.cwd);
+  if (workspaceCommand) {
+    await handleWorkspaceProfileCommand(runtime, ctx, workspaceCommand);
+    return;
+  }
+
+  const tokens = tokenize(trimmed);
+  if (tokens[0] === "list") {
+    await showGoalList(runtime, ctx);
+    return;
+  }
+  if (tokens[0] === "status" && tokens[1]) {
+    await showTargetGoalStatus(runtime, ctx, tokens[1]);
+    return;
+  }
+  if (tokens[0] === "monitor" && tokens[1]) {
+    await monitorTargetGoal(runtime, ctx, tokens[1]);
+    return;
+  }
+  if ((tokens[0] === "pause" || tokens[0] === "resume" || tokens[0] === "clear") && tokens[1]) {
+    await runTargetGoalLifecycleCommand(runtime, ctx, tokens[0], tokens[1]);
+    return;
+  }
+  if (tokens[0] === "edit" && tokens[1]) {
+    const target = await runtime.resolveGoalReference(tokens[1]);
+    if (target.kind === "found") {
+      const nextObjective = tokens.length > 2 ? tokens.slice(2).join(" ") : await ctx.ui.editor("Edit /goal objective", target.goal.objective);
+      if (nextObjective === undefined) return;
+      await editTargetGoal(runtime, ctx, target.goal.goalId, nextObjective);
+      return;
+    }
+    if (target.kind === "ambiguous") {
+      throw new Error(`Ambiguous goal reference ${tokens[1]}: ${target.matches.map((goal) => goal.shortGoalId).join(", ")}`);
+    }
+  }
+  if (tokens[0] === "budget" && tokens[1] && tokens[2]) {
+    await editTargetGoalBudget(runtime, ctx, tokens[1], tokens[2]);
+    return;
+  }
+
+  const workspaceFlags = parseGoalWorkspaceFlags(trimmed);
+  const command = parseGoalCommand(workspaceFlags.remainingArgs);
+
+  if (command.kind === "edit" && command.objective === undefined) {
+    const current = await runtime.getGoal(sessionKey);
+    if (!current.goal) {
+      ctx.ui.notify("No current goal to edit", "warning");
+      return;
+    }
+    const nextObjective = await ctx.ui.editor("Edit /goal objective", current.goal.objective);
+    if (nextObjective === undefined) return;
+    const result = await runtime.executeParsedCommand(sessionKey, command, { editObjective: nextObjective });
+    ctx.ui.notify(result.message, "info");
+    if (result.goal) showGoalDetails(ctx, result.goal);
+    return;
+  }
+
+  if (command.kind === "start") {
+    const profiles = await runtime.listWorkspaceProfiles();
+    const binding = resolveWorkspaceBinding(workspaceFlags, profiles, ctx.cwd);
+    const validation = validateExecutionWorkspace(binding);
+    if (!validation.ok) throw new Error(validation.message ?? "execution workspace validation failed");
+    await startGoalOwnedPiSession(runtime, ctx, command, binding, validation);
+    return;
+  }
+
+  const result = await runtime.executeParsedCommand(sessionKey, command, { confirmReplace: true });
+  if (result.goal) showGoalDetails(ctx, result.goal);
+  else ctx.ui.notify(result.message, "info");
+}
+
+async function handleWorkspaceProfileCommand(
+  runtime: GoalRuntime,
+  ctx: ExtensionCommandContext,
+  command: NonNullable<ReturnType<typeof parseWorkspaceProfileCommand>>,
+): Promise<void> {
+  if (command.kind === "list") {
+    const profiles = await runtime.listWorkspaceProfiles();
+    ctx.ui.notify(profiles.length ? profiles.map(formatWorkspaceProfile).join("\n") : "No /goal workspace profiles configured", "info");
+    return;
+  }
+  if (command.kind === "show") {
+    const profile = await runtime.getWorkspaceProfile(command.name);
+    ctx.ui.notify(profile ? formatWorkspaceProfile(profile) : `Workspace profile not found: ${command.name}`, profile ? "info" : "warning");
+    return;
+  }
+  if (command.kind === "remove") {
+    const ok = await ctx.ui.confirm("Remove /goal workspace profile?", command.name);
+    if (!ok) return;
+    const deleted = await runtime.deleteWorkspaceProfile(command.name);
+    ctx.ui.notify(deleted ? `Removed workspace profile: ${command.name}` : `Workspace profile not found: ${command.name}`, deleted ? "info" : "warning");
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const profile: WorkspaceProfile = { ...command.profile, createdAt: now, updatedAt: now };
+  const validation = validateExecutionWorkspace({ workspace: profile.path, branch: profile.branch, ref: profile.ref });
+  if (!validation.ok) throw new Error(validation.message ?? "workspace profile validation failed");
+  await runtime.saveWorkspaceProfile(profile);
+  ctx.ui.notify(`Saved workspace profile: ${formatWorkspaceProfile(profile)}${formatWorkspaceValidationSuffix(validation)}`, "info");
+}
+
+async function startGoalOwnedPiSession(
+  runtime: GoalRuntime,
+  ctx: ExtensionCommandContext,
+  command: { kind: "start"; objective: string; tokenBudget?: number },
+  binding: ResolvedWorkspaceBinding,
+  validation: WorkspaceValidationResult,
+): Promise<void> {
+  const originSessionKey = resolveSessionKey(ctx);
+  const originSessionFile = ctx.sessionManager.getSessionFile();
+  const labelObjective = command.objective.length <= 64 ? command.objective : `${command.objective.slice(0, 61)}...`;
+
+  const result = await ctx.newSession({
+    parentSession: originSessionFile,
+    setup: async (sessionManager: { appendSessionInfo(name: string): unknown }) => {
+      sessionManager.appendSessionInfo(`goal: ${labelObjective}`);
+    },
+    withSession: async (goalCtx: ExtensionCommandContext & { sendUserMessage(content: string): Promise<void>; sendMessage: unknown }) => {
+      const executionSessionKey = resolveSessionKey(goalCtx);
+      const created = await runtime.createOrReplaceGoal(executionSessionKey, command.objective, { tokenBudget: command.tokenBudget });
+      if (!created.goal) throw new Error(created.message);
+      const shortGoalId = created.goal.goalId.slice(0, 8);
+      const sessionName = `goal ${shortGoalId}: ${labelObjective}`;
+      goalCtx.sessionManager.appendSessionInfo(sessionName);
+      await runtime.saveGoalSessionMetadata({
+        sessionKey: executionSessionKey,
+        goalId: created.goal.goalId,
+        originSessionKey,
+        executionWorkspace: binding.workspace,
+        workspaceStatus: validation.workspaceStatus,
+        branch: binding.branch,
+        ref: binding.ref,
+        branchVerificationStatus: validation.branchVerificationStatus,
+        sessionFile: goalCtx.sessionManager.getSessionFile(),
+        sessionName,
+        legacySessionBound: false,
+        createdAt: created.goal.createdAt,
+        updatedAt: new Date().toISOString(),
+      });
+      showGoalDetails(goalCtx, created.goal);
+      goalCtx.ui.notify(
+        `Goal-owned execution session created. Workspace: ${binding.workspace}${formatWorkspaceValidationSuffix(validation)}`,
+        "info",
+      );
+      await goalCtx.sendUserMessage(renderGoalOwnedSessionInitialPrompt(created.goal, binding, validation));
+    },
+  });
+
+  if (result.cancelled) ctx.ui.notify("Goal-owned session creation cancelled", "warning");
+}
+
+async function showGoalList(runtime: GoalRuntime, ctx: ExtensionCommandContext): Promise<void> {
+  const summaries = await runtime.listGoalSummaries();
+  if (summaries.length === 0) {
+    ctx.ui.notify("No goals recorded", "info");
+    return;
+  }
+  const options = summaries.map(formatGoalListOption);
+  const selected = await ctx.ui.select("/goal list — select a goal", options);
+  if (!selected) return;
+  const index = options.indexOf(selected);
+  const goal = summaries[index];
+  if (!goal) return;
+  await monitorGoalSummary(runtime, ctx, goal);
+}
+
+async function showTargetGoalStatus(runtime: GoalRuntime, ctx: ExtensionCommandContext, reference: string): Promise<void> {
+  const goal = await resolveGoalReferenceOrThrow(runtime, reference);
+  ctx.ui.notify(formatGoalSummaryDetails(goal), "info");
+}
+
+async function monitorTargetGoal(runtime: GoalRuntime, ctx: ExtensionCommandContext, reference: string): Promise<void> {
+  const goal = await resolveGoalReferenceOrThrow(runtime, reference);
+  await monitorGoalSummary(runtime, ctx, goal);
+}
+
+async function monitorGoalSummary(runtime: GoalRuntime, ctx: ExtensionCommandContext, goal: GoalSummary): Promise<void> {
+  const action = await ctx.ui.select(`Goal ${goal.shortGoalId}`, [
+    `Status — ${goal.status}`,
+    "Pause",
+    "Resume",
+    "Clear",
+    goal.sessionFile ? "Open execution session" : "Open execution session unavailable",
+    "Close",
+  ]);
+  if (!action || action === "Close" || action.startsWith("Status")) return;
+  if (action === "Pause") await runTargetGoalLifecycleCommand(runtime, ctx, "pause", goal.goalId);
+  else if (action === "Resume") await runTargetGoalLifecycleCommand(runtime, ctx, "resume", goal.goalId);
+  else if (action === "Clear") await runTargetGoalLifecycleCommand(runtime, ctx, "clear", goal.goalId);
+  else if (action === "Open execution session" && goal.sessionFile) {
+    await ctx.switchSession(goal.sessionFile);
+  }
+}
+
+async function runTargetGoalLifecycleCommand(
+  runtime: GoalRuntime,
+  ctx: ExtensionCommandContext,
+  action: "pause" | "resume" | "clear",
+  reference: string,
+): Promise<void> {
+  const goal = await resolveGoalReferenceOrThrow(runtime, reference);
+  if (action === "clear") {
+    const ok = await ctx.ui.confirm("Clear goal state?", `${goal.shortGoalId}: ${goal.objectiveSummary}\n\nExecution workspaces are not deleted.`);
+    if (!ok) return;
+  }
+  const command = parseGoalCommand(action);
+  await runWithTargetSessionContext(ctx, goal, async (targetCtx) => {
+    const result = await runtime.executeParsedCommand(goal.sessionKey, command, { confirmReplace: true });
+    targetCtx.ui.notify(result.message, "info");
+  });
+}
+
+async function editTargetGoal(runtime: GoalRuntime, ctx: ExtensionCommandContext, reference: string, objective: string): Promise<void> {
+  const goal = await resolveGoalReferenceOrThrow(runtime, reference);
+  await runWithTargetSessionContext(ctx, goal, async (targetCtx) => {
+    const result = await runtime.executeParsedCommand(goal.sessionKey, parseGoalCommand(`edit ${objective}`), { confirmReplace: true });
+    targetCtx.ui.notify(result.message, "info");
+  });
+}
+
+async function editTargetGoalBudget(runtime: GoalRuntime, ctx: ExtensionCommandContext, reference: string, budget: string): Promise<void> {
+  const goal = await resolveGoalReferenceOrThrow(runtime, reference);
+  await runWithTargetSessionContext(ctx, goal, async (targetCtx) => {
+    const result = await runtime.executeParsedCommand(goal.sessionKey, parseGoalCommand(`edit --tokens ${budget} ${goal.objective}`), { confirmReplace: true });
+    targetCtx.ui.notify(result.message, "info");
+  });
+}
+
+async function runWithTargetSessionContext(
+  ctx: ExtensionCommandContext,
+  goal: GoalSummary,
+  operation: (targetCtx: ExtensionCommandContext) => Promise<void>,
+): Promise<void> {
+  const currentSessionFile = ctx.sessionManager.getSessionFile();
+  if (!goal.sessionFile || goal.sessionFile === currentSessionFile) {
+    await operation(ctx);
+    return;
+  }
+  await ctx.switchSession(goal.sessionFile, {
+    withSession: async (targetCtx: ExtensionCommandContext) => {
+      await operation(targetCtx);
+    },
+  });
+}
+
+async function resolveGoalReferenceOrThrow(runtime: GoalRuntime, reference: string): Promise<GoalSummary> {
+  const resolved = await runtime.resolveGoalReference(reference);
+  if (resolved.kind === "found") return resolved.goal;
+  if (resolved.kind === "ambiguous") {
+    throw new Error(`Ambiguous goal reference ${reference}: ${resolved.matches.map((goal) => goal.shortGoalId).join(", ")}`);
+  }
+  throw new Error(`Goal not found: ${reference}`);
+}
+
+function formatWorkspaceProfile(profile: WorkspaceProfile): string {
+  return `${profile.name} -> ${profile.path} (${profile.kind}${profile.branch ? ` branch=${profile.branch}` : ""}${profile.ref ? ` ref=${profile.ref}` : ""})`;
+}
+
+function formatGoalListOption(goal: GoalSummary): string {
+  const budget = goal.tokenBudget === undefined ? formatTokenCount(goal.tokensUsed) : `${formatTokenCount(goal.tokensUsed)}/${formatTokenCount(goal.tokenBudget)}`;
+  const workspace = goal.executionWorkspace ?? "legacy session";
+  const branch = goal.branch ?? goal.ref ?? "no branch/ref";
+  return `${goal.shortGoalId} ${goal.status} ${formatDuration(goal.timeUsedSeconds)} ${budget} ${workspace} ${branch} — ${goal.objectiveSummary}`;
+}
+
+function formatGoalSummaryDetails(goal: GoalSummary): string {
+  return [
+    `Goal ${goal.shortGoalId}`,
+    `Status: ${goal.status} (${goal.activityState})`,
+    `Objective: ${goal.objective}`,
+    `Session: ${goal.sessionName ?? goal.sessionKey}`,
+    `Workspace: ${goal.executionWorkspace ?? "legacy session-bound goal"}`,
+    `Branch/ref: ${goal.branch ?? goal.ref ?? "not configured"}`,
+    `Verification: ${goal.branchVerificationStatus ?? "unknown"}`,
+    `Tokens: ${formatTokenCount(goal.tokensUsed)}${goal.tokenBudget === undefined ? "" : `/${formatTokenCount(goal.tokenBudget)}`}`,
+  ].join("\n");
+}
+
+function formatWorkspaceValidationSuffix(validation: WorkspaceValidationResult): string {
+  const branch = validation.currentBranch ? ` currentBranch=${validation.currentBranch}` : "";
+  const dirty = validation.dirty ? " dirty" : "";
+  const untracked = validation.untracked ? " untracked" : "";
+  return `${branch}${dirty}${untracked}`;
+}
+
+function renderGoalOwnedSessionInitialPrompt(
+  goal: GoalRecord,
+  binding: ResolvedWorkspaceBinding,
+  validation: WorkspaceValidationResult,
+): string {
+  return [
+    `Continue working toward the active goal: ${goal.objective}`,
+    "",
+    "Execution workspace binding for this goal-owned session:",
+    `- Workspace: ${binding.workspace}`,
+    binding.branch ? `- Branch: ${binding.branch}` : binding.ref ? `- Ref: ${binding.ref}` : "- Branch/ref: not applicable",
+    `- Workspace status: ${validation.workspaceStatus}`,
+    `- Branch verification: ${validation.branchVerificationStatus}`,
+    "",
+    "Before making file changes, operate in the configured workspace above. Do not create, switch, or delete worktrees/branches as part of /goal itself.",
+  ].join("\n");
 }
 
 function resolveSessionKey(ctx: ExtensionContext | ExtensionCommandContext): string {
