@@ -78,6 +78,7 @@ The included Pi adapter maps:
 - model tools through `pi.registerTool(...)`
 - turn/tool lifecycle through Pi events
 - ordinary-turn active goal reminders through `before_agent_start`
+- Pi custom session-entry mirroring through append-only `agent-goal-runtime-state` entries while the portable store remains canonical
 - hidden continuation through `pi.sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })`
 - stale hidden continuation rewriting through the Pi `context` hook, including non-runnable stale bookkeeping and superseding older duplicate active-goal continuations
 - stale hidden continuation abort suppression in `before_agent_start` / `turn_end` so cancelled old-goal continuations do not pause the current goal

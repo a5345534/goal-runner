@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { GoalRuntime, SQLiteGoalStore, parseGoalCommand, renderActiveGoalReminderPrompt, } from "../../core/index.js";
+import { PI_GOAL_SESSION_ENTRY_TYPE, PiSessionGoalMirrorStore } from "./session-store.js";
 const EXTENSION_MESSAGE_TYPE = "agent-goal-runtime";
 const HIDDEN_CONTEXT_KIND = "goal_continuation";
 const STALE_CONTINUATION_KIND = "stale_goal_continuation";
@@ -12,7 +13,7 @@ const MAX_RECOVERY_EXCERPT_CHARS = 2_000;
 const POST_STOP_ALLOWED_TOOL_SET = new Set(["get_goal", "read", "grep", "find", "ls"]);
 const MEANINGFUL_PROGRESS_TOOL_SET = new Set(["write", "edit", "bash", "read", "grep", "find", "ls"]);
 export default function goalPiExtension(pi) {
-    const store = new SQLiteGoalStore();
+    const store = new PiSessionGoalMirrorStore(new SQLiteGoalStore(), (data) => pi.appendEntry(PI_GOAL_SESSION_ENTRY_TYPE, data));
     let lastCtx;
     let staleContinuationAbortPending;
     const startedAttempts = new Map();

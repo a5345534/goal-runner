@@ -14,7 +14,8 @@
   },
   "exports": {
     ".": "./dist/core/index.js",
-    "./pi": "./dist/adapters/pi/index.js"
+    "./pi": "./dist/adapters/pi/index.js",
+    "./pi/session-store": "./dist/adapters/pi/session-store.js"
   },
   "files": [
     "dist",

@@ -14,6 +14,7 @@ import {
   type GoalRecord,
   type HiddenGoalTurnRequest,
 } from "../../core/index.js";
+import { PI_GOAL_SESSION_ENTRY_TYPE, PiSessionGoalMirrorStore } from "./session-store.js";
 
 const EXTENSION_MESSAGE_TYPE = "agent-goal-runtime";
 const HIDDEN_CONTEXT_KIND = "goal_continuation";
@@ -26,7 +27,10 @@ const POST_STOP_ALLOWED_TOOL_SET = new Set(["get_goal", "read", "grep", "find", 
 const MEANINGFUL_PROGRESS_TOOL_SET = new Set(["write", "edit", "bash", "read", "grep", "find", "ls"]);
 
 export default function goalPiExtension(pi: ExtensionAPI) {
-  const store = new SQLiteGoalStore();
+  const store = new PiSessionGoalMirrorStore(
+    new SQLiteGoalStore(),
+    (data) => pi.appendEntry(PI_GOAL_SESSION_ENTRY_TYPE, data),
+  );
   let lastCtx: ExtensionContext | ExtensionCommandContext | undefined;
   let staleContinuationAbortPending: GoalContinuationMetadata | undefined;
   const startedAttempts = new Map<string, string | undefined>();
