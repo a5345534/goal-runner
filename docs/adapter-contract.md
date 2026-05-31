@@ -60,6 +60,12 @@ If the auditor rejects, the goal remains non-terminal and the runtime records th
 
 `toolCompleted(context)` accepts optional `toolName`, `meaningfulProgress`, and `progressSummary` fields. Full adapters should set `meaningfulProgress=false` for status-only or bookkeeping tools such as `get_goal`, and true for task-relevant read/write/edit/bash/test activity. `turnFinished(..., true)` only schedules another hidden continuation when the just-finished turn made meaningful progress.
 
+## Token usage snapshots
+
+The portable runtime accepts normalized token usage snapshots; it does not depend on host-specific usage objects. Adapters should normalize their host usage before calling runtime hooks.
+
+The Pi adapter counts completed assistant `input + output` channels when available and deliberately excludes provider cache accounting channels such as `cacheRead` / `cacheWrite` from goal budget usage. If a usage object lacks input/output channels but exposes a finite positive `totalTokens` value, the Pi adapter may use that total as a fallback. The core runtime still owns delta accounting and `budgetLimited` transitions.
+
 ## Execution ledger
 
 Stores must persist goal ledger events through `appendLedgerEvent` and `listLedgerEvents`. The default SQLite store uses a `goal_ledger` table. Alternate stores should preserve equivalent event semantics so compaction, handoff, and audit can inspect lifecycle and evidence without relying only on chat transcript.

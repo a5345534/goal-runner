@@ -123,3 +123,7 @@ PI_GOAL_COMPLETION_AUDIT=off
 The heuristic approves when the Pi transcript contains task-relevant tool evidence or verification signals such as tests/builds/checks/OpenSpec validation. It rejects pure self-certification with no task-relevant tool or verification evidence. Hosts can replace this with a stronger auditor through the runtime callback contract.
 
 Every goal store now also records a durable ledger of lifecycle and execution events: create/edit/pause/resume, turn start/finish, meaningful progress, continuation outcomes, completion requests, audit results, completed/blocked transitions, and budget/usage limits. The ledger is portable store data, not Pi-only `.pi/goals/*.md` canonical state.
+
+## Pi token accounting
+
+The portable runtime accepts normalized token snapshots. The Pi adapter normalizes completed assistant usage as `input + output` when those channels are present and excludes provider cache accounting channels such as `cacheRead` / `cacheWrite` from goal budget usage. If a Pi/bridged usage object lacks input/output channels but exposes a finite positive `totalTokens`, the adapter uses that as a fallback. The core runtime still computes deltas and transitions goals to `budgetLimited` when the normalized total reaches the configured budget.

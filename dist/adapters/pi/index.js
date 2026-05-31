@@ -237,26 +237,35 @@ function requireContext(ctx) {
 }
 function readTokenUsage(ctx) {
     const entries = (ctx.sessionManager?.getBranch?.() ?? []);
+    const branchTokens = readPiAssistantTokenTotalFromEntries(entries);
+    if (branchTokens > 0)
+        return { totalTokens: branchTokens };
+    const usage = ctx.getContextUsage?.();
+    return typeof usage?.tokens === "number" && Number.isFinite(usage.tokens) && usage.tokens > 0 ? { totalTokens: usage.tokens } : undefined;
+}
+export function readPiAssistantTokenTotalFromEntries(entries) {
     let totalTokens = 0;
     for (const entry of entries) {
         const message = entry.message;
         if (entry.type !== "message" || message?.role !== "assistant")
             continue;
-        const usage = message.usage;
-        if (!usage)
-            continue;
-        if (typeof usage.totalTokens === "number")
-            totalTokens += usage.totalTokens;
-        else
-            totalTokens += numberValue(usage.input) + numberValue(usage.output);
+        totalTokens += normalizePiAssistantUsage(message.usage);
     }
-    if (totalTokens > 0)
-        return { totalTokens };
-    const usage = ctx.getContextUsage?.();
-    return typeof usage?.tokens === "number" ? { totalTokens: usage.tokens } : undefined;
+    return totalTokens;
 }
-function numberValue(value) {
-    return typeof value === "number" && Number.isFinite(value) ? value : 0;
+export function normalizePiAssistantUsage(usage) {
+    if (!usage || typeof usage !== "object" || Array.isArray(usage))
+        return 0;
+    const record = usage;
+    const input = tokenChannelValue(record.input ?? record.inputTokens);
+    const output = tokenChannelValue(record.output ?? record.outputTokens);
+    if (input !== undefined || output !== undefined) {
+        return (input ?? 0) + (output ?? 0);
+    }
+    return tokenChannelValue(record.totalTokens ?? record.total) ?? 0;
+}
+function tokenChannelValue(value) {
+    return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : undefined;
 }
 function buildBlockedAuditEvidence(ctx, goal, threshold) {
     const entries = (ctx.sessionManager?.getBranch?.() ?? []);
