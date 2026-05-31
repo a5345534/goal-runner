@@ -274,24 +274,35 @@ function requireContext<T extends ExtensionContext | ExtensionCommandContext>(ct
 
 function readTokenUsage(ctx: ExtensionContext): { totalTokens?: number } | undefined {
   const entries = (ctx.sessionManager?.getBranch?.() ?? []) as Array<Record<string, unknown>>;
-  let totalTokens = 0;
+  const branchTokens = readPiAssistantTokenTotalFromEntries(entries);
+  if (branchTokens > 0) return { totalTokens: branchTokens };
+  const usage = ctx.getContextUsage?.();
+  return typeof usage?.tokens === "number" && Number.isFinite(usage.tokens) && usage.tokens > 0 ? { totalTokens: usage.tokens } : undefined;
+}
 
+export function readPiAssistantTokenTotalFromEntries(entries: Array<Record<string, unknown>>): number {
+  let totalTokens = 0;
   for (const entry of entries) {
     const message = entry.message as Record<string, unknown> | undefined;
     if (entry.type !== "message" || message?.role !== "assistant") continue;
-    const usage = message.usage as Record<string, unknown> | undefined;
-    if (!usage) continue;
-    if (typeof usage.totalTokens === "number") totalTokens += usage.totalTokens;
-    else totalTokens += numberValue(usage.input) + numberValue(usage.output);
+    totalTokens += normalizePiAssistantUsage(message.usage);
   }
-
-  if (totalTokens > 0) return { totalTokens };
-  const usage = ctx.getContextUsage?.();
-  return typeof usage?.tokens === "number" ? { totalTokens: usage.tokens } : undefined;
+  return totalTokens;
 }
 
-function numberValue(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+export function normalizePiAssistantUsage(usage: unknown): number {
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) return 0;
+  const record = usage as Record<string, unknown>;
+  const input = tokenChannelValue(record.input ?? record.inputTokens);
+  const output = tokenChannelValue(record.output ?? record.outputTokens);
+  if (input !== undefined || output !== undefined) {
+    return (input ?? 0) + (output ?? 0);
+  }
+  return tokenChannelValue(record.totalTokens ?? record.total) ?? 0;
+}
+
+function tokenChannelValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : undefined;
 }
 
 function buildBlockedAuditEvidence(
