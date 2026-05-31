@@ -16,6 +16,7 @@ import {
   type HiddenGoalTurnRequest,
   type WorkspaceProfile,
 } from "../../core/index.js";
+import { GoalListController } from "./goal-list-ui.js";
 import { PI_GOAL_SESSION_ENTRY_TYPE, PiSessionGoalMirrorStore } from "./session-store.js";
 import {
   parseGoalWorkspaceFlags,
@@ -431,13 +432,37 @@ async function showGoalList(runtime: GoalRuntime, ctx: ExtensionCommandContext):
     ctx.ui.notify("No goals recorded", "info");
     return;
   }
-  const options = summaries.map(formatGoalListOption);
-  const selected = await ctx.ui.select("/goal list — select a goal", options);
-  if (!selected) return;
-  const index = options.indexOf(selected);
-  const goal = summaries[index];
+  const goal = await pickGoalFromList(ctx, summaries);
   if (!goal) return;
   await monitorGoalSummary(runtime, ctx, goal);
+}
+
+async function pickGoalFromList(ctx: ExtensionCommandContext, summaries: GoalSummary[]): Promise<GoalSummary | undefined> {
+  if (!ctx.hasUI) {
+    const options = summaries.map(formatGoalListOption);
+    const selected = await ctx.ui.select("/goal list — select a goal", options);
+    return selected ? summaries[options.indexOf(selected)] : undefined;
+  }
+
+  return ctx.ui.custom((tui: { requestRender(): void }, theme: { fg(color: string, text: string): string; bold?(text: string): string }, _keybindings: unknown, done: (result: GoalSummary | undefined) => void) => {
+    const controller = new GoalListController(summaries);
+    return {
+      render: (width: number) => controller.render(width, theme),
+      invalidate: () => undefined,
+      handleInput: (data: string) => {
+        const selection = controller.handleInput(data);
+        if (selection?.kind === "close") {
+          done(undefined);
+          return;
+        }
+        if (selection?.kind === "select") {
+          done(selection.goal);
+          return;
+        }
+        tui.requestRender();
+      },
+    };
+  });
 }
 
 async function showTargetGoalStatus(runtime: GoalRuntime, ctx: ExtensionCommandContext, reference: string): Promise<void> {

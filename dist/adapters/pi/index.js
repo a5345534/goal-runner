@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { GoalRuntime, SQLiteGoalStore, parseGoalCommand, renderActiveGoalReminderPrompt, } from "../../core/index.js";
+import { GoalListController } from "./goal-list-ui.js";
 import { PI_GOAL_SESSION_ENTRY_TYPE, PiSessionGoalMirrorStore } from "./session-store.js";
 import { parseGoalWorkspaceFlags, parseWorkspaceProfileCommand, resolveWorkspaceBinding, tokenize, validateExecutionWorkspace, } from "./workspace.js";
 const EXTENSION_MESSAGE_TYPE = "agent-goal-runtime";
@@ -370,15 +371,36 @@ async function showGoalList(runtime, ctx) {
         ctx.ui.notify("No goals recorded", "info");
         return;
     }
-    const options = summaries.map(formatGoalListOption);
-    const selected = await ctx.ui.select("/goal list — select a goal", options);
-    if (!selected)
-        return;
-    const index = options.indexOf(selected);
-    const goal = summaries[index];
+    const goal = await pickGoalFromList(ctx, summaries);
     if (!goal)
         return;
     await monitorGoalSummary(runtime, ctx, goal);
+}
+async function pickGoalFromList(ctx, summaries) {
+    if (!ctx.hasUI) {
+        const options = summaries.map(formatGoalListOption);
+        const selected = await ctx.ui.select("/goal list — select a goal", options);
+        return selected ? summaries[options.indexOf(selected)] : undefined;
+    }
+    return ctx.ui.custom((tui, theme, _keybindings, done) => {
+        const controller = new GoalListController(summaries);
+        return {
+            render: (width) => controller.render(width, theme),
+            invalidate: () => undefined,
+            handleInput: (data) => {
+                const selection = controller.handleInput(data);
+                if (selection?.kind === "close") {
+                    done(undefined);
+                    return;
+                }
+                if (selection?.kind === "select") {
+                    done(selection.goal);
+                    return;
+                }
+                tui.requestRender();
+            },
+        };
+    });
 }
 async function showTargetGoalStatus(runtime, ctx, reference) {
     const goal = await resolveGoalReferenceOrThrow(runtime, reference);
