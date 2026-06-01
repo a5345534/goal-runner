@@ -523,16 +523,20 @@ async function pickGoalMonitorAction(ctx: ExtensionCommandContext, goal: GoalSum
 
   return ctx.ui.custom((tui: { requestRender(): void }, theme: { fg(color: string, text: string): string; bold?(text: string): string }, _keybindings: unknown, done: (result: GoalMonitorAction | undefined) => void) => {
     const controller = new GoalMonitorController(goal);
+    const refresh = setInterval(() => tui.requestRender(), 1_000);
     return {
       render: (width: number) => controller.render(width, theme),
       invalidate: () => undefined,
+      dispose: () => clearInterval(refresh),
       handleInput: (data: string) => {
         const selection = controller.handleInput(data);
         if (selection?.kind === "close") {
+          clearInterval(refresh);
           done(undefined);
           return;
         }
         if (selection?.kind === "action") {
+          clearInterval(refresh);
           done(selection.action);
           return;
         }

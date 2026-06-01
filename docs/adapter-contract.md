@@ -86,7 +86,7 @@ The included Pi adapter maps:
 - model tools through `pi.registerTool(...)`
 - turn/tool lifecycle through Pi events
 - ordinary-turn active goal reminders through `before_agent_start`
-- goal registry/list commands, targeted status/monitor/pause/resume/clear/edit/budget commands, and named workspace profile commands
+- goal registry/list commands, read-only live transcript monitor, targeted status/monitor/pause/resume/clear/edit/budget commands, and named workspace profile commands
 - explicit workspace/branch/ref binding validation without filesystem mutation, branch creation, or branch switching
 - Pi custom session-entry mirroring through append-only `agent-goal-runtime-state` entries while the portable store remains canonical
 - hidden continuation through `pi.sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })` in the materialized goal session`

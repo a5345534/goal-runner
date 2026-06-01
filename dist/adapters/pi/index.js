@@ -465,16 +465,20 @@ async function pickGoalMonitorAction(ctx, goal) {
     }
     return ctx.ui.custom((tui, theme, _keybindings, done) => {
         const controller = new GoalMonitorController(goal);
+        const refresh = setInterval(() => tui.requestRender(), 1_000);
         return {
             render: (width) => controller.render(width, theme),
             invalidate: () => undefined,
+            dispose: () => clearInterval(refresh),
             handleInput: (data) => {
                 const selection = controller.handleInput(data);
                 if (selection?.kind === "close") {
+                    clearInterval(refresh);
                     done(undefined);
                     return;
                 }
                 if (selection?.kind === "action") {
+                    clearInterval(refresh);
                     done(selection.action);
                     return;
                 }
