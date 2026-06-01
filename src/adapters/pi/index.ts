@@ -112,7 +112,9 @@ export default function goalPiExtension(pi: ExtensionAPI) {
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       lastCtx = ctx;
       try {
-        await handlePiGoalCommand(runtime, ctx, args);
+        await handlePiGoalCommand(runtime, ctx, args, (nextCtx) => {
+          lastCtx = nextCtx;
+        });
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }
@@ -272,7 +274,12 @@ export default function goalPiExtension(pi: ExtensionAPI) {
   });
 }
 
-async function handlePiGoalCommand(runtime: GoalRuntime, ctx: ExtensionCommandContext, args: string): Promise<void> {
+async function handlePiGoalCommand(
+  runtime: GoalRuntime,
+  ctx: ExtensionCommandContext,
+  args: string,
+  bindActiveContext: (ctx: ExtensionCommandContext) => void,
+): Promise<void> {
   const sessionKey = resolveSessionKey(ctx);
   const trimmed = args.trim();
 
@@ -356,7 +363,7 @@ async function handlePiGoalCommand(runtime: GoalRuntime, ctx: ExtensionCommandCo
     const binding = resolveWorkspaceBinding(workspaceFlags, profiles, ctx.cwd);
     const validation = validateExecutionWorkspace(binding);
     if (!validation.ok) throw new Error(validation.message ?? "execution workspace validation failed");
-    await startGoalOwnedPiSession(runtime, ctx, command, binding, validation);
+    await startGoalOwnedPiSession(runtime, ctx, command, binding, validation, bindActiveContext);
     return;
   }
 
@@ -402,6 +409,7 @@ async function startGoalOwnedPiSession(
   command: { kind: "start"; objective: string; tokenBudget?: number },
   binding: ResolvedWorkspaceBinding,
   validation: WorkspaceValidationResult,
+  bindActiveContext: (ctx: ExtensionCommandContext) => void,
 ): Promise<void> {
   const originSessionKey = resolveSessionKey(ctx);
   const originSessionFile = ctx.sessionManager.getSessionFile();
@@ -413,6 +421,7 @@ async function startGoalOwnedPiSession(
       sessionManager.appendSessionInfo(`goal: ${labelObjective}`);
     },
     withSession: async (goalCtx: ExtensionCommandContext & { sendUserMessage(content: string): Promise<void>; sendMessage: unknown }) => {
+      bindActiveContext(goalCtx);
       const executionSessionKey = resolveSessionKey(goalCtx);
       const created = await runtime.createOrReplaceGoal(executionSessionKey, command.objective, { tokenBudget: command.tokenBudget });
       if (!created.goal) throw new Error(created.message);

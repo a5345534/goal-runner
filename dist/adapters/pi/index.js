@@ -79,7 +79,9 @@ export default function goalPiExtension(pi) {
         handler: async (args, ctx) => {
             lastCtx = ctx;
             try {
-                await handlePiGoalCommand(runtime, ctx, args);
+                await handlePiGoalCommand(runtime, ctx, args, (nextCtx) => {
+                    lastCtx = nextCtx;
+                });
             }
             catch (error) {
                 ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -226,7 +228,7 @@ export default function goalPiExtension(pi) {
         await store.close?.();
     });
 }
-async function handlePiGoalCommand(runtime, ctx, args) {
+async function handlePiGoalCommand(runtime, ctx, args, bindActiveContext) {
     const sessionKey = resolveSessionKey(ctx);
     const trimmed = args.trim();
     const workspaceCommand = parseWorkspaceProfileCommand(trimmed, ctx.cwd);
@@ -309,7 +311,7 @@ async function handlePiGoalCommand(runtime, ctx, args) {
         const validation = validateExecutionWorkspace(binding);
         if (!validation.ok)
             throw new Error(validation.message ?? "execution workspace validation failed");
-        await startGoalOwnedPiSession(runtime, ctx, command, binding, validation);
+        await startGoalOwnedPiSession(runtime, ctx, command, binding, validation, bindActiveContext);
         return;
     }
     const result = await runtime.executeParsedCommand(sessionKey, command, { confirmReplace: true });
@@ -345,7 +347,7 @@ async function handleWorkspaceProfileCommand(runtime, ctx, command) {
     await runtime.saveWorkspaceProfile(profile);
     ctx.ui.notify(`Saved workspace profile: ${formatWorkspaceProfile(profile)}${formatWorkspaceValidationSuffix(validation)}`, "info");
 }
-async function startGoalOwnedPiSession(runtime, ctx, command, binding, validation) {
+async function startGoalOwnedPiSession(runtime, ctx, command, binding, validation, bindActiveContext) {
     const originSessionKey = resolveSessionKey(ctx);
     const originSessionFile = ctx.sessionManager.getSessionFile();
     const labelObjective = command.objective.length <= 64 ? command.objective : `${command.objective.slice(0, 61)}...`;
@@ -355,6 +357,7 @@ async function startGoalOwnedPiSession(runtime, ctx, command, binding, validatio
             sessionManager.appendSessionInfo(`goal: ${labelObjective}`);
         },
         withSession: async (goalCtx) => {
+            bindActiveContext(goalCtx);
             const executionSessionKey = resolveSessionKey(goalCtx);
             const created = await runtime.createOrReplaceGoal(executionSessionKey, command.objective, { tokenBudget: command.tokenBudget });
             if (!created.goal)
