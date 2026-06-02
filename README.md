@@ -90,10 +90,12 @@ loop without reaching into the store directly.
 
 ## Goal DAG planning and scheduling
 
-The portable core exports deterministic DAG helpers for controller adapters:
+The portable core exports deterministic DAG helpers for controller adapters. See
+[`docs/goal-dag-format.md`](docs/goal-dag-format.md) for the user-facing objective
+format supported by `/goal <objective>`.
 
 - `planGoalDagFromObjective()` converts an objective into `GoalDagPlanNodeInput`
-  records using either a single-node fallback or markdown task-list parsing,
+  records using either a single-node fallback or explicit markdown task-list / heading parsing,
 - task-list annotations such as `[id: ...]`, `[after: ...]`, `[parallel]`,
   `[validators: ...]`, `[outputs: ...]`, and conflict hints (`[files: ...]`,
   `[modules: ...]`, `[capabilities: ...]`) let callers shape the generated DAG

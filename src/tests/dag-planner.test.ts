@@ -48,6 +48,26 @@ test("objective DAG planner parses task lists, annotations, and sequential depen
   assert.match(plan.warnings[0] ?? "", /opted out/);
 });
 
+test("objective DAG planner supports documented headings, aliases, and value separators", () => {
+  const objective = [
+    "## Define payroll spec [id: payroll-spec] [output: openspec/changes/payroll/tasks.md] [check: openspec validate payroll --strict]",
+    "- [id: payroll-doctypes] Add payroll DocTypes [depends: payroll-spec] [file: payroll/doctype.json] [capability: payroll]",
+    "1. Add payroll tests [dependencies: payroll-doctypes] [expected-outputs: tests/payroll.py | tests/fixtures.json] [checks: pytest, npm test]",
+  ].join("\n");
+
+  const plan = planGoalDagFromObjective("goal-1", objective, { now });
+
+  assert.deepEqual(plan.nodeInputs.map((node) => node.nodeId), ["payroll-spec", "payroll-doctypes", "add-payroll-tests"]);
+  assert.deepEqual(plan.nodeInputs[0]?.expectedOutputs, ["openspec/changes/payroll/tasks.md"]);
+  assert.deepEqual(plan.nodeInputs[0]?.validators, ["openspec validate payroll --strict"]);
+  assert.deepEqual(plan.nodeInputs[1]?.dependencyNodeIds, ["payroll-spec"]);
+  assert.deepEqual(plan.nodeInputs[1]?.conflictHints?.files, ["payroll/doctype.json"]);
+  assert.deepEqual(plan.nodeInputs[1]?.conflictHints?.capabilities, ["payroll"]);
+  assert.deepEqual(plan.nodeInputs[2]?.dependencyNodeIds, ["payroll-doctypes"]);
+  assert.deepEqual(plan.nodeInputs[2]?.expectedOutputs, ["tests/payroll.py", "tests/fixtures.json"]);
+  assert.deepEqual(plan.nodeInputs[2]?.validators, ["pytest", "npm test"]);
+});
+
 test("objective DAG planner supports independent dependency mode", () => {
   const plan = planGoalDagFromObjective(
     "goal-1",
