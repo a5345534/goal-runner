@@ -696,13 +696,19 @@ function formatGoalListOption(goal) {
 async function formatGoalSummaryDetails(runtime, goal) {
     return [
         `Goal ${goal.shortGoalId}`,
-        `Status: ${goal.status} (${goal.activityState})`,
-        `Objective: ${goal.objective}`,
-        `Session: ${goal.sessionName ?? goal.sessionKey}`,
-        `Workspace: ${goal.executionWorkspace ?? "legacy session-bound goal"}`,
-        `Branch/ref: ${goal.branch ?? goal.ref ?? "not configured"}`,
-        `Verification: ${goal.branchVerificationStatus ?? "unknown"}`,
+        `Status: ${goal.status}${goal.activityState ? ` (${goal.activityState})` : ""}`,
         `Tokens: ${formatTokenCount(goal.tokensUsed)}${goal.tokenBudget === undefined ? "" : `/${formatTokenCount(goal.tokenBudget)}`}`,
+        "",
+        "Objective:",
+        ...wrapDisplayText(goal.objective, 92).map((line) => `  ${line}`),
+        "",
+        "Workspace:",
+        `  path: ${shortenPath(goal.executionWorkspace ?? "legacy session-bound goal")}`,
+        `  branch/ref: ${shortenMiddle(goal.branch ?? goal.ref ?? "not configured", 96)}`,
+        `  verification: ${goal.branchVerificationStatus ?? "unknown"}`,
+        "",
+        "Session:",
+        `  ${shortenMiddle(goal.sessionName ?? goal.sessionKey, 110)}`,
         await formatGoalOrchestrationDetails(runtime, goal.goalId),
     ].filter(Boolean).join("\n");
 }
@@ -716,18 +722,94 @@ async function formatGoalOrchestrationDetails(runtime, goalId) {
         list.push(subagent);
         subagentsByNode.set(subagent.nodeId, list);
     }
-    const lines = ["", "DAG:"];
-    for (const node of state.nodes) {
-        const deps = node.dependencyNodeIds.length ? ` deps=[${node.dependencyNodeIds.join(",")}]` : "";
-        const summary = node.lastValidationSummary ? ` validation=${node.lastValidationSummary}` : "";
-        lines.push(`- ${node.nodeId}: ${node.status}${deps}${summary}`);
-        for (const subagent of subagentsByNode.get(node.nodeId) ?? []) {
-            const branch = subagent.branch ? ` branch=${subagent.branch}` : "";
-            const workspace = subagent.workspacePath ? ` workspace=${subagent.workspacePath}` : "";
-            lines.push(`  - subagent ${subagent.subagentId}: ${subagent.status}${branch}${workspace}`);
+    const nodeCounts = countByStatus(state.nodes.map((node) => node.status));
+    const subagentCounts = countByStatus(state.subagents.map((subagent) => subagent.status));
+    const lines = [
+        "",
+        "DAG summary:",
+        `  nodes: ${formatStatusCounts(state.nodes.length, nodeCounts)}`,
+        `  subagents: ${formatStatusCounts(state.subagents.length, subagentCounts)}`,
+        "",
+        "DAG nodes:",
+    ];
+    for (const [index, node] of state.nodes.entries()) {
+        const title = shortenMiddle(node.slug || node.nodeId, 78);
+        lines.push(`  ${index + 1}. [${node.status}] ${title}`);
+        lines.push(`     id: ${shortenMiddle(node.nodeId, 86)}`);
+        for (const line of wrapDisplayText(node.objective, 86))
+            lines.push(`     objective: ${line}`);
+        if (node.dependencyNodeIds.length)
+            lines.push(`     deps: ${node.dependencyNodeIds.map((dep) => shortenMiddle(dep, 28)).join(", ")}`);
+        if (node.lastValidationSummary) {
+            for (const line of wrapDisplayText(node.lastValidationSummary, 86))
+                lines.push(`     validation: ${line}`);
+        }
+        const subagents = subagentsByNode.get(node.nodeId) ?? [];
+        if (subagents.length === 0) {
+            lines.push("     subagents: none");
+            continue;
+        }
+        lines.push("     subagents:");
+        for (const subagent of subagents) {
+            lines.push(`       - [${subagent.status}] ${shortenMiddle(subagent.subagentId, 72)}`);
+            if (subagent.branch)
+                lines.push(`         branch: ${shortenMiddle(subagent.branch, 86)}`);
+            if (subagent.workspacePath)
+                lines.push(`         workspace: ${shortenPath(subagent.workspacePath)}`);
+            if (subagent.integrationStatus) {
+                for (const line of wrapDisplayText(subagent.integrationStatus, 82))
+                    lines.push(`         note: ${line}`);
+            }
         }
     }
     return lines.join("\n");
+}
+function countByStatus(statuses) {
+    const counts = new Map();
+    for (const status of statuses)
+        counts.set(status, (counts.get(status) ?? 0) + 1);
+    return counts;
+}
+function formatStatusCounts(total, counts) {
+    if (total === 0)
+        return "0";
+    const details = [...counts.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([status, count]) => `${status}=${count}`)
+        .join(", ");
+    return `${total} (${details})`;
+}
+function shortenPath(value) {
+    const home = process.env.HOME;
+    const normalized = home && value.startsWith(`${home}/`) ? `~/${value.slice(home.length + 1)}` : value;
+    return shortenMiddle(normalized, 104);
+}
+function shortenMiddle(value, maxLength) {
+    if (value.length <= maxLength)
+        return value;
+    if (maxLength <= 1)
+        return "…";
+    const keep = maxLength - 1;
+    const head = Math.ceil(keep * 0.6);
+    const tail = Math.floor(keep * 0.4);
+    return `${value.slice(0, head)}…${value.slice(value.length - tail)}`;
+}
+function wrapDisplayText(value, maxLength) {
+    const text = value.replace(/\s+/g, " ").trim();
+    if (!text)
+        return [];
+    const lines = [];
+    let remaining = text;
+    while (remaining.length > maxLength) {
+        const candidate = remaining.slice(0, maxLength + 1);
+        const breakAt = Math.max(candidate.lastIndexOf(" "), candidate.lastIndexOf("/"));
+        const splitAt = breakAt > Math.floor(maxLength * 0.45) ? breakAt + 1 : maxLength;
+        lines.push(remaining.slice(0, splitAt).trimEnd());
+        remaining = remaining.slice(splitAt).trimStart();
+    }
+    if (remaining)
+        lines.push(remaining);
+    return lines;
 }
 function formatWorkspaceValidationSuffix(validation) {
     const branch = validation.currentBranch ? ` currentBranch=${validation.currentBranch}` : "";
