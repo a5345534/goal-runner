@@ -77,7 +77,9 @@ export class PiHarnessSubagentAdapter implements HarnessSubagentAdapter {
   }
 
   getSessionState(request: HarnessSubagentStateRequest): HarnessSubagentSessionState {
-    return readPiSubagentSessionState(request.subagent, { live: this.handles.has(keyForSubagent(request.subagent)) });
+    return readPiSubagentSessionState(request.subagent, {
+      live: this.handles.has(keyForSubagent(request.subagent)) || isLiveSubagentStatus(request.subagent.status),
+    });
   }
 
   async abortSession(request: HarnessSubagentAbortRequest): Promise<void> {
@@ -224,6 +226,10 @@ function sessionNameForSubagent(subagent: GoalSubagentRecord): string {
 
 function keyForSubagent(subagent: GoalSubagentRecord): string {
   return subagent.subagentId;
+}
+
+function isLiveSubagentStatus(status: GoalSubagentRecord["status"]): boolean {
+  return ["workspaceCreated", "sessionStarted", "running", "idle", "needsFollowup", "selfReportedComplete", "controllerValidating"].includes(status);
 }
 
 function metadataString(metadata: Record<string, unknown> | undefined, key: string): string | undefined {

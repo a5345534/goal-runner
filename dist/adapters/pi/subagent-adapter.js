@@ -35,7 +35,9 @@ export class PiHarnessSubagentAdapter {
         await handle.sendPrompt(request.prompt);
     }
     getSessionState(request) {
-        return readPiSubagentSessionState(request.subagent, { live: this.handles.has(keyForSubagent(request.subagent)) });
+        return readPiSubagentSessionState(request.subagent, {
+            live: this.handles.has(keyForSubagent(request.subagent)) || isLiveSubagentStatus(request.subagent.status),
+        });
     }
     async abortSession(request) {
         const key = keyForSubagent(request.subagent);
@@ -176,6 +178,9 @@ function sessionNameForSubagent(subagent) {
 }
 function keyForSubagent(subagent) {
     return subagent.subagentId;
+}
+function isLiveSubagentStatus(status) {
+    return ["workspaceCreated", "sessionStarted", "running", "idle", "needsFollowup", "selfReportedComplete", "controllerValidating"].includes(status);
 }
 function metadataString(metadata, key) {
     const value = metadata?.[key];

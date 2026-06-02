@@ -98,6 +98,17 @@ test("Pi harness subagent adapter sanitizes truncated session ids for Pi", async
     assert.match(sessionId, /^[a-zA-Z0-9](?:[a-zA-Z0-9_.-]*[a-zA-Z0-9])?$/);
     assert.doesNotMatch(sessionId, /-$/);
 });
+test("Pi harness subagent adapter treats missing live session files as starting across poll adapters", () => {
+    const adapter = new PiHarnessSubagentAdapter({ now: () => new Date(now) });
+    const state = adapter.getSessionState({
+        subagent: subagent({
+            status: "sessionStarted",
+            sessionFile: "/tmp/not-yet-created.jsonl",
+        }),
+    });
+    assert.equal(state.status, "starting");
+    assert.match(state.error ?? "", /not found/);
+});
 test("Pi harness subagent adapter resumes an existing session file for follow-up prompts", async () => {
     const { launcher, launches, prompts, stopped } = fakeLauncher();
     const adapter = new PiHarnessSubagentAdapter({ launcher, now: () => new Date(now) });
