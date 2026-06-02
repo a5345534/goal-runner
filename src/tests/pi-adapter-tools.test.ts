@@ -125,9 +125,8 @@ test("Pi orchestrated goal start plans DAG and launches a subagent worktree", as
     assert.notEqual(launched[1]?.cwd, workspace);
     assert.match(launched[1]?.cwd ?? "", /\.worktrees/);
     assert.match(git(launched[1]?.cwd ?? workspace, ["branch", "--show-current"]), /^goal\//);
-    assert.equal(prompts.length, 2);
-    assert.match(prompts[0] ?? "", /Controller orchestration session/);
-    assert.match(prompts[1] ?? "", /SUBAGENT_RESULT/);
+    assert.equal(prompts.length, 1);
+    assert.match(prompts[0] ?? "", /SUBAGENT_RESULT/);
     assert.match(notifications.at(-1) ?? "", /planned 1 DAG node\(s\); started 1 subagent\(s\)/);
     assert.ok(mirrored.some((entry) => entry.kind === "goal_dag_node"));
     assert.ok(mirrored.some((entry) => entry.kind === "goal_subagent"));
@@ -290,8 +289,8 @@ test("Pi goal start defaults to orchestration and target lifecycle commands use 
     assert.equal(launched.length, 2);
     assert.equal(launched[0]?.cwd, workspace);
     assert.equal(launched[0]?.modelArg, "test/model");
-    assert.equal(prompts.length, 2);
-    assert.match(prompts[0] ?? "", /Controller orchestration session/);
+    assert.equal(prompts.length, 1);
+    assert.match(prompts[0] ?? "", /SUBAGENT_RESULT/);
     const shortId = notifications.at(-1)?.match(/\(([0-9a-f]{8})\)/)?.[1];
     assert.match(notifications.at(-1) ?? "", /controller session started/);
     assert.ok(shortId);
@@ -301,8 +300,8 @@ test("Pi goal start defaults to orchestration and target lifecycle commands use 
     await commandHandler?.(`resume ${shortId}`, controllerCtx as never);
     assert.equal(launched.length, 3);
     assert.equal(launched[2]?.sessionFile, goalSessionFile);
-    assert.equal(prompts.length, 3);
-    assert.match(prompts[2] ?? "", /Resume working toward the active goal/);
+    assert.equal(prompts.length, 2);
+    assert.match(prompts[1] ?? "", /Resume working toward the active goal/);
     for (const handler of handlers.get("session_shutdown") ?? []) await handler({ type: "session_shutdown", reason: "quit" });
     assert.deepEqual(stopped, []);
   } finally {

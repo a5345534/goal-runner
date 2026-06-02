@@ -427,7 +427,6 @@ async function startGoalOwnedPiSession(
       updatedAt: new Date().toISOString(),
     });
     backgroundGoalSessions.set(created.goal.goalId, background);
-    await background.sendPrompt(renderGoalOwnedControllerInitialPrompt(created.goal, binding, validation));
     const orchestration = await runPiGoalControllerLoopForGoal(runtime, ctx, created.goal, binding);
     ctx.ui.notify(
       `Goal-owned controller session started (${shortGoalId}) and planned ${orchestration.plannedNodeCount} DAG node(s); started ${orchestration.startedSubagentCount} subagent(s). Workspace: ${binding.workspace}${formatWorkspaceValidationSuffix(validation)}. Use /goal monitor ${shortGoalId} or /goal list to inspect it.`,
@@ -849,25 +848,6 @@ function formatWorkspaceValidationSuffix(validation: WorkspaceValidationResult):
   const dirty = validation.dirty ? " dirty" : "";
   const untracked = validation.untracked ? " untracked" : "";
   return `${branch}${dirty}${untracked}`;
-}
-
-function renderGoalOwnedControllerInitialPrompt(
-  goal: GoalRecord,
-  binding: ResolvedWorkspaceBinding,
-  validation: WorkspaceValidationResult,
-): string {
-  return [
-    `Controller orchestration session for active goal: ${goal.objective}`,
-    "",
-    "This Pi session is the controller record for a goal DAG. The portable runtime will plan DAG nodes and launch subagents in dedicated worktrees.",
-    "Do not self-report the whole goal complete from this controller transcript unless controller validation has verified every DAG node.",
-    "",
-    "Controller workspace binding:",
-    `- Workspace: ${binding.workspace}`,
-    binding.branch ? `- Branch: ${binding.branch}` : binding.ref ? `- Ref: ${binding.ref}` : "- Branch/ref: not applicable",
-    `- Workspace status: ${validation.workspaceStatus}`,
-    `- Branch verification: ${validation.branchVerificationStatus}`,
-  ].join("\n");
 }
 
 function renderGoalResumePrompt(goal: GoalRecord): string {
