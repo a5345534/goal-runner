@@ -7,6 +7,7 @@ import {
   GoalRuntime,
   NativeGitWorkspaceManager,
   SQLiteGoalStore,
+  createControllerValidationRunner,
   createNativeGitSubagentWorkspaceAllocator,
   parseGoalCommand,
   renderActiveGoalReminderPrompt,
@@ -49,6 +50,7 @@ const POST_STOP_ALLOWED_TOOL_SET = new Set(["get_goal", "read", "grep", "find", 
 const MEANINGFUL_PROGRESS_TOOL_SET = new Set(["write", "edit", "bash", "read", "grep", "find", "ls"]);
 let backgroundGoalSessionLauncher: BackgroundGoalSessionLauncher = launchPiRpcBackgroundGoalSession;
 const backgroundGoalSessions = new Map<string, BackgroundGoalSessionHandle>();
+const piGoalControllerPollers = new Map<string, ReturnType<typeof setInterval>>();
 
 export type { BackgroundGoalSessionHandle, BackgroundGoalSessionLauncher, BackgroundGoalSessionLaunchRequest } from "./background-session.js";
 export { PiHarnessSubagentAdapter, createPiHarnessSubagentAdapter, readPiSubagentSessionState, renderPiSubagentInitialPrompt } from "./subagent-adapter.js";
@@ -295,6 +297,7 @@ export default function goalPiExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (event?: { reason?: string }) => {
+    stopAllPiGoalControllerPollingLoops();
     if (shouldCloseStoreOnSessionShutdown(event)) await store.close?.();
   });
 }
@@ -404,7 +407,9 @@ async function handlePiGoalCommand(
       return;
     }
     const profiles = await runtime.listWorkspaceProfiles();
-    const binding = resolveWorkspaceBinding(workspaceFlags, profiles, ctx.cwd);
+    const binding = workspaceFlags.orchestrate === true && !workspaceFlags.workspace
+      ? allocatePiControllerWorkspace(ctx, command.objective, workspaceFlags.branch ?? workspaceFlags.ref)
+      : resolveWorkspaceBinding(workspaceFlags, profiles, ctx.cwd);
     const validation = validateExecutionWorkspace(binding);
     if (!validation.ok) throw new Error(validation.message ?? "execution workspace validation failed");
     await startGoalOwnedPiSession(runtime, ctx, command, binding, validation, backgroundGoalSessions, { orchestrate: workspaceFlags.orchestrate === true });
@@ -445,6 +450,20 @@ async function handleWorkspaceProfileCommand(
   if (!validation.ok) throw new Error(validation.message ?? "workspace profile validation failed");
   await runtime.saveWorkspaceProfile(profile);
   ctx.ui.notify(`Saved workspace profile: ${formatWorkspaceProfile(profile)}${formatWorkspaceValidationSuffix(validation)}`, "info");
+}
+
+function allocatePiControllerWorkspace(
+  ctx: ExtensionCommandContext,
+  objective: string,
+  baseRef?: string,
+): ResolvedWorkspaceBinding {
+  const allocation = new NativeGitWorkspaceManager({ defaultBaseRef: baseRef, fetch: false }).allocateControllerWorkspace({
+    invocationCwd: ctx.cwd,
+    goalId: `goal-${randomUUID().replace(/-/g, "").slice(0, 12)}`,
+    objective,
+    baseRef,
+  });
+  return { workspace: allocation.worktreePath, branch: allocation.branch };
 }
 
 async function startGoalOwnedPiSession(
@@ -522,9 +541,23 @@ async function runPiGoalControllerLoopForGoal(
         defaultWorkspaceStrategy: "native-git-worktree",
         defaultCompletionGates: ["controller-validation"],
       });
+  const loopOptions = buildPiGoalControllerLoopOptions(ctx, goal, binding);
+  const loop = await runtime.runGoalControllerLoop(goal.goalId, loopOptions);
+  startPiGoalControllerPollingLoop(runtime, ctx, goal, binding);
+  return {
+    plannedNodeCount: planned.nodes.length,
+    startedSubagentCount: loop.ticks.reduce((count, tick) => count + tick.started.length, 0),
+  };
+}
+
+function buildPiGoalControllerLoopOptions(
+  ctx: ExtensionContext | ExtensionCommandContext,
+  goal: GoalRecord,
+  binding: ResolvedWorkspaceBinding,
+): Parameters<GoalRuntime["runGoalControllerLoop"]>[1] {
   const workspaceManager = new NativeGitWorkspaceManager({ defaultBaseRef: binding.branch ?? binding.ref, fetch: false });
   const adapter = new PiHarnessSubagentAdapter({ launcher: backgroundGoalSessionLauncher, modelArg: modelArgFromContext(ctx) });
-  const loop = await runtime.runGoalControllerLoop(goal.goalId, {
+  return {
     adapter,
     maxTicks: 1,
     intervalMs: 0,
@@ -534,12 +567,71 @@ async function runPiGoalControllerLoopForGoal(
       baseRef: binding.branch ?? binding.ref,
       metadata: { controllerGoalId: goal.goalId },
     }),
+    validator: createControllerValidationRunner({ executeValidators: readPiGoalRunValidators() }),
     metadata: { controllerGoalId: goal.goalId },
-  });
-  return {
-    plannedNodeCount: planned.nodes.length,
-    startedSubagentCount: loop.ticks.reduce((count, tick) => count + tick.started.length, 0),
   };
+}
+
+function startPiGoalControllerPollingLoop(
+  runtime: GoalRuntime,
+  ctx: ExtensionContext | ExtensionCommandContext,
+  goal: GoalRecord,
+  binding: ResolvedWorkspaceBinding,
+): void {
+  const pollMs = readPiGoalControllerPollMs();
+  if (pollMs <= 0 || piGoalControllerPollers.has(goal.goalId)) return;
+  const timer = setInterval(() => {
+    void runPiGoalControllerPoll(runtime, ctx, goal, binding).catch((error: unknown) => {
+      safeNotify(ctx, error instanceof Error ? `Goal controller poll failed: ${error.message}` : `Goal controller poll failed: ${String(error)}`, "warning");
+    });
+  }, pollMs);
+  timer.unref?.();
+  piGoalControllerPollers.set(goal.goalId, timer);
+}
+
+async function runPiGoalControllerPoll(
+  runtime: GoalRuntime,
+  ctx: ExtensionContext | ExtensionCommandContext,
+  goal: GoalRecord,
+  binding: ResolvedWorkspaceBinding,
+): Promise<void> {
+  if (await shouldStopPiGoalControllerPolling(runtime, goal.goalId)) {
+    stopPiGoalControllerPollingLoop(goal.goalId);
+    return;
+  }
+  await runtime.runGoalControllerLoop(goal.goalId, buildPiGoalControllerLoopOptions(ctx, goal, binding));
+  if (await shouldStopPiGoalControllerPolling(runtime, goal.goalId)) stopPiGoalControllerPollingLoop(goal.goalId);
+}
+
+async function shouldStopPiGoalControllerPolling(runtime: GoalRuntime, goalId: string): Promise<boolean> {
+  const state = await runtime.getGoalOrchestrationState(goalId);
+  if (state.nodes.length === 0) return true;
+  return state.nodes.every((node) => ["complete", "blocked", "failed", "superseded"].includes(node.status));
+}
+
+function stopPiGoalControllerPollingLoop(goalId: string): void {
+  const timer = piGoalControllerPollers.get(goalId);
+  if (!timer) return;
+  clearInterval(timer);
+  piGoalControllerPollers.delete(goalId);
+}
+
+function stopAllPiGoalControllerPollingLoops(): void {
+  for (const timer of piGoalControllerPollers.values()) clearInterval(timer);
+  piGoalControllerPollers.clear();
+}
+
+function readPiGoalControllerPollMs(): number {
+  const raw = process.env.AGENT_GOAL_PI_CONTROLLER_POLL_MS;
+  if (raw === "0" || raw === "off") return 0;
+  if (!raw) return 5_000;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 5_000;
+}
+
+function readPiGoalRunValidators(): boolean {
+  const raw = process.env.AGENT_GOAL_PI_RUN_VALIDATORS ?? process.env.PI_GOAL_RUN_VALIDATORS;
+  return raw === "1" || raw === "true" || raw === "yes";
 }
 
 function readPiGoalMaxSubagents(): number {
@@ -597,7 +689,7 @@ async function pickGoalFromList(ctx: ExtensionCommandContext, summaries: GoalSum
 
 async function showTargetGoalStatus(runtime: GoalRuntime, ctx: ExtensionCommandContext, reference: string): Promise<void> {
   const goal = await resolveGoalReferenceOrThrow(runtime, reference);
-  ctx.ui.notify(formatGoalSummaryDetails(goal), "info");
+  ctx.ui.notify(await formatGoalSummaryDetails(runtime, goal), "info");
 }
 
 async function monitorTargetGoal(runtime: GoalRuntime, ctx: ExtensionCommandContext, reference: string): Promise<void> {
@@ -806,7 +898,7 @@ function formatGoalListOption(goal: GoalSummary): string {
   return `${goal.shortGoalId} ${goal.status} ${formatDuration(goal.timeUsedSeconds)} ${budget} ${workspace} ${branch} — ${goal.objectiveSummary}`;
 }
 
-function formatGoalSummaryDetails(goal: GoalSummary): string {
+async function formatGoalSummaryDetails(runtime: GoalRuntime, goal: GoalSummary): Promise<string> {
   return [
     `Goal ${goal.shortGoalId}`,
     `Status: ${goal.status} (${goal.activityState})`,
@@ -816,7 +908,31 @@ function formatGoalSummaryDetails(goal: GoalSummary): string {
     `Branch/ref: ${goal.branch ?? goal.ref ?? "not configured"}`,
     `Verification: ${goal.branchVerificationStatus ?? "unknown"}`,
     `Tokens: ${formatTokenCount(goal.tokensUsed)}${goal.tokenBudget === undefined ? "" : `/${formatTokenCount(goal.tokenBudget)}`}`,
-  ].join("\n");
+    await formatGoalOrchestrationDetails(runtime, goal.goalId),
+  ].filter(Boolean).join("\n");
+}
+
+async function formatGoalOrchestrationDetails(runtime: GoalRuntime, goalId: string): Promise<string> {
+  const state = await runtime.getGoalOrchestrationState(goalId);
+  if (state.nodes.length === 0 && state.subagents.length === 0) return "";
+  const subagentsByNode = new Map<string, typeof state.subagents>();
+  for (const subagent of state.subagents) {
+    const list = subagentsByNode.get(subagent.nodeId) ?? [];
+    list.push(subagent);
+    subagentsByNode.set(subagent.nodeId, list);
+  }
+  const lines = ["", "DAG:"];
+  for (const node of state.nodes) {
+    const deps = node.dependencyNodeIds.length ? ` deps=[${node.dependencyNodeIds.join(",")}]` : "";
+    const summary = node.lastValidationSummary ? ` validation=${node.lastValidationSummary}` : "";
+    lines.push(`- ${node.nodeId}: ${node.status}${deps}${summary}`);
+    for (const subagent of subagentsByNode.get(node.nodeId) ?? []) {
+      const branch = subagent.branch ? ` branch=${subagent.branch}` : "";
+      const workspace = subagent.workspacePath ? ` workspace=${subagent.workspacePath}` : "";
+      lines.push(`  - subagent ${subagent.subagentId}: ${subagent.status}${branch}${workspace}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 function formatWorkspaceValidationSuffix(validation: WorkspaceValidationResult): string {

@@ -141,6 +141,75 @@ test("Pi orchestrated goal start plans DAG and launches a subagent worktree", as
         rmSync(workspace, { recursive: true, force: true });
     }
 });
+test("Pi orchestrated goal start can auto-allocate a controller worktree", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "goal-orchestrated-auto-"));
+    const workspace = createGitWorkspace();
+    const previousStateHome = process.env.AGENT_GOAL_STATE_HOME;
+    process.env.AGENT_GOAL_STATE_HOME = dir;
+    let commandHandler;
+    const launched = [];
+    const notifications = [];
+    setPiBackgroundGoalSessionLauncherForTests(async (request) => {
+        launched.push(request);
+        return {
+            sessionFile: request.sessionFile ?? join(dir, `auto-session-${launched.length}.jsonl`),
+            sessionId: request.sessionId ?? `auto-session-${launched.length}`,
+            setSessionName: async () => undefined,
+            sendPrompt: async () => undefined,
+            stop: () => undefined,
+        };
+    });
+    const pi = {
+        registerTool() { },
+        registerCommand(_name, options) {
+            commandHandler = options.handler;
+        },
+        on() { },
+        appendEntry() { },
+        sendMessage() { },
+    };
+    const controllerCtx = {
+        hasUI: true,
+        cwd: workspace,
+        model: { provider: "test", id: "model" },
+        ui: {
+            notify(message) {
+                notifications.push(message);
+            },
+            setStatus() { },
+            setWidget() { },
+            confirm: async () => true,
+            editor: async () => undefined,
+            select: async () => undefined,
+            custom: async () => undefined,
+        },
+        sessionManager: {
+            getSessionFile: () => "/controller/session.jsonl",
+            getSessionName: () => "controller",
+        },
+        isIdle: () => true,
+        hasPendingMessages: () => false,
+    };
+    try {
+        goalPiExtension(pi);
+        assert.ok(commandHandler);
+        await commandHandler?.("--orchestrate Implement auto workspace", controllerCtx);
+        assert.equal(launched.length, 2);
+        assert.notEqual(launched[0]?.cwd, workspace);
+        assert.match(launched[0]?.cwd ?? "", /\.worktrees/);
+        assert.match(git(launched[0]?.cwd ?? workspace, ["branch", "--show-current"]), /^goal\//);
+        assert.match(notifications.at(-1) ?? "", /planned 1 DAG node\(s\); started 1 subagent\(s\)/);
+    }
+    finally {
+        setPiBackgroundGoalSessionLauncherForTests();
+        if (previousStateHome === undefined)
+            delete process.env.AGENT_GOAL_STATE_HOME;
+        else
+            process.env.AGENT_GOAL_STATE_HOME = previousStateHome;
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(workspace, { recursive: true, force: true });
+    }
+});
 test("Pi goal-owned session creation launches in background without replacing controller session", async () => {
     const dir = mkdtempSync(join(tmpdir(), "goal-session-context-"));
     const workspace = mkdtempSync(join(tmpdir(), "goal-workspace-"));
