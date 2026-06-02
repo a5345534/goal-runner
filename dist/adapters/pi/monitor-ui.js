@@ -1,15 +1,20 @@
 import { existsSync, readFileSync } from "node:fs";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-const DEFAULT_VISIBLE_TRANSCRIPT_LINES = 36;
+const DEFAULT_VISIBLE_TRANSCRIPT_LINES = 18;
+const DEFAULT_VISIBLE_DAG_LINES = 18;
 export class GoalMonitorController {
     goal;
     readTranscript;
+    readDagSnapshot;
+    now;
     buttonIndex = 0;
     scroll = 0;
     followTail = true;
-    constructor(goal, readTranscript = () => readGoalTranscript(this.goal.sessionFile)) {
+    constructor(goal, readTranscript = () => readGoalTranscript(this.goal.sessionFile), readDagSnapshot = () => ({ nodes: [], subagents: [] }), now = () => new Date()) {
         this.goal = goal;
         this.readTranscript = readTranscript;
+        this.readDagSnapshot = readDagSnapshot;
+        this.now = now;
     }
     get actions() {
         const actions = [];
@@ -65,33 +70,143 @@ export class GoalMonitorController {
             .map((action, index) => (index === this.buttonIndex ? theme.fg("accent", `[${action}]`) : theme.fg("dim", ` ${action} `)))
             .join(" ");
         const snapshot = this.readTranscript();
+        const dag = this.readDagSnapshot();
         const transcriptLines = snapshot.lines;
-        const visibleCount = DEFAULT_VISIBLE_TRANSCRIPT_LINES;
+        const dagLines = renderDagLines(dag, this.now());
+        const visibleTranscriptCount = DEFAULT_VISIBLE_TRANSCRIPT_LINES;
         if (this.followTail)
-            this.scroll = Math.max(0, transcriptLines.length - visibleCount);
+            this.scroll = Math.max(0, transcriptLines.length - visibleTranscriptCount);
         else
             this.scroll = Math.min(this.scroll, Math.max(0, transcriptLines.length - 1));
         const lines = [
             truncateToWidth(`${theme.fg("accent", title)}  ${actions}`, width),
-            truncateToWidth(`status=${this.goal.status}/${this.goal.activityState ?? "-"} workspace=${this.goal.executionWorkspace ?? "legacy"}`, width),
-            truncateToWidth(`branch/ref=${this.goal.branch ?? this.goal.ref ?? "-"} verification=${this.goal.branchVerificationStatus ?? "unknown"}`, width),
-            truncateToWidth(`session=${this.goal.sessionFile ?? "unavailable"} entries=${snapshot.entryCount} messages=${snapshot.messageCount}`, width),
-            truncateToWidth(theme.fg("dim", "↑↓ scroll • Home top • End live tail • ←→/Tab action • Enter action • Esc close without mutation"), width),
+            truncateToWidth(`status=${derivedMonitorStatus(this.goal, dag)} tokens=${formatMonitorTokens(this.goal)} elapsed=${formatElapsedSeconds(this.goal.timeUsedSeconds)}`, width),
+            truncateToWidth(`workspace=${shortenPath(this.goal.executionWorkspace ?? "legacy")} branch=${shortenMiddle(this.goal.branch ?? this.goal.ref ?? "-", 72)}`, width),
+            truncateToWidth(`DAG nodes=${formatStatusCounts(dag.nodes.map((node) => node.status))} subagents=${formatStatusCounts(dag.subagents.map((subagent) => subagent.status))} refreshed=${compactTimestamp(dag.refreshedAt ?? new Date(0).toISOString())}`, width),
+            truncateToWidth(theme.fg("dim", "live dashboard • ↑↓ transcript scroll • Home top • End live tail • ←→/Tab action • Enter action • Esc close"), width),
             truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width),
+            truncateToWidth(theme.fg("accent", "DAG / Subagents"), width),
         ];
+        if (dagLines.length === 0)
+            lines.push(truncateToWidth(theme.fg("muted", "No DAG nodes recorded yet"), width));
+        for (const line of dagLines.slice(0, DEFAULT_VISIBLE_DAG_LINES))
+            lines.push(truncateToWidth(line, width));
+        if (dagLines.length > DEFAULT_VISIBLE_DAG_LINES)
+            lines.push(truncateToWidth(theme.fg("dim", `… ${dagLines.length - DEFAULT_VISIBLE_DAG_LINES} more DAG lines`), width));
+        lines.push(truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width));
+        lines.push(truncateToWidth(theme.fg("accent", `Transcript tail (${snapshot.entryCount} entries / ${snapshot.messageCount} messages)`), width));
         if (snapshot.diagnostic)
             lines.push(truncateToWidth(theme.fg("warning", snapshot.diagnostic), width));
         if (transcriptLines.length === 0) {
             lines.push(truncateToWidth(theme.fg("muted", "No transcript entries available"), width));
             return lines;
         }
-        const end = Math.min(transcriptLines.length, this.scroll + visibleCount);
+        const end = Math.min(transcriptLines.length, this.scroll + visibleTranscriptCount);
         for (const line of transcriptLines.slice(this.scroll, end)) {
             lines.push(truncateToWidth(line, width));
         }
         lines.push(truncateToWidth(theme.fg("dim", `${this.scroll + 1}-${end}/${transcriptLines.length}${this.followTail ? " live" : ""}`), width));
         return lines;
     }
+}
+function renderDagLines(snapshot, now) {
+    if (snapshot.nodes.length === 0 && snapshot.subagents.length === 0)
+        return [];
+    const subagentsByNode = new Map();
+    for (const subagent of snapshot.subagents) {
+        const list = subagentsByNode.get(subagent.nodeId) ?? [];
+        list.push(subagent);
+        subagentsByNode.set(subagent.nodeId, list);
+    }
+    const lines = [];
+    for (const [index, node] of snapshot.nodes.entries()) {
+        const nodeRuntime = formatRuntime(node.createdAt, now);
+        const nodeActivity = formatAgo(node.updatedAt, now);
+        lines.push(`${index + 1}. [${node.status}] ${shortenMiddle(node.slug || node.nodeId, 72)} runtime=${nodeRuntime} updated=${nodeActivity}`);
+        if (node.lastValidationSummary)
+            lines.push(`   validation: ${shortenMiddle(node.lastValidationSummary, 92)}`);
+        const subagents = subagentsByNode.get(node.nodeId) ?? [];
+        if (subagents.length === 0) {
+            lines.push("   subagents: none");
+            continue;
+        }
+        for (const subagent of subagents) {
+            const runtime = formatRuntime(subagent.createdAt, now);
+            const activity = formatAgo(subagent.lastActivityAt ?? subagent.updatedAt, now);
+            lines.push(`   ↳ [${subagent.status}] ${shortenMiddle(subagent.subagentId, 62)} runtime=${runtime} last=${activity}`);
+            if (subagent.branch)
+                lines.push(`      branch: ${shortenMiddle(subagent.branch, 88)}`);
+            if (subagent.workspacePath)
+                lines.push(`      workspace: ${shortenPath(subagent.workspacePath)}`);
+            const note = subagent.integrationStatus ?? subagent.selfReportedResult;
+            if (note)
+                lines.push(`      note: ${shortenMiddle(note, 92)}`);
+        }
+    }
+    return lines;
+}
+function derivedMonitorStatus(goal, dag) {
+    const nodeStatuses = dag.nodes.map((node) => node.status);
+    if (goal.status === "active" && nodeStatuses.length > 0 && nodeStatuses.every((status) => ["failed", "blocked", "superseded"].includes(status))) {
+        return "stalled";
+    }
+    return `${goal.status}/${goal.activityState ?? "-"}`;
+}
+function formatStatusCounts(statuses) {
+    if (statuses.length === 0)
+        return "0";
+    const counts = new Map();
+    for (const status of statuses)
+        counts.set(status, (counts.get(status) ?? 0) + 1);
+    return `${statuses.length} (${[...counts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([status, count]) => `${status}=${count}`).join(",")})`;
+}
+function formatMonitorTokens(goal) {
+    return goal.tokenBudget === undefined ? formatCompactNumber(goal.tokensUsed) : `${formatCompactNumber(goal.tokensUsed)}/${formatCompactNumber(goal.tokenBudget)}`;
+}
+function formatCompactNumber(value) {
+    if (value < 1_000)
+        return `${value}`;
+    if (value < 1_000_000)
+        return `${Number.isInteger(value / 1_000) ? value / 1_000 : (value / 1_000).toFixed(1)}k`;
+    return `${Number.isInteger(value / 1_000_000) ? value / 1_000_000 : (value / 1_000_000).toFixed(1)}m`;
+}
+function formatRuntime(startedAt, now) {
+    if (!startedAt)
+        return "-";
+    const started = Date.parse(startedAt);
+    if (!Number.isFinite(started))
+        return "-";
+    return formatElapsedSeconds(Math.max(0, Math.floor((now.getTime() - started) / 1_000)));
+}
+function formatAgo(timestamp, now) {
+    if (!timestamp)
+        return "-";
+    const parsed = Date.parse(timestamp);
+    if (!Number.isFinite(parsed))
+        return "-";
+    return `${formatElapsedSeconds(Math.max(0, Math.floor((now.getTime() - parsed) / 1_000)))} ago`;
+}
+function formatElapsedSeconds(seconds) {
+    if (seconds < 60)
+        return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60)
+        return `${minutes}m${seconds % 60 ? `${seconds % 60}s` : ""}`;
+    const hours = Math.floor(minutes / 60);
+    return `${hours}h${minutes % 60 ? `${minutes % 60}m` : ""}`;
+}
+function shortenPath(value) {
+    const home = process.env.HOME;
+    const normalized = home && value.startsWith(`${home}/`) ? `~/${value.slice(home.length + 1)}` : value;
+    return shortenMiddle(normalized, 98);
+}
+function shortenMiddle(value, maxLength) {
+    if (value.length <= maxLength)
+        return value;
+    const keep = Math.max(1, maxLength - 1);
+    const head = Math.ceil(keep * 0.6);
+    const tail = Math.floor(keep * 0.4);
+    return `${value.slice(0, head)}…${value.slice(value.length - tail)}`;
 }
 export function readGoalTranscriptLines(sessionFile) {
     return readGoalTranscript(sessionFile).lines;

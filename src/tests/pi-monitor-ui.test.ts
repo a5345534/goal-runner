@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GoalMonitorController, readGoalTranscript, readGoalTranscriptLines } from "../adapters/pi/monitor-ui.js";
-import type { GoalSummary } from "../core/index.js";
+import type { GoalDagNode, GoalSubagentRecord, GoalSummary } from "../core/index.js";
 
 function summary(status: GoalSummary["status"] = "active", sessionFile?: string): GoalSummary {
   return {
@@ -93,6 +93,59 @@ test("goal monitor transcript includes custom messages, tool calls, and session 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("goal monitor renders live DAG and subagent dashboard", () => {
+  const now = new Date("2026-05-31T00:05:00.000Z");
+  const nodes: GoalDagNode[] = [
+    {
+      goalId: "abcdef123456",
+      nodeId: "people-frappe-attendance-doctypes-long-node-id",
+      slug: "people-frappe-attendance-doctypes",
+      objective: "Implement attendance DocTypes",
+      dependencyNodeIds: [],
+      expectedOutputs: [],
+      validators: [],
+      completionGates: ["controller-validation"],
+      status: "running",
+      createdAt: "2026-05-31T00:00:00.000Z",
+      updatedAt: "2026-05-31T00:04:00.000Z",
+    },
+  ];
+  const subagents: GoalSubagentRecord[] = [
+    {
+      goalId: "abcdef123456",
+      nodeId: nodes[0]!.nodeId,
+      subagentId: "subagent-abcdef12-attendance",
+      harnessAdapterId: "pi",
+      sessionFile: "/sessions/subagent.jsonl",
+      workspacePath: "/home/shawn/projects/repo/.worktrees/attendance",
+      branch: "goal/attendance",
+      status: "running",
+      prompts: ["initial"],
+      integrationStatus: "working",
+      createdAt: "2026-05-31T00:01:00.000Z",
+      updatedAt: "2026-05-31T00:04:30.000Z",
+      lastActivityAt: "2026-05-31T00:04:30.000Z",
+    },
+  ];
+  const controller = new GoalMonitorController(
+    summary("active"),
+    () => ({ lines: ["tail"], entryCount: 1, messageCount: 1 }),
+    () => ({ nodes, subagents, refreshedAt: now.toISOString() }),
+    () => now,
+  );
+  const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+
+  const rendered = controller.render(140, theme).join("\n");
+
+  assert.match(rendered, /DAG nodes=1 \(running=1\) subagents=1 \(running=1\)/);
+  assert.match(rendered, /DAG \/ Subagents/);
+  assert.match(rendered, /\[running\] people-frappe-attendance-doctypes runtime=5m updated=1m ago/);
+  assert.match(rendered, /↳ \[running\] subagent-abcdef12-attendance runtime=4m last=30s ago/);
+  assert.match(rendered, /branch: goal\/attendance/);
+  assert.match(rendered, /note: working/);
+  assert.match(rendered, /Transcript tail/);
 });
 
 test("goal monitor render auto-follows live transcript tail", () => {

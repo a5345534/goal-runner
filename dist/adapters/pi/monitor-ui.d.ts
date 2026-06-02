@@ -1,4 +1,4 @@
-import type { GoalSummary } from "../../core/index.js";
+import type { GoalDagNode, GoalSubagentRecord, GoalSummary } from "../../core/index.js";
 import type { GoalListThemeLike } from "./goal-list-ui.js";
 export type GoalMonitorAction = "close" | "pause" | "resume" | "clear" | "openSession";
 export interface GoalMonitorSelection {
@@ -11,13 +11,20 @@ export interface GoalTranscriptSnapshot {
     entryCount: number;
     messageCount: number;
 }
+export interface GoalMonitorDagSnapshot {
+    nodes: GoalDagNode[];
+    subagents: GoalSubagentRecord[];
+    refreshedAt?: string;
+}
 export declare class GoalMonitorController {
     private readonly goal;
     private readonly readTranscript;
+    private readonly readDagSnapshot;
+    private readonly now;
     private buttonIndex;
     private scroll;
     private followTail;
-    constructor(goal: GoalSummary, readTranscript?: () => GoalTranscriptSnapshot);
+    constructor(goal: GoalSummary, readTranscript?: () => GoalTranscriptSnapshot, readDagSnapshot?: () => GoalMonitorDagSnapshot, now?: () => Date);
     get actions(): GoalMonitorAction[];
     handleInput(data: string): GoalMonitorSelection | undefined;
     render(width: number, theme: GoalListThemeLike): string[];
