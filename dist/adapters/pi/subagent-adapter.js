@@ -1,0 +1,217 @@
+import { existsSync, readFileSync } from "node:fs";
+import { launchPiRpcBackgroundGoalSession, } from "./background-session.js";
+const RESULT_MARKER = /(?:^|\n)\s*SUBAGENT_RESULT\s*:\s*([\s\S]*?)(?=\n\s*SUBAGENT_[A-Z_]+\s*:|$)/i;
+const BLOCKED_MARKER = /(?:^|\n)\s*SUBAGENT_BLOCKED\s*:\s*([\s\S]*?)(?=\n\s*SUBAGENT_[A-Z_]+\s*:|$)/i;
+const STATUS_BLOCKED_MARKER = /(?:^|\n)\s*SUBAGENT_STATUS\s*:\s*blocked\b/i;
+export class PiHarnessSubagentAdapter {
+    adapterId = "pi";
+    launcher;
+    modelArg;
+    now;
+    handles = new Map();
+    constructor(options = {}) {
+        this.launcher = options.launcher ?? launchPiRpcBackgroundGoalSession;
+        this.modelArg = options.modelArg;
+        this.now = options.now ?? (() => new Date());
+    }
+    async startSession(request) {
+        const launch = launchRequestForStart(request, this.modelArg);
+        const handle = await this.launcher(launch);
+        this.rememberHandle(request.subagentId, handle);
+        await handle.sendPrompt(renderPiSubagentInitialPrompt(request));
+        return {
+            sessionId: handle.sessionId,
+            sessionFile: handle.sessionFile,
+            workspacePath: request.cwd,
+            branch: request.branch,
+            ref: request.ref,
+            status: "running",
+            lastActivityAt: this.now().toISOString(),
+            metadata: { sessionName: launch.sessionName },
+        };
+    }
+    async sendPrompt(request) {
+        const handle = await this.launchForExistingSubagent(request.subagent);
+        await handle.sendPrompt(request.prompt);
+    }
+    getSessionState(request) {
+        return readPiSubagentSessionState(request.subagent, { live: this.handles.has(keyForSubagent(request.subagent)) });
+    }
+    async abortSession(request) {
+        const key = keyForSubagent(request.subagent);
+        const handle = this.handles.get(key);
+        if (!handle)
+            return;
+        handle.stop();
+        this.handles.delete(key);
+    }
+    async launchForExistingSubagent(subagent) {
+        if (!subagent.sessionFile)
+            throw new Error(`Pi subagent ${subagent.subagentId} has no sessionFile to resume`);
+        const launch = {
+            cwd: subagent.workspacePath ?? process.cwd(),
+            sessionFile: subagent.sessionFile,
+            sessionName: sessionNameForSubagent(subagent),
+            modelArg: this.modelArg,
+        };
+        this.stopExistingHandle(subagent);
+        const handle = await this.launcher(launch);
+        this.rememberHandle(subagent.subagentId, handle);
+        return handle;
+    }
+    rememberHandle(subagentId, handle) {
+        this.handles.set(subagentId, handle);
+    }
+    stopExistingHandle(subagent) {
+        const key = keyForSubagent(subagent);
+        const handle = this.handles.get(key);
+        if (!handle)
+            return;
+        handle.stop();
+        this.handles.delete(key);
+    }
+}
+export function createPiHarnessSubagentAdapter(options = {}) {
+    return new PiHarnessSubagentAdapter(options);
+}
+export function renderPiSubagentInitialPrompt(request) {
+    const lines = [
+        request.systemPrompt,
+        "You are a goal-orchestration subagent controlled by a parent controller.",
+        "Work only on your assigned DAG node. Do not mark the parent goal complete and do not claim global completion.",
+        "When your assigned node is done, report a concise result using this exact marker on its own line:",
+        "SUBAGENT_RESULT: <summary of changes, verification, and remaining risks>",
+        "If blocked, report this exact marker instead:",
+        "SUBAGENT_BLOCKED: <specific blocker and what input/state change is needed>",
+        "",
+        `Goal: ${request.goalId}`,
+        `Node: ${request.node.nodeId} (${request.node.slug})`,
+        `Node objective: ${request.node.objective}`,
+        request.node.scope ? `Scope: ${request.node.scope}` : undefined,
+        request.cwd ? `Workspace: ${request.cwd}` : undefined,
+        request.branch ? `Branch: ${request.branch}` : request.ref ? `Ref: ${request.ref}` : undefined,
+        request.node.expectedOutputs.length ? `Expected outputs: ${request.node.expectedOutputs.join(", ")}` : undefined,
+        request.node.validators.length ? `Validators: ${request.node.validators.join(", ")}` : undefined,
+        "",
+        request.initialPrompt,
+    ];
+    return lines.filter((line) => Boolean(line && line.trim())).join("\n");
+}
+export function readPiSubagentSessionState(subagent, options = {}) {
+    const sessionFile = subagent.sessionFile;
+    const exists = options.exists ?? existsSync;
+    const readFile = options.readFile ?? ((path) => readFileSync(path, "utf8"));
+    if (!sessionFile) {
+        return { status: "failed", error: `Pi subagent ${subagent.subagentId} has no sessionFile` };
+    }
+    if (!exists(sessionFile)) {
+        return { status: options.live ? "starting" : "failed", error: `Pi subagent session file not found: ${sessionFile}` };
+    }
+    const parsed = parsePiSessionFile(readFile(sessionFile));
+    const blocked = extractBlockedMarker(parsed.lastAssistantText);
+    if (blocked) {
+        return withInspectionMetadata({ status: "blocked", selfReportedResult: blocked, lastActivityAt: parsed.lastActivityAt }, parsed);
+    }
+    const result = extractResultMarker(parsed.lastAssistantText);
+    if (result) {
+        return withInspectionMetadata({ status: "selfReportedComplete", selfReportedResult: result, lastActivityAt: parsed.lastActivityAt }, parsed);
+    }
+    if (parsed.lastError) {
+        return withInspectionMetadata({ status: "failed", error: parsed.lastError, lastActivityAt: parsed.lastActivityAt }, parsed);
+    }
+    const status = parsed.lastMessageRole === "assistant" ? "idle" : options.live ? "running" : "idle";
+    return withInspectionMetadata({ status, lastActivityAt: parsed.lastActivityAt }, parsed);
+}
+function parsePiSessionFile(content) {
+    const parsed = { entryCount: 0, messageCount: 0 };
+    for (const rawLine of content.split("\n")) {
+        if (!rawLine.trim())
+            continue;
+        let entry;
+        try {
+            entry = JSON.parse(rawLine);
+        }
+        catch {
+            parsed.lastError = "Malformed Pi session entry";
+            continue;
+        }
+        parsed.entryCount += 1;
+        if (typeof entry.timestamp === "string")
+            parsed.lastActivityAt = entry.timestamp;
+        if (entry.type !== "message")
+            continue;
+        parsed.messageCount += 1;
+        const message = entry.message;
+        if (!message)
+            continue;
+        if (typeof message.role === "string")
+            parsed.lastMessageRole = message.role;
+        if (typeof message.errorMessage === "string")
+            parsed.lastError = message.errorMessage;
+        if (message.role === "assistant")
+            parsed.lastAssistantText = textFromContent(message.content) || parsed.lastAssistantText;
+    }
+    return parsed;
+}
+function withInspectionMetadata(state, parsed) {
+    return { ...state, metadata: { ...(state.metadata ?? {}), entryCount: parsed.entryCount, messageCount: parsed.messageCount } };
+}
+function launchRequestForStart(request, modelArg) {
+    return {
+        cwd: request.cwd ?? process.cwd(),
+        sessionId: piSessionId(request.subagentId),
+        sessionName: metadataString(request.metadata, "sessionName") ?? `subagent ${request.subagentId}: ${request.node.slug}`,
+        modelArg: metadataString(request.metadata, "modelArg") ?? modelArg,
+    };
+}
+function piSessionId(subagentId) {
+    return `subagent-${subagentId}`.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 64);
+}
+function sessionNameForSubagent(subagent) {
+    return `subagent ${subagent.subagentId}: ${subagent.nodeId}`;
+}
+function keyForSubagent(subagent) {
+    return subagent.subagentId;
+}
+function metadataString(metadata, key) {
+    const value = metadata?.[key];
+    return typeof value === "string" && value.trim() ? value : undefined;
+}
+function extractResultMarker(text) {
+    const match = text?.match(RESULT_MARKER);
+    return cleanupMarkerText(match?.[1]);
+}
+function extractBlockedMarker(text) {
+    const explicit = cleanupMarkerText(text?.match(BLOCKED_MARKER)?.[1]);
+    if (explicit)
+        return explicit;
+    return STATUS_BLOCKED_MARKER.test(text ?? "") ? "Subagent reported blocked" : undefined;
+}
+function cleanupMarkerText(value) {
+    const trimmed = value?.trim();
+    return trimmed ? trimmed : undefined;
+}
+function textFromContent(content) {
+    if (typeof content === "string")
+        return content;
+    if (!Array.isArray(content))
+        return "";
+    return content
+        .map((part) => {
+        if (typeof part === "string")
+            return part;
+        if (!part || typeof part !== "object")
+            return "";
+        const record = part;
+        if (typeof record.text === "string")
+            return record.text;
+        if (typeof record.thinking === "string")
+            return record.thinking;
+        if (typeof record.result === "string")
+            return record.result;
+        return "";
+    })
+        .filter(Boolean)
+        .join("\n");
+}
+//# sourceMappingURL=subagent-adapter.js.map

@@ -1,20 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { type GoalRecord } from "../../core/index.js";
-export interface BackgroundGoalSessionLaunchRequest {
-    cwd: string;
-    sessionId?: string;
-    sessionFile?: string;
-    sessionName: string;
-    modelArg?: string;
-}
-export interface BackgroundGoalSessionHandle {
-    sessionFile: string;
-    sessionId: string;
-    setSessionName(name: string): Promise<void>;
-    sendPrompt(prompt: string): Promise<void>;
-    stop(): void;
-}
-export type BackgroundGoalSessionLauncher = (request: BackgroundGoalSessionLaunchRequest) => Promise<BackgroundGoalSessionHandle>;
+import { type BackgroundGoalSessionLauncher } from "./background-session.js";
+export type { BackgroundGoalSessionHandle, BackgroundGoalSessionLauncher, BackgroundGoalSessionLaunchRequest } from "./background-session.js";
+export { PiHarnessSubagentAdapter, createPiHarnessSubagentAdapter, readPiSubagentSessionState, renderPiSubagentInitialPrompt } from "./subagent-adapter.js";
 export declare function setPiBackgroundGoalSessionLauncherForTests(launcher?: BackgroundGoalSessionLauncher): void;
 export default function goalPiExtension(pi: ExtensionAPI): void;
 export declare function readPiAssistantTokenTotalFromEntries(entries: Array<Record<string, unknown>>): number;
@@ -30,4 +18,3 @@ export declare function rewriteQueuedGoalContinuationMessages(messages: Array<Re
     messages: Array<Record<string, unknown>>;
     changed: boolean;
 };
-export {};

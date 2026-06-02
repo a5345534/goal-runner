@@ -24,9 +24,10 @@ The current orchestration-state slices record DAG nodes and subagent registry
 records through the portable store/runtime APIs, provide a default native Git
 workspace manager that can allocate dedicated controller worktrees/branches when
 workspace and branch are omitted, expose deterministic DAG planning/scheduling
-helpers, and define a harness-neutral subagent adapter contract. They do not yet
-run the full autonomous controller loop or validate subagent self-reports; those
-are follow-up slices.
+helpers, define a harness-neutral subagent adapter contract, and provide a Pi
+implementation backed by detached background Pi RPC sessions. They do not yet run
+the full autonomous controller loop or validate subagent self-reports; those are
+follow-up slices.
 
 ## Build and test
 
@@ -64,6 +65,12 @@ Helpers such as `startGoalSubagent()`, `sendGoalSubagentPrompt()`, and
 durable `GoalSubagentRecord` updates. `GoalRuntime` wraps these helpers so a
 controller can persist subagent starts and state syncs without depending on any
 specific harness implementation.
+
+The Pi adapter exports `PiHarnessSubagentAdapter`, which launches detached Pi RPC
+sessions for DAG nodes, resumes existing session files for follow-up prompts, and
+infers subagent state from Pi JSONL transcripts. Subagents are instructed to use
+`SUBAGENT_RESULT:` / `SUBAGENT_BLOCKED:` markers; those markers are controller
+inputs only, not completion gates.
 
 ## Goal DAG planning and scheduling
 
