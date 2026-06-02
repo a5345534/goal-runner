@@ -294,7 +294,13 @@ test("Pi goal start defaults to orchestration and target lifecycle commands use 
         assert.match(notifications.at(-1) ?? "", /controller session started/);
         assert.ok(shortId);
         await commandHandler?.("", controllerCtx);
-        assert.match(notifications.at(-1) ?? "", new RegExp(`Goal ${shortId}`));
+        const statusNotification = notifications.at(-1) ?? "";
+        assert.match(statusNotification, new RegExp(`Goal ${shortId}`));
+        assert.match(statusNotification, /Objective:\n  /);
+        assert.match(statusNotification, /Workspace:\n  path:/);
+        assert.match(statusNotification, /DAG summary:\n  nodes:/);
+        assert.match(statusNotification, /DAG nodes:\n  1\. \[running\]/);
+        assert.match(statusNotification, /subagents:\n       - \[running\]/);
         await commandHandler?.(`pause ${shortId}`, controllerCtx);
         await commandHandler?.(`resume ${shortId}`, controllerCtx);
         assert.equal(launched.length, 3);
