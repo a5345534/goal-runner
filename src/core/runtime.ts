@@ -8,6 +8,11 @@ import {
   type GoalControllerTickResult,
 } from "./controller-loop.js";
 import {
+  createGoalDagNodesFromObjective,
+  type GoalDagObjectivePlanOptions,
+  type GoalDagPlannedNodesResult,
+} from "./dag-planner.js";
+import {
   createGoalDagNodes,
   getGoalDagReadyQueue as computeGoalDagReadyQueue,
   type GoalDagPlanNodeInput,
@@ -163,6 +168,16 @@ export class GoalRuntime {
     const nodes = createGoalDagNodes(goalId, inputs, options);
     for (const node of nodes) await this.store.saveGoalDagNode(node);
     return nodes;
+  }
+
+  async planGoalDagFromObjective(
+    goalId: string,
+    objective: string,
+    options: GoalDagObjectivePlanOptions = {},
+  ): Promise<GoalDagPlannedNodesResult> {
+    const plan = createGoalDagNodesFromObjective(goalId, objective, options);
+    for (const node of plan.nodes) await this.store.saveGoalDagNode(node);
+    return plan;
   }
 
   async getGoalDagReadyQueue(goalId: string, policy: GoalDagSchedulingPolicy = {}): Promise<GoalDagReadyQueue> {

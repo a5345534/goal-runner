@@ -23,10 +23,11 @@ Other agent harness bridges are intentionally out of scope for this first implem
 The current orchestration-state slices record DAG nodes and subagent registry
 records through the portable store/runtime APIs, provide a default native Git
 workspace manager that can allocate dedicated controller and subagent
-worktrees/branches, expose deterministic DAG planning/scheduling helpers, define
-a harness-neutral subagent adapter contract, provide a Pi implementation backed
-by detached background Pi RPC sessions, and include a portable controller
-orchestration loop. Full Pi `/goal` command wiring is a follow-up slice.
+worktrees/branches, expose deterministic objective-to-DAG planning and scheduling
+helpers, define a harness-neutral subagent adapter contract, provide a Pi
+implementation backed by detached background Pi RPC sessions, and include a
+portable controller orchestration loop. Full Pi `/goal` command wiring is a
+follow-up slice.
 
 ## Build and test
 
@@ -91,6 +92,12 @@ loop without reaching into the store directly.
 
 The portable core exports deterministic DAG helpers for controller adapters:
 
+- `planGoalDagFromObjective()` converts an objective into `GoalDagPlanNodeInput`
+  records using either a single-node fallback or markdown task-list parsing,
+- task-list annotations such as `[id: ...]`, `[after: ...]`, `[parallel]`,
+  `[validators: ...]`, `[outputs: ...]`, and conflict hints (`[files: ...]`,
+  `[modules: ...]`, `[capabilities: ...]`) let callers shape the generated DAG
+  without a harness-specific planner,
 - `createGoalDagNodes()` normalizes proposed DAG node inputs into durable node
   records,
 - `assertValidGoalDag()` / `validateGoalDag()` reject duplicate nodes, missing
@@ -98,9 +105,10 @@ The portable core exports deterministic DAG helpers for controller adapters:
 - `getGoalDagReadyQueue()` computes runnable nodes by dependency completion,
   current subagent activity, max concurrency, and conflict hints.
 
-`GoalRuntime` wraps these through `planGoalDag()` and `getGoalDagReadyQueue()` so
-harness adapters can persist a plan, ask which nodes are schedulable, and keep
-subagent self-reports separate from controller validation.
+`GoalRuntime` wraps these through `planGoalDag()`, `planGoalDagFromObjective()`,
+and `getGoalDagReadyQueue()` so harness adapters can persist a plan, ask which
+nodes are schedulable, and keep subagent self-reports separate from controller
+validation.
 
 ## Native Git workspace manager
 

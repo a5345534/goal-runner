@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { runGoalControllerLoop as runGoalControllerLoopCore, runGoalControllerTick as runGoalControllerTickCore, } from "./controller-loop.js";
+import { createGoalDagNodesFromObjective, } from "./dag-planner.js";
 import { createGoalDagNodes, getGoalDagReadyQueue as computeGoalDagReadyQueue, } from "./dag-scheduler.js";
 import { parseGoalCommand, validateGoalObjective } from "./parser.js";
 import { renderBudgetLimitPrompt, renderContinuationPrompt, renderObjectiveUpdatedPrompt } from "./prompts.js";
@@ -94,6 +95,12 @@ export class GoalRuntime {
         for (const node of nodes)
             await this.store.saveGoalDagNode(node);
         return nodes;
+    }
+    async planGoalDagFromObjective(goalId, objective, options = {}) {
+        const plan = createGoalDagNodesFromObjective(goalId, objective, options);
+        for (const node of plan.nodes)
+            await this.store.saveGoalDagNode(node);
+        return plan;
     }
     async getGoalDagReadyQueue(goalId, policy = {}) {
         return computeGoalDagReadyQueue(await this.getGoalOrchestrationState(goalId), policy);
