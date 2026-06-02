@@ -544,7 +544,7 @@ async function editGoalBudgetFromCommand(runtime, ctx, args) {
     await editTargetGoalBudget(runtime, ctx, first ?? "", second);
 }
 async function monitorGoalSummary(runtime, ctx, goal) {
-    const action = await pickGoalMonitorAction(ctx, goal);
+    const action = await pickGoalMonitorAction(runtime, ctx, goal);
     if (!action || action === "close")
         return;
     if (action === "pause")
@@ -556,7 +556,7 @@ async function monitorGoalSummary(runtime, ctx, goal) {
     else if (action === "openSession" && goal.sessionFile)
         await ctx.switchSession(goal.sessionFile);
 }
-async function pickGoalMonitorAction(ctx, goal) {
+async function pickGoalMonitorAction(runtime, ctx, goal) {
     if (!ctx.hasUI) {
         const options = [
             "Close",
@@ -576,9 +576,17 @@ async function pickGoalMonitorAction(ctx, goal) {
             return "openSession";
         return undefined;
     }
+    let dagSnapshot = await readGoalMonitorDagSnapshot(runtime, goal.goalId);
     return ctx.ui.custom((tui, theme, _keybindings, done) => {
-        const controller = new GoalMonitorController(goal);
-        const refresh = setInterval(() => tui.requestRender(), 1_000);
+        const controller = new GoalMonitorController(goal, undefined, () => dagSnapshot);
+        const refresh = setInterval(() => {
+            void readGoalMonitorDagSnapshot(runtime, goal.goalId)
+                .then((snapshot) => {
+                dagSnapshot = snapshot;
+                tui.requestRender();
+            })
+                .catch(() => tui.requestRender());
+        }, 1_000);
         return {
             render: (width) => controller.render(width, theme),
             invalidate: () => undefined,
@@ -599,6 +607,10 @@ async function pickGoalMonitorAction(ctx, goal) {
             },
         };
     });
+}
+async function readGoalMonitorDagSnapshot(runtime, goalId) {
+    const state = await runtime.getGoalOrchestrationState(goalId);
+    return { ...state, refreshedAt: new Date().toISOString() };
 }
 async function runTargetGoalLifecycleCommand(runtime, ctx, action, reference) {
     const goal = await resolveGoalReferenceOrThrow(runtime, reference);
@@ -696,7 +708,7 @@ function formatGoalListOption(goal) {
 async function formatGoalSummaryDetails(runtime, goal) {
     return [
         `Goal ${goal.shortGoalId}`,
-        `Status: ${goal.status}${goal.activityState ? ` (${goal.activityState})` : ""}`,
+        `Status: ${await formatGoalOperationalStatus(runtime, goal)}`,
         `Tokens: ${formatTokenCount(goal.tokensUsed)}${goal.tokenBudget === undefined ? "" : `/${formatTokenCount(goal.tokenBudget)}`}`,
         "",
         "Objective:",
@@ -711,6 +723,14 @@ async function formatGoalSummaryDetails(runtime, goal) {
         `  ${shortenMiddle(goal.sessionName ?? goal.sessionKey, 110)}`,
         await formatGoalOrchestrationDetails(runtime, goal.goalId),
     ].filter(Boolean).join("\n");
+}
+async function formatGoalOperationalStatus(runtime, goal) {
+    const state = await runtime.getGoalOrchestrationState(goal.goalId);
+    const nodeStatuses = state.nodes.map((node) => node.status);
+    if (goal.status === "active" && nodeStatuses.length > 0 && nodeStatuses.every((status) => ["failed", "blocked", "superseded"].includes(status))) {
+        return `stalled (${nodeStatuses.join(",")})`;
+    }
+    return `${goal.status}${goal.activityState ? ` (${goal.activityState})` : ""}`;
 }
 async function formatGoalOrchestrationDetails(runtime, goalId) {
     const state = await runtime.getGoalOrchestrationState(goalId);

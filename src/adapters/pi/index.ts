@@ -25,7 +25,7 @@ import {
   type BackgroundGoalSessionLauncher,
 } from "./background-session.js";
 import { GoalListController } from "./goal-list-ui.js";
-import { GoalMonitorController, type GoalMonitorAction } from "./monitor-ui.js";
+import { GoalMonitorController, type GoalMonitorAction, type GoalMonitorDagSnapshot } from "./monitor-ui.js";
 import { PI_GOAL_SESSION_ENTRY_TYPE, PiSessionGoalMirrorStore } from "./session-store.js";
 import { PiHarnessSubagentAdapter } from "./subagent-adapter.js";
 import {
@@ -648,7 +648,7 @@ async function editGoalBudgetFromCommand(runtime: GoalRuntime, ctx: ExtensionCom
 }
 
 async function monitorGoalSummary(runtime: GoalRuntime, ctx: ExtensionCommandContext, goal: GoalSummary): Promise<void> {
-  const action = await pickGoalMonitorAction(ctx, goal);
+  const action = await pickGoalMonitorAction(runtime, ctx, goal);
   if (!action || action === "close") return;
   if (action === "pause") await runTargetGoalLifecycleCommand(runtime, ctx, "pause", goal.goalId);
   else if (action === "resume") await runTargetGoalLifecycleCommand(runtime, ctx, "resume", goal.goalId);
@@ -656,7 +656,7 @@ async function monitorGoalSummary(runtime: GoalRuntime, ctx: ExtensionCommandCon
   else if (action === "openSession" && goal.sessionFile) await ctx.switchSession(goal.sessionFile);
 }
 
-async function pickGoalMonitorAction(ctx: ExtensionCommandContext, goal: GoalSummary): Promise<GoalMonitorAction | undefined> {
+async function pickGoalMonitorAction(runtime: GoalRuntime, ctx: ExtensionCommandContext, goal: GoalSummary): Promise<GoalMonitorAction | undefined> {
   if (!ctx.hasUI) {
     const options = [
       "Close",
@@ -673,9 +673,17 @@ async function pickGoalMonitorAction(ctx: ExtensionCommandContext, goal: GoalSum
     return undefined;
   }
 
+  let dagSnapshot = await readGoalMonitorDagSnapshot(runtime, goal.goalId);
   return ctx.ui.custom((tui: { requestRender(): void }, theme: { fg(color: string, text: string): string; bold?(text: string): string }, _keybindings: unknown, done: (result: GoalMonitorAction | undefined) => void) => {
-    const controller = new GoalMonitorController(goal);
-    const refresh = setInterval(() => tui.requestRender(), 1_000);
+    const controller = new GoalMonitorController(goal, undefined, () => dagSnapshot);
+    const refresh = setInterval(() => {
+      void readGoalMonitorDagSnapshot(runtime, goal.goalId)
+        .then((snapshot) => {
+          dagSnapshot = snapshot;
+          tui.requestRender();
+        })
+        .catch(() => tui.requestRender());
+    }, 1_000);
     return {
       render: (width: number) => controller.render(width, theme),
       invalidate: () => undefined,
@@ -696,6 +704,11 @@ async function pickGoalMonitorAction(ctx: ExtensionCommandContext, goal: GoalSum
       },
     };
   });
+}
+
+async function readGoalMonitorDagSnapshot(runtime: GoalRuntime, goalId: string): Promise<GoalMonitorDagSnapshot> {
+  const state = await runtime.getGoalOrchestrationState(goalId);
+  return { ...state, refreshedAt: new Date().toISOString() };
 }
 
 async function runTargetGoalLifecycleCommand(
@@ -809,7 +822,7 @@ function formatGoalListOption(goal: GoalSummary): string {
 async function formatGoalSummaryDetails(runtime: GoalRuntime, goal: GoalSummary): Promise<string> {
   return [
     `Goal ${goal.shortGoalId}`,
-    `Status: ${goal.status}${goal.activityState ? ` (${goal.activityState})` : ""}`,
+    `Status: ${await formatGoalOperationalStatus(runtime, goal)}`,
     `Tokens: ${formatTokenCount(goal.tokensUsed)}${goal.tokenBudget === undefined ? "" : `/${formatTokenCount(goal.tokenBudget)}`}`,
     "",
     "Objective:",
@@ -824,6 +837,15 @@ async function formatGoalSummaryDetails(runtime: GoalRuntime, goal: GoalSummary)
     `  ${shortenMiddle(goal.sessionName ?? goal.sessionKey, 110)}`,
     await formatGoalOrchestrationDetails(runtime, goal.goalId),
   ].filter(Boolean).join("\n");
+}
+
+async function formatGoalOperationalStatus(runtime: GoalRuntime, goal: GoalSummary): Promise<string> {
+  const state = await runtime.getGoalOrchestrationState(goal.goalId);
+  const nodeStatuses = state.nodes.map((node) => node.status);
+  if (goal.status === "active" && nodeStatuses.length > 0 && nodeStatuses.every((status) => ["failed", "blocked", "superseded"].includes(status))) {
+    return `stalled (${nodeStatuses.join(",")})`;
+  }
+  return `${goal.status}${goal.activityState ? ` (${goal.activityState})` : ""}`;
 }
 
 async function formatGoalOrchestrationDetails(runtime: GoalRuntime, goalId: string): Promise<string> {
