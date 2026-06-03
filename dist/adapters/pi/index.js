@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { GoalRuntime, NativeGitWorkspaceManager, SQLiteGoalStore, cleanupTerminalSubagentWorkspaces, createControllerValidationRunner, createNativeGitSubagentWorkspaceAllocator, parseGoalCommand, parseGoalDagFileContent, parseTokenBudget, renderActiveGoalReminderPrompt, } from "../../core/index.js";
+import { GoalRuntime, NativeGitWorkspaceManager, SQLiteGoalStore, cleanupTerminalSubagentWorkspaces, createControllerValidationRunner, createNativeGitSubagentWorkspaceAllocator, parseGoalCommand, parseGoalDagFileContent, parseGoalModelRoutingConfigJson, parseTokenBudget, renderActiveGoalReminderPrompt, resolveControllerModelArg, selectModelScenarioForNode, } from "../../core/index.js";
 import { launchPiRpcBackgroundGoalSession, } from "./background-session.js";
 import { GoalListController } from "./goal-list-ui.js";
 import { GoalMonitorController } from "./monitor-ui.js";
@@ -302,6 +302,7 @@ async function handlePiGoalCommand(runtime, ctx, args, backgroundGoalSessions) {
     const workspaceFlags = parseGoalWorkspaceFlags(trimmed);
     const dagSourceFile = workspaceFlags.dagFile ? path.resolve(ctx.cwd, workspaceFlags.dagFile) : undefined;
     const dagDocument = dagSourceFile ? parseGoalDagFileContent(fs.readFileSync(dagSourceFile, "utf8")) : undefined;
+    const modelRouting = dagDocument?.modelRouting ?? readPiGoalModelRoutingConfig();
     const command = dagDocument
         ? { kind: "start", objective: dagDocument.objective, tokenBudget: parseDagStartTokenBudget(workspaceFlags.remainingArgs) }
         : parseGoalCommand(workspaceFlags.remainingArgs);
@@ -316,7 +317,7 @@ async function handlePiGoalCommand(runtime, ctx, args, backgroundGoalSessions) {
         throw new Error(validation.message ?? "execution workspace validation failed");
     if (!validation.isGit)
         throw new Error("/goal orchestration requires a git workspace");
-    await startGoalOwnedPiSession(runtime, ctx, command, binding, validation, backgroundGoalSessions, { dagDocument, dagSourceFile });
+    await startGoalOwnedPiSession(runtime, ctx, command, binding, validation, backgroundGoalSessions, { dagDocument, dagSourceFile, modelRouting });
 }
 function parseDagStartTokenBudget(args) {
     const tokens = tokenize(args);
@@ -339,11 +340,12 @@ async function startGoalOwnedPiSession(runtime, ctx, command, binding, validatio
     const originSessionKey = resolveSessionKey(ctx);
     const labelObjective = command.objective.length <= 64 ? command.objective : `${command.objective.slice(0, 61)}...`;
     const provisionalSessionName = `goal: ${labelObjective}`;
+    const controllerModel = resolveControllerModelArg(options.modelRouting, modelArgFromContext(ctx));
     const background = await backgroundGoalSessionLauncher({
         cwd: binding.workspace,
         sessionId: `goal-${randomUUID().replace(/-/g, "").slice(0, 24)}`,
         sessionName: provisionalSessionName,
-        modelArg: modelArgFromContext(ctx),
+        modelArg: controllerModel.model,
     });
     try {
         const executionSessionKey = `pi:${background.sessionFile}`;
@@ -375,7 +377,7 @@ async function startGoalOwnedPiSession(runtime, ctx, command, binding, validatio
                 defaultCompletionGates: ["controller-validation"],
             });
         }
-        const orchestration = await runPiGoalControllerLoopForGoal(runtime, ctx, created.goal, binding);
+        const orchestration = await runPiGoalControllerLoopForGoal(runtime, ctx, created.goal, binding, options.modelRouting);
         const dagSource = options.dagSourceFile ? ` DAG: ${shortenPath(options.dagSourceFile)}.` : "";
         ctx.ui.notify(`Goal-owned controller session started (${shortGoalId}) and planned ${orchestration.plannedNodeCount} DAG node(s); started ${orchestration.startedSubagentCount} subagent(s).${dagSource} Workspace: ${binding.workspace}${formatWorkspaceValidationSuffix(validation)}. Use /goal monitor ${shortGoalId} or /goal list to inspect it.`, "info");
     }
@@ -384,7 +386,7 @@ async function startGoalOwnedPiSession(runtime, ctx, command, binding, validatio
         throw error;
     }
 }
-async function runPiGoalControllerLoopForGoal(runtime, ctx, goal, binding) {
+async function runPiGoalControllerLoopForGoal(runtime, ctx, goal, binding, modelRouting) {
     const existingNodes = await runtime.listGoalDagNodes(goal.goalId);
     const planned = existingNodes.length > 0
         ? { nodes: existingNodes }
@@ -392,7 +394,7 @@ async function runPiGoalControllerLoopForGoal(runtime, ctx, goal, binding) {
             defaultWorkspaceStrategy: "native-git-worktree",
             defaultCompletionGates: ["controller-validation"],
         });
-    const loopOptions = buildPiGoalControllerLoopOptions(ctx, goal, binding);
+    const loopOptions = buildPiGoalControllerLoopOptions(ctx, goal, binding, modelRouting);
     const loop = await runtime.runGoalControllerLoop(goal.goalId, loopOptions);
     startPiGoalControllerPollingLoop(runtime, ctx, goal, binding);
     return {
@@ -400,22 +402,58 @@ async function runPiGoalControllerLoopForGoal(runtime, ctx, goal, binding) {
         startedSubagentCount: loop.ticks.reduce((count, tick) => count + tick.started.length, 0),
     };
 }
-function buildPiGoalControllerLoopOptions(ctx, goal, binding) {
+function buildPiGoalControllerLoopOptions(ctx, goal, binding, modelRouting = readPiGoalModelRoutingConfig()) {
     const workspaceManager = new NativeGitWorkspaceManager({ defaultBaseRef: binding.branch ?? binding.ref, fetch: false });
-    const adapter = new PiHarnessSubagentAdapter({ launcher: backgroundGoalSessionLauncher, modelArg: modelArgFromContext(ctx) });
+    const fallbackModelArg = modelArgFromContext(ctx);
+    const adapter = new PiHarnessSubagentAdapter({ launcher: backgroundGoalSessionLauncher, modelArg: fallbackModelArg });
+    const allocator = createNativeGitSubagentWorkspaceAllocator(workspaceManager, {
+        controllerWorkspacePath: binding.workspace,
+        baseRef: binding.branch ?? binding.ref,
+        metadata: { controllerGoalId: goal.goalId },
+    });
     return {
         adapter,
         maxTicks: 1,
         intervalMs: 0,
         schedulingPolicy: { maxConcurrentSubagents: readPiGoalMaxSubagents() },
-        workspaceAllocator: createNativeGitSubagentWorkspaceAllocator(workspaceManager, {
-            controllerWorkspacePath: binding.workspace,
-            baseRef: binding.branch ?? binding.ref,
-            metadata: { controllerGoalId: goal.goalId },
-        }),
+        workspaceAllocator: async (request) => {
+            const allocation = (await allocator(request)) ?? {};
+            const selection = selectPiSubagentModel(request.node, modelRouting, fallbackModelArg);
+            return {
+                ...allocation,
+                metadata: {
+                    ...(allocation?.metadata ?? {}),
+                    controllerGoalId: goal.goalId,
+                    modelArg: selection.model,
+                    modelScenario: selection.scenario,
+                    modelScenarioReason: selection.reason,
+                },
+            };
+        },
         validator: createControllerValidationRunner({ executeValidators: readPiGoalRunValidators() }),
         metadata: { controllerGoalId: goal.goalId },
     };
+}
+function selectPiSubagentModel(node, modelRouting, fallbackModelArg) {
+    if (node.modelArg) {
+        return {
+            scenario: node.modelScenario,
+            model: node.modelArg,
+            reason: node.modelScenario ? `persisted node modelScenario:${node.modelScenario}` : "persisted node modelArg",
+        };
+    }
+    return selectModelScenarioForNode(node, modelRouting, fallbackModelArg);
+}
+function readPiGoalModelRoutingConfig() {
+    const file = process.env.AGENT_GOAL_MODEL_ROUTING_FILE;
+    if (file?.trim()) {
+        const resolved = path.resolve(process.cwd(), file.trim());
+        return parseGoalModelRoutingConfigJson(fs.readFileSync(resolved, "utf8"), `AGENT_GOAL_MODEL_ROUTING_FILE:${resolved}`);
+    }
+    const json = process.env.AGENT_GOAL_MODEL_ROUTING_JSON;
+    if (json?.trim())
+        return parseGoalModelRoutingConfigJson(json, "AGENT_GOAL_MODEL_ROUTING_JSON");
+    return undefined;
 }
 function startPiGoalControllerPollingLoop(runtime, ctx, goal, binding) {
     const pollMs = readPiGoalControllerPollMs();

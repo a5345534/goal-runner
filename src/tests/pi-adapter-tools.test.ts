@@ -447,6 +447,93 @@ test("Pi goal start can load an explicit DAG file", async () => {
   }
 });
 
+test("Pi DAG model routing selects controller and subagent models", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "goal-dag-model-routing-"));
+  const workspace = createGitWorkspace();
+  const previousStateHome = process.env.AGENT_GOAL_STATE_HOME;
+  const previousPollMs = process.env.AGENT_GOAL_PI_CONTROLLER_POLL_MS;
+  process.env.AGENT_GOAL_STATE_HOME = dir;
+  process.env.AGENT_GOAL_PI_CONTROLLER_POLL_MS = "0";
+  let commandHandler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+  const launched: Array<{ cwd: string; sessionId?: string; sessionFile?: string; sessionName: string; modelArg?: string }> = [];
+  const dagFile = join(workspace, "models.dag.json");
+  writeFileSync(
+    dagFile,
+    JSON.stringify({
+      version: 1,
+      objective: "Route model scenarios",
+      modelRouting: {
+        scenarios: {
+          controller: { model: "controller/model" },
+          implementation: { model: "implementation/model" },
+          docs: { model: "docs/model" },
+        },
+        controllerScenario: "controller",
+        defaultSubagentScenario: "implementation",
+        rules: [{ scenario: "docs", when: { scopes: ["docs"], risks: ["low"] } }],
+      },
+      nodes: [{ id: "docs-node", objective: "Update docs", scope: "docs", risk: "low" }],
+    }),
+  );
+  setPiBackgroundGoalSessionLauncherForTests(async (request) => {
+    launched.push(request);
+    return {
+      sessionFile: request.sessionFile ?? join(dir, `model-session-${launched.length}.jsonl`),
+      sessionId: request.sessionId ?? `model-session-${launched.length}`,
+      setSessionName: async () => undefined,
+      sendPrompt: async () => undefined,
+      stop: () => undefined,
+    };
+  });
+  const pi = {
+    registerTool() {},
+    registerCommand(_name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) {
+      commandHandler = options.handler;
+    },
+    on() {},
+    appendEntry() {},
+    sendMessage() {},
+  };
+  const controllerCtx = {
+    hasUI: true,
+    cwd: workspace,
+    model: { provider: "fallback", id: "model" },
+    ui: {
+      notify() {},
+      setStatus() {},
+      setWidget() {},
+      confirm: async () => true,
+      editor: async () => undefined,
+      select: async () => undefined,
+      custom: async () => undefined,
+    },
+    sessionManager: {
+      getSessionFile: () => "/controller/session.jsonl",
+      getSessionName: () => "controller",
+    },
+    isIdle: () => true,
+    hasPendingMessages: () => false,
+  };
+
+  try {
+    goalPiExtension(pi as never);
+    assert.ok(commandHandler);
+    await commandHandler?.("--dag models.dag.json", controllerCtx as never);
+
+    assert.equal(launched.length, 2);
+    assert.equal(launched[0]?.modelArg, "controller/model");
+    assert.equal(launched[1]?.modelArg, "docs/model");
+  } finally {
+    setPiBackgroundGoalSessionLauncherForTests();
+    if (previousStateHome === undefined) delete process.env.AGENT_GOAL_STATE_HOME;
+    else process.env.AGENT_GOAL_STATE_HOME = previousStateHome;
+    if (previousPollMs === undefined) delete process.env.AGENT_GOAL_PI_CONTROLLER_POLL_MS;
+    else process.env.AGENT_GOAL_PI_CONTROLLER_POLL_MS = previousPollMs;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("Pi orchestrated goal start can auto-allocate a controller worktree", async () => {
   const dir = mkdtempSync(join(tmpdir(), "goal-orchestrated-auto-"));
   const workspace = createGitWorkspace();

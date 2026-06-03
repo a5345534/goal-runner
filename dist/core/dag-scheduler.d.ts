@@ -9,6 +9,8 @@ export interface GoalDagPlanNodeInput {
     validators?: string[];
     workspaceStrategy?: string;
     risk?: GoalDagNode["risk"];
+    modelScenario?: string;
+    modelArg?: string;
     conflictHints?: GoalDagConflictHints;
     completionGates?: string[];
     status?: GoalDagNodeStatus;

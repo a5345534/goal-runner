@@ -18,6 +18,8 @@ export function createGoalDagNodes(goalId, inputs, options = {}) {
             validators: [...(input.validators ?? [])],
             workspaceStrategy: input.workspaceStrategy ?? options.defaultWorkspaceStrategy,
             risk: input.risk,
+            modelScenario: input.modelScenario,
+            modelArg: input.modelArg,
             conflictHints: cloneConflictHints(input.conflictHints),
             completionGates: [...(input.completionGates ?? options.defaultCompletionGates ?? ["controller-validation"])],
             status: input.status ?? "planned",

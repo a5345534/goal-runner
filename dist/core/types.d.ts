@@ -200,6 +200,10 @@ export interface GoalDagNode {
     validators: string[];
     workspaceStrategy?: string;
     risk?: "low" | "medium" | "high";
+    /** Model-routing scenario selected for this node, resolved by DAG defaults/rules or explicit node config. */
+    modelScenario?: string;
+    /** Harness-native model argument selected for this node, persisted for restart-safe scheduling. */
+    modelArg?: string;
     conflictHints?: GoalDagConflictHints;
     completionGates: string[];
     status: GoalDagNodeStatus;

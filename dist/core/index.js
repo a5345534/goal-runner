@@ -12,5 +12,6 @@ export * from "./controller-loop.js";
 export * from "./dag-planner.js";
 export * from "./dag-file.js";
 export * from "./dag-scheduler.js";
+export * from "./model-routing.js";
 export * from "./subagent-adapter.js";
 //# sourceMappingURL=index.js.map

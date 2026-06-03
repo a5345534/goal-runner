@@ -1,4 +1,5 @@
 import { createGoalDagNodes, type GoalDagPlanNodeInput, type GoalDagPlanOptions } from "./dag-scheduler.js";
+import { assertKnownModelScenario, parseGoalModelRoutingConfig, selectModelScenarioForNode, type GoalModelRoutingConfig } from "./model-routing.js";
 import type { GoalDagConflictHints, GoalDagNode } from "./types.js";
 import type { GoalDagPlannedNodesResult, GoalDagPlannerResult } from "./dag-planner.js";
 
@@ -6,6 +7,7 @@ export interface GoalDagFileDocument {
   version: 1;
   objective: string;
   defaults?: GoalDagFileDefaults;
+  modelRouting?: GoalModelRoutingConfig;
   nodes: GoalDagFileNode[];
 }
 
@@ -15,6 +17,7 @@ export interface GoalDagFileDefaults {
   workspaceStrategy?: string;
   completionGates?: string[];
   conflicts?: GoalDagConflictHints;
+  modelScenario?: string;
 }
 
 export interface GoalDagFileNode {
@@ -28,6 +31,7 @@ export interface GoalDagFileNode {
   workspaceStrategy?: string;
   risk?: GoalDagNode["risk"];
   completionGates?: string[];
+  modelScenario?: string;
 }
 
 export interface GoalDagFilePlanOptions extends GoalDagPlanOptions {
@@ -53,11 +57,19 @@ export function parseGoalDagFileDocument(input: unknown): GoalDagFileDocument {
   if (version !== 1) throw new Error("Invalid goal DAG file: version must be 1");
   const objective = requireNonEmptyString(input.objective, "objective");
   const defaults = input.defaults === undefined ? undefined : parseDefaults(input.defaults, "defaults");
+  const modelRouting = input.modelRouting === undefined ? undefined : parseGoalModelRoutingConfig(input.modelRouting, "modelRouting");
   if (!Array.isArray(input.nodes)) throw new Error("Invalid goal DAG file: nodes must be an array");
   if (input.nodes.length === 0) throw new Error("Invalid goal DAG file: nodes must not be empty");
   const nodes = input.nodes.map((node, index) => parseNode(node, `nodes[${index}]`));
   validateFileNodeGraph(nodes);
-  return defaults ? { version, objective, defaults, nodes } : { version, objective, nodes };
+  validateFileModelScenarios(defaults, nodes, modelRouting);
+  return {
+    version,
+    objective,
+    ...(defaults ? { defaults } : {}),
+    ...(modelRouting ? { modelRouting } : {}),
+    nodes,
+  };
 }
 
 export function planGoalDagFromFileDocument(
@@ -72,22 +84,41 @@ export function planGoalDagFromFileDocument(
   const defaultWorkspaceStrategy = document.defaults?.workspaceStrategy ?? options.defaultWorkspaceStrategy;
   const defaultCompletionGates = document.defaults?.completionGates ?? options.defaultCompletionGates;
   const defaultConflicts = document.defaults?.conflicts;
+  const defaultModelScenario = document.defaults?.modelScenario;
 
   return {
     goalId,
-    nodeInputs: document.nodes.map((node): GoalDagPlanNodeInput => ({
-      nodeId: node.id,
-      slug: node.id,
-      objective: node.objective,
-      scope: node.scope,
-      dependencyNodeIds: [...(node.after ?? [])],
-      expectedOutputs: [...(node.outputs ?? defaultOutputs)],
-      validators: [...(node.validators ?? defaultValidators)],
-      workspaceStrategy: node.workspaceStrategy ?? defaultWorkspaceStrategy,
-      risk: node.risk,
-      conflictHints: cloneConflictHints(node.conflicts ?? defaultConflicts),
-      completionGates: [...(node.completionGates ?? defaultCompletionGates ?? ["controller-validation"])],
-    })),
+    nodeInputs: document.nodes.map((node): GoalDagPlanNodeInput => {
+      const expectedOutputs = [...(node.outputs ?? defaultOutputs)];
+      const validators = [...(node.validators ?? defaultValidators)];
+      const conflictHints = cloneConflictHints(node.conflicts ?? defaultConflicts);
+      const selection = selectModelScenarioForNode({
+        nodeId: node.id,
+        objective: node.objective,
+        scope: node.scope,
+        risk: node.risk,
+        expectedOutputs,
+        validators,
+        conflictHints,
+        modelScenario: node.modelScenario ?? defaultModelScenario,
+      }, document.modelRouting);
+      const modelScenario = node.modelScenario ?? defaultModelScenario ?? selection.scenario;
+      return {
+        nodeId: node.id,
+        slug: node.id,
+        objective: node.objective,
+        scope: node.scope,
+        dependencyNodeIds: [...(node.after ?? [])],
+        expectedOutputs,
+        validators,
+        workspaceStrategy: node.workspaceStrategy ?? defaultWorkspaceStrategy,
+        risk: node.risk,
+        modelScenario,
+        modelArg: selection.model,
+        conflictHints,
+        completionGates: [...(node.completionGates ?? defaultCompletionGates ?? ["controller-validation"])],
+      };
+    }),
     rationale: [`Loaded ${document.nodes.length} DAG node${document.nodes.length === 1 ? "" : "s"} from goal DAG file.`],
     warnings: [],
   };
@@ -121,6 +152,7 @@ function parseDefaults(input: unknown, path: string): GoalDagFileDefaults {
   if (input.workspaceStrategy !== undefined) defaults.workspaceStrategy = requireNonEmptyString(input.workspaceStrategy, `${path}.workspaceStrategy`);
   if (input.completionGates !== undefined) defaults.completionGates = parseStringArray(input.completionGates, `${path}.completionGates`);
   if (input.conflicts !== undefined) defaults.conflicts = parseConflicts(input.conflicts, `${path}.conflicts`);
+  if (input.modelScenario !== undefined) defaults.modelScenario = requireNonEmptyString(input.modelScenario, `${path}.modelScenario`);
   return defaults;
 }
 
@@ -137,6 +169,7 @@ function parseNode(input: unknown, path: string): GoalDagFileNode {
   if (input.workspaceStrategy !== undefined) node.workspaceStrategy = requireNonEmptyString(input.workspaceStrategy, `${path}.workspaceStrategy`);
   if (input.risk !== undefined) node.risk = parseRisk(input.risk, `${path}.risk`);
   if (input.completionGates !== undefined) node.completionGates = parseStringArray(input.completionGates, `${path}.completionGates`);
+  if (input.modelScenario !== undefined) node.modelScenario = requireNonEmptyString(input.modelScenario, `${path}.modelScenario`);
   return node;
 }
 
@@ -152,6 +185,17 @@ function validateFileNodeGraph(nodes: GoalDagFileNode[]): void {
       if (dependency === node.id) throw new Error(`Invalid goal DAG file: node ${node.id} depends on itself`);
     }
   }
+}
+
+function validateFileModelScenarios(
+  defaults: GoalDagFileDefaults | undefined,
+  nodes: GoalDagFileNode[],
+  modelRouting: GoalModelRoutingConfig | undefined,
+): void {
+  if (defaults?.modelScenario) assertKnownModelScenario(modelRouting, defaults.modelScenario, "defaults.modelScenario");
+  nodes.forEach((node, index) => {
+    if (node.modelScenario) assertKnownModelScenario(modelRouting, node.modelScenario, `nodes[${index}].modelScenario`);
+  });
 }
 
 function parseConflicts(input: unknown, path: string): GoalDagConflictHints {

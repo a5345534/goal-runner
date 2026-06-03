@@ -1,10 +1,12 @@
 import { type GoalDagPlanOptions } from "./dag-scheduler.js";
+import { type GoalModelRoutingConfig } from "./model-routing.js";
 import type { GoalDagConflictHints, GoalDagNode } from "./types.js";
 import type { GoalDagPlannedNodesResult, GoalDagPlannerResult } from "./dag-planner.js";
 export interface GoalDagFileDocument {
     version: 1;
     objective: string;
     defaults?: GoalDagFileDefaults;
+    modelRouting?: GoalModelRoutingConfig;
     nodes: GoalDagFileNode[];
 }
 export interface GoalDagFileDefaults {
@@ -13,6 +15,7 @@ export interface GoalDagFileDefaults {
     workspaceStrategy?: string;
     completionGates?: string[];
     conflicts?: GoalDagConflictHints;
+    modelScenario?: string;
 }
 export interface GoalDagFileNode {
     id: string;
@@ -25,6 +28,7 @@ export interface GoalDagFileNode {
     workspaceStrategy?: string;
     risk?: GoalDagNode["risk"];
     completionGates?: string[];
+    modelScenario?: string;
 }
 export interface GoalDagFilePlanOptions extends GoalDagPlanOptions {
     maxNodes?: number;

@@ -70,6 +70,20 @@ Nodes with no `after` dependencies are immediately schedulable, subject to contr
       "modules": ["people-frappe-module"]
     }
   },
+  "modelRouting": {
+    "scenarios": {
+      "controller": { "model": "openai-codex/gpt-5.5" },
+      "implementation": { "model": "openai-codex/gpt-5.5" },
+      "docs": { "model": "openai/gpt-5-mini" },
+      "review": { "model": "anthropic/claude-opus" }
+    },
+    "controllerScenario": "controller",
+    "defaultSubagentScenario": "implementation",
+    "rules": [
+      { "scenario": "docs", "when": { "scopes": ["docs"], "risks": ["low"] } },
+      { "scenario": "review", "when": { "objectiveIncludes": ["validate", "archive"] } }
+    ]
+  },
   "nodes": [
     {
       "id": "attendance-parity",
@@ -130,6 +144,7 @@ Nodes with no `after` dependencies are immediately schedulable, subject to contr
 | `version` | yes | `1` | File format version. Only `1` is accepted. |
 | `objective` | yes | non-empty string | The goal objective shown in status/monitor and used for the controller session. |
 | `defaults` | no | object | Defaults copied to nodes that do not override them. |
+| `modelRouting` | no | object | Scenario-to-model routing table used by Pi for the controller session and DAG node subagents. |
 | `nodes` | yes | non-empty array | Explicit DAG nodes. Default maximum is 20 nodes. |
 
 ## Node fields
@@ -144,8 +159,9 @@ Nodes with no `after` dependencies are immediately schedulable, subject to contr
 | `conflicts` | no | object | File/module/capability conflict hints for scheduler serialization. |
 | `scope` | no | string | Human-readable scope label. |
 | `workspaceStrategy` | no | string | Workspace allocation strategy. Defaults to native Git worktree in Pi. |
-| `risk` | no | `low` / `medium` / `high` | Risk label for future scheduling/review policy. |
+| `risk` | no | `low` / `medium` / `high` | Risk label for scheduling/model-routing/review policy. |
 | `completionGates` | no | string array | Completion gates. Defaults to `controller-validation`. |
+| `modelScenario` | no | scenario id | Explicit model-routing scenario for this node. Overrides defaults and rules. |
 
 ## Defaults
 
@@ -161,11 +177,89 @@ Nodes with no `after` dependencies are immediately schedulable, subject to contr
     "files": ["path"],
     "modules": ["module"],
     "capabilities": ["capability"]
-  }
+  },
+  "modelScenario": "implementation"
 }
 ```
 
 A node-level field overrides the corresponding default. For example, if `defaults.validators` is set and a node also has `validators`, only the node's validators are used for that node.
+
+## Model routing
+
+`modelRouting` lets a DAG declare named model scenarios first, then let the controller choose a scenario for each node as it schedules subagents.
+
+```json
+{
+  "modelRouting": {
+    "scenarios": {
+      "controller": {
+        "model": "openai-codex/gpt-5.5",
+        "description": "Long-horizon goal supervision"
+      },
+      "implementation": {
+        "model": "openai-codex/gpt-5.5"
+      },
+      "docs": {
+        "model": "openai/gpt-5-mini"
+      },
+      "review": {
+        "model": "anthropic/claude-opus"
+      }
+    },
+    "controllerScenario": "controller",
+    "defaultSubagentScenario": "implementation",
+    "rules": [
+      {
+        "scenario": "docs",
+        "when": {
+          "scopes": ["docs"],
+          "risks": ["low"]
+        }
+      },
+      {
+        "scenario": "review",
+        "when": {
+          "objectiveIncludes": ["validate", "review", "archive"]
+        }
+      }
+    ]
+  }
+}
+```
+
+Scenario ids must match `^[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$`. `model` is the harness-native model string; in Pi this is the same `provider/model` shape accepted by Pi package model arguments.
+
+Selection order for subagents:
+
+1. node-level `modelScenario`
+2. `defaults.modelScenario`
+3. first matching `modelRouting.rules[]`
+4. `modelRouting.defaultSubagentScenario`
+5. the current Pi session model
+
+Rule `when` supports:
+
+- `nodeIds`
+- `scopes`
+- `risks`
+- `modules`
+- `capabilities`
+- `files`
+- `objectiveIncludes`
+- `hasValidators`
+- `hasOutputs`
+
+The selected scenario and model are persisted on the durable DAG node so later scheduling/recovery can keep using the same model choice.
+
+Pi also accepts a reusable model-routing config outside the DAG file:
+
+```bash
+AGENT_GOAL_MODEL_ROUTING_FILE=.goal/models.json
+# or
+AGENT_GOAL_MODEL_ROUTING_JSON='{ "scenarios": { "implementation": { "model": "openai-codex/gpt-5.5" } }, "defaultSubagentScenario": "implementation" }'
+```
+
+A DAG file's `modelRouting` takes precedence over environment-provided routing.
 
 ## Conflict hints
 
@@ -202,6 +296,7 @@ The runtime rejects invalid DAG files before starting work:
 - cycles, via the normal DAG validation step
 - non-array `after`, `outputs`, `validators`, or conflict lists
 - invalid `risk`
+- model-routing scenario references that do not exist in the DAG file's `modelRouting.scenarios`
 - too many nodes (default max: 20)
 
 ## Validator execution
