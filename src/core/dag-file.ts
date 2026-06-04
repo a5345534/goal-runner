@@ -185,6 +185,41 @@ function validateFileNodeGraph(nodes: GoalDagFileNode[]): void {
       if (dependency === node.id) throw new Error(`Invalid goal DAG file: node ${node.id} depends on itself`);
     }
   }
+  validateFileNodeAcyclicity(nodes);
+}
+
+function validateFileNodeAcyclicity(nodes: GoalDagFileNode[]): void {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const stack: string[] = [];
+
+  const visit = (node: GoalDagFileNode): string[] | undefined => {
+    if (visiting.has(node.id)) {
+      const start = stack.indexOf(node.id);
+      return [...stack.slice(start), node.id];
+    }
+    if (visited.has(node.id)) return undefined;
+    visiting.add(node.id);
+    stack.push(node.id);
+    for (const dependencyId of node.after ?? []) {
+      const dependency = byId.get(dependencyId);
+      if (!dependency) continue; // missing-dep error handled separately
+      const cycle = visit(dependency);
+      if (cycle) return cycle;
+    }
+    stack.pop();
+    visiting.delete(node.id);
+    visited.add(node.id);
+    return undefined;
+  };
+
+  for (const node of nodes) {
+    const cycle = visit(node);
+    if (cycle && cycle.length > 0) {
+      throw new Error(`Invalid goal DAG file: cycle detected: ${cycle.join(" -> ")}`);
+    }
+  }
 }
 
 function validateFileModelScenarios(

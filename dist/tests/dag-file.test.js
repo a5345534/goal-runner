@@ -49,6 +49,14 @@ test("goal DAG file parser rejects invalid structure before execution", () => {
     assert.throws(() => parseGoalDagFileContent(JSON.stringify({ version: 1, objective: "x", nodes: [{ id: "Bad_Id", objective: "x" }] })), /kebab-case/);
     assert.throws(() => parseGoalDagFileContent(JSON.stringify({ version: 1, objective: "x", nodes: [{ id: "a", objective: "x" }, { id: "a", objective: "y" }] })), /duplicate node id: a/);
     assert.throws(() => parseGoalDagFileContent(JSON.stringify({ version: 1, objective: "x", nodes: [{ id: "a", objective: "x", after: ["missing"] }] })), /depends on missing node missing/);
+    assert.throws(() => parseGoalDagFileContent(JSON.stringify({
+        version: 1,
+        objective: "x",
+        nodes: [
+            { id: "a", objective: "a", after: ["b"] },
+            { id: "b", objective: "b", after: ["a"] },
+        ],
+    })), /cycle detected: a -> b -> a/);
 });
 test("goal DAG file nodes are persisted and scheduled by dependencies", async () => {
     const runtime = new GoalRuntime({ store: new MemoryGoalStore(), config: { now: () => new Date(now) } });
