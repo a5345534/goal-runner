@@ -201,6 +201,10 @@ export interface GoalSessionMetadata {
   branchVerificationStatus?: BranchVerificationStatus;
   sessionFile?: string;
   sessionName?: string;
+  /** Model-routing scenario selected for the controller session. */
+  controllerModelScenario?: string;
+  /** Harness-native model argument selected for the controller session. */
+  controllerModelArg?: string;
   legacySessionBound?: boolean;
   createdAt: string;
   updatedAt: string;
@@ -228,6 +232,8 @@ export interface GoalSummary {
   branchVerificationStatus?: BranchVerificationStatus;
   sessionFile?: string;
   sessionName?: string;
+  controllerModelScenario?: string;
+  controllerModelArg?: string;
   legacySessionBound?: boolean;
 }
 

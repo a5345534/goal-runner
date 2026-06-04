@@ -203,6 +203,8 @@ function goalToSummary(goal: GoalRecord, metadata: GoalSessionMetadata | undefin
     branchVerificationStatus: metadata?.branchVerificationStatus,
     sessionFile: metadata?.sessionFile,
     sessionName: metadata?.sessionName,
+    controllerModelScenario: metadata?.controllerModelScenario,
+    controllerModelArg: metadata?.controllerModelArg,
     legacySessionBound: metadata?.legacySessionBound ?? !metadata,
   };
 }

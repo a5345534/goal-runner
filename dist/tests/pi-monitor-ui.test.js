@@ -23,6 +23,8 @@ function summary(status = "active", sessionFile) {
         branch: "feat/a",
         branchVerificationStatus: "verified",
         sessionFile,
+        controllerModelScenario: "controller",
+        controllerModelArg: "openai-codex/gpt-5.5",
     };
 }
 test("goal monitor escape closes without lifecycle action", () => {
@@ -92,6 +94,8 @@ test("goal monitor renders live DAG and subagent dashboard", () => {
             validators: [],
             completionGates: ["controller-validation"],
             status: "running",
+            modelScenario: "implementation-heavy",
+            modelArg: "local-aeon/aeon",
             createdAt: "2026-05-31T00:00:00.000Z",
             updatedAt: "2026-05-31T00:04:00.000Z",
         },
@@ -117,8 +121,10 @@ test("goal monitor renders live DAG and subagent dashboard", () => {
     const theme = { fg: (_color, text) => text, bold: (text) => text };
     const rendered = controller.render(140, theme).join("\n");
     assert.match(rendered, /DAG nodes=1 \(running=1\) subagents=1 \(running=1\)/);
+    assert.match(rendered, /controllerModel=controller -> openai-codex\/gpt-5\.5/);
     assert.match(rendered, /DAG \/ Subagents/);
     assert.match(rendered, /\[running\] people-frappe-attendance-doctypes runtime=5m updated=1m ago/);
+    assert.match(rendered, /model: implementation-heavy -> local-aeon\/aeon/);
     assert.match(rendered, /↳ \[running\] subagent-abcdef12-attendance runtime=4m last=30s ago/);
     assert.match(rendered, /branch: goal\/attendance/);
     assert.match(rendered, /note: working/);

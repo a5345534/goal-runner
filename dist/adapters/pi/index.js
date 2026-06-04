@@ -375,6 +375,8 @@ async function startGoalOwnedPiSession(runtime, ctx, command, binding, validatio
             branchVerificationStatus: validation.branchVerificationStatus,
             sessionFile: background.sessionFile,
             sessionName,
+            controllerModelScenario: controllerModel.scenario,
+            controllerModelArg: controllerModel.model,
             legacySessionBound: false,
             createdAt: created.goal.createdAt,
             updatedAt: new Date().toISOString(),
@@ -907,7 +909,7 @@ async function resumeTargetGoal(runtime, ctx, goal) {
                 cwd: goal.executionWorkspace,
                 sessionFile: goal.sessionFile,
                 sessionName,
-                modelArg: modelArgFromContext(ctx),
+                modelArg: goal.controllerModelArg ?? modelArgFromContext(ctx),
             });
             backgroundGoalSessions.set(resumed.goalId, background);
             await background.sendPrompt(renderGoalResumePrompt(resumed));
@@ -990,6 +992,7 @@ async function formatGoalSummaryDetails(runtime, goal) {
         "",
         "Session:",
         `  ${shortenMiddle(goal.sessionName ?? goal.sessionKey, 110)}`,
+        `  controller model: ${formatGoalModel(goal.controllerModelScenario, goal.controllerModelArg)}`,
         await formatGoalOrchestrationDetails(runtime, goal.goalId),
     ].filter(Boolean).join("\n");
 }
@@ -1025,6 +1028,8 @@ async function formatGoalOrchestrationDetails(runtime, goalId) {
         const title = shortenMiddle(node.slug || node.nodeId, 78);
         lines.push(`  ${index + 1}. [${node.status}] ${title}`);
         lines.push(`     id: ${shortenMiddle(node.nodeId, 86)}`);
+        if (node.modelScenario || node.modelArg)
+            lines.push(`     model: ${formatGoalModel(node.modelScenario, node.modelArg)}`);
         for (const line of wrapDisplayText(node.objective, 86))
             lines.push(`     objective: ${line}`);
         if (node.dependencyNodeIds.length)
@@ -1663,5 +1668,10 @@ function formatTokenCount(value) {
     if (value < 1_000_000)
         return `${Number.isInteger(value / 1_000) ? value / 1_000 : (value / 1_000).toFixed(1)}k`;
     return `${Number.isInteger(value / 1_000_000) ? value / 1_000_000 : (value / 1_000_000).toFixed(1)}m`;
+}
+function formatGoalModel(scenario, model) {
+    if (scenario && model)
+        return `${scenario} -> ${model}`;
+    return model ?? scenario ?? "not recorded";
 }
 //# sourceMappingURL=index.js.map

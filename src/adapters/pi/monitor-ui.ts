@@ -154,7 +154,7 @@ export class GoalMonitorController {
 
     const lines = [
       truncateToWidth(`${theme.fg("accent", title)}  ${actions}`, width),
-      truncateToWidth(`status=${derivedMonitorStatus(this.goal, dag)} tokens=${formatMonitorTokens(this.goal)} elapsed=${formatElapsedSeconds(this.goal.timeUsedSeconds)}`, width),
+      truncateToWidth(`status=${derivedMonitorStatus(this.goal, dag)} tokens=${formatMonitorTokens(this.goal)} elapsed=${formatElapsedSeconds(this.goal.timeUsedSeconds)} controllerModel=${formatMonitorModel(this.goal.controllerModelScenario, this.goal.controllerModelArg)}`, width),
       truncateToWidth(`workspace=${shortenPath(this.goal.executionWorkspace ?? "legacy")} branch=${shortenMiddle(this.goal.branch ?? this.goal.ref ?? "-", 72)}`, width),
       truncateToWidth(`DAG nodes=${formatStatusCounts(dag.nodes.map((node) => node.status))} subagents=${formatStatusCounts(dag.subagents.map((subagent) => subagent.status))} refreshed=${compactTimestamp(dag.refreshedAt ?? new Date(0).toISOString())}`, width),
       truncateToWidth(theme.fg("dim", `live dashboard • pane=${this.activePane} • d/t focus • ↑↓ scroll • PgUp/PgDn page • Home top • End bottom/live • ←→/Tab action • Enter action • Esc close`), width),
@@ -218,6 +218,7 @@ function renderDagLines(snapshot: GoalMonitorDagSnapshot, now: Date): string[] {
     const nodeRuntime = formatRuntime(node.createdAt, now);
     const nodeActivity = formatAgo(node.updatedAt, now);
     lines.push(`${index + 1}. [${node.status}] ${shortenMiddle(node.slug || node.nodeId, 72)} runtime=${nodeRuntime} updated=${nodeActivity}`);
+    if (node.modelScenario || node.modelArg) lines.push(`   model: ${formatMonitorModel(node.modelScenario, node.modelArg)}`);
     if (node.lastValidationSummary) lines.push(`   validation: ${shortenMiddle(node.lastValidationSummary, 92)}`);
     const subagents = subagentsByNode.get(node.nodeId) ?? [];
     if (subagents.length === 0) {
@@ -254,6 +255,11 @@ function formatStatusCounts(statuses: string[]): string {
 
 function formatMonitorTokens(goal: GoalSummary): string {
   return goal.tokenBudget === undefined ? formatCompactNumber(goal.tokensUsed) : `${formatCompactNumber(goal.tokensUsed)}/${formatCompactNumber(goal.tokenBudget)}`;
+}
+
+function formatMonitorModel(scenario: string | undefined, model: string | undefined): string {
+  if (scenario && model) return `${scenario} -> ${model}`;
+  return model ?? scenario ?? "-";
 }
 
 function formatCompactNumber(value: number): string {

@@ -95,8 +95,8 @@ export class SQLiteGoalStore {
             .prepare(`INSERT INTO goal_session_metadata (
           session_key, goal_id, origin_session_key, execution_workspace, workspace_status,
           branch, ref, branch_verification_status, session_file, session_name,
-          legacy_session_bound, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          controller_model_scenario, controller_model_arg, legacy_session_bound, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(session_key) DO UPDATE SET
           goal_id = excluded.goal_id,
           origin_session_key = excluded.origin_session_key,
@@ -107,10 +107,12 @@ export class SQLiteGoalStore {
           branch_verification_status = excluded.branch_verification_status,
           session_file = excluded.session_file,
           session_name = excluded.session_name,
+          controller_model_scenario = excluded.controller_model_scenario,
+          controller_model_arg = excluded.controller_model_arg,
           legacy_session_bound = excluded.legacy_session_bound,
           created_at = excluded.created_at,
           updated_at = excluded.updated_at`)
-            .run(metadata.sessionKey, metadata.goalId, metadata.originSessionKey ?? null, metadata.executionWorkspace ?? null, metadata.workspaceStatus ?? null, metadata.branch ?? null, metadata.ref ?? null, metadata.branchVerificationStatus ?? null, metadata.sessionFile ?? null, metadata.sessionName ?? null, metadata.legacySessionBound ? 1 : 0, metadata.createdAt, metadata.updatedAt);
+            .run(metadata.sessionKey, metadata.goalId, metadata.originSessionKey ?? null, metadata.executionWorkspace ?? null, metadata.workspaceStatus ?? null, metadata.branch ?? null, metadata.ref ?? null, metadata.branchVerificationStatus ?? null, metadata.sessionFile ?? null, metadata.sessionName ?? null, metadata.controllerModelScenario ?? null, metadata.controllerModelArg ?? null, metadata.legacySessionBound ? 1 : 0, metadata.createdAt, metadata.updatedAt);
     }
     async getGoalSessionMetadata(sessionKey) {
         const row = this.db.prepare("SELECT * FROM goal_session_metadata WHERE session_key = ?").get(sessionKey);
@@ -127,6 +129,8 @@ export class SQLiteGoalStore {
           m.branch_verification_status,
           m.session_file,
           m.session_name,
+          m.controller_model_scenario,
+          m.controller_model_arg,
           m.legacy_session_bound,
           m.updated_at AS metadata_updated_at,
           COALESCE(MAX(l.at), g.updated_at) AS last_activity_at
@@ -304,6 +308,8 @@ export class SQLiteGoalStore {
         branch_verification_status TEXT,
         session_file TEXT,
         session_name TEXT,
+        controller_model_scenario TEXT,
+        controller_model_arg TEXT,
         legacy_session_bound INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -366,6 +372,8 @@ export class SQLiteGoalStore {
     `);
         addColumnIfMissing(this.db, "goal_dag_nodes", "model_scenario", "TEXT");
         addColumnIfMissing(this.db, "goal_dag_nodes", "model_arg", "TEXT");
+        addColumnIfMissing(this.db, "goal_session_metadata", "controller_model_scenario", "TEXT");
+        addColumnIfMissing(this.db, "goal_session_metadata", "controller_model_arg", "TEXT");
     }
 }
 function addColumnIfMissing(db, table, column, definition) {
@@ -424,6 +432,8 @@ function rowToMetadata(row) {
         branchVerificationStatus: row.branch_verification_status ?? undefined,
         sessionFile: row.session_file ?? undefined,
         sessionName: row.session_name ?? undefined,
+        controllerModelScenario: row.controller_model_scenario ?? undefined,
+        controllerModelArg: row.controller_model_arg ?? undefined,
         legacySessionBound: row.legacy_session_bound === 1,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
@@ -452,6 +462,8 @@ function rowToGoalSummary(row) {
         branchVerificationStatus: row.branch_verification_status ?? undefined,
         sessionFile: row.session_file ?? undefined,
         sessionName: row.session_name ?? undefined,
+        controllerModelScenario: row.controller_model_scenario ?? undefined,
+        controllerModelArg: row.controller_model_arg ?? undefined,
         legacySessionBound: row.legacy_session_bound === null ? true : row.legacy_session_bound === 1,
     };
 }
