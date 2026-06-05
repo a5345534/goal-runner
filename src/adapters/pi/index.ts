@@ -131,6 +131,7 @@ export default function goalPiExtension(pi: ExtensionAPI) {
         "--branch",
         "--ref",
         "--dag",
+        "config",
         "list",
         "status",
         "monitor",
@@ -378,6 +379,11 @@ async function handlePiGoalCommand(
   }
   if (first === "budget") {
     await editGoalBudgetFromCommand(runtime, ctx, tokens.slice(1));
+    return;
+  }
+
+  if (first === "config") {
+    await handleGoalConfigCommand(ctx, tokens.slice(1));
     return;
   }
 
@@ -826,7 +832,7 @@ function stopAllPiGoalControllerPollingLoops(): void {
 }
 
 function readPiGoalControllerPollMs(): number {
-  const raw = process.env.AGENT_GOAL_PI_CONTROLLER_POLL_MS;
+  const raw = readPiGoalConfig().controllerPollMs ?? process.env.AGENT_GOAL_PI_CONTROLLER_POLL_MS;
   if (raw === "0" || raw === "off") return 0;
   if (!raw) return 5_000;
   const parsed = Number.parseInt(raw, 10);
@@ -843,10 +849,74 @@ function readPiGoalControllerLeaseMs(): number {
 }
 
 function readPiGoalMaxSubagents(): number {
-  const raw = process.env.AGENT_GOAL_PI_MAX_SUBAGENTS;
+  const raw = readPiGoalConfig().maxSubagents ?? process.env.AGENT_GOAL_PI_MAX_SUBAGENTS;
   if (!raw) return 1;
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+}
+
+// ── Runtime-config file (writable from /goal config) ──
+
+const PI_GOAL_RUNTIME_CONFIG_PATH = path.join(
+  process.env.HOME ?? process.env.USERPROFILE ?? "/tmp",
+  ".pi", "agent", "goal-runtime-config.json",
+);
+
+interface PiGoalRuntimeConfig {
+  maxSubagents?: string;
+  controllerPollMs?: string;
+}
+
+let _cachedPiGoalRuntimeConfig: PiGoalRuntimeConfig | undefined;
+let _cachedPath: string | undefined;
+
+function readPiGoalConfig(): PiGoalRuntimeConfig {
+  if (_cachedPath === PI_GOAL_RUNTIME_CONFIG_PATH && _cachedPiGoalRuntimeConfig !== undefined) {
+    return _cachedPiGoalRuntimeConfig;
+  }
+  try {
+    const raw = fs.readFileSync(PI_GOAL_RUNTIME_CONFIG_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      _cachedPiGoalRuntimeConfig = parsed as PiGoalRuntimeConfig;
+    } else {
+      _cachedPiGoalRuntimeConfig = {};
+    }
+  } catch {
+    _cachedPiGoalRuntimeConfig = {};
+  }
+  _cachedPath = PI_GOAL_RUNTIME_CONFIG_PATH;
+  return _cachedPiGoalRuntimeConfig;
+}
+
+function writePiGoalConfig(patch: PiGoalRuntimeConfig): void {
+  const current = readPiGoalConfig();
+  const merged = { ...current, ...patch };
+  // Remove keys that were explicitly cleared
+  for (const key of Object.keys(patch)) {
+    if ((patch as Record<string, unknown>)[key] === null) delete (merged as Record<string, unknown>)[key];
+  }
+  fs.mkdirSync(path.dirname(PI_GOAL_RUNTIME_CONFIG_PATH), { recursive: true });
+  fs.writeFileSync(PI_GOAL_RUNTIME_CONFIG_PATH, JSON.stringify(merged, null, 2), "utf8");
+  _cachedPiGoalRuntimeConfig = undefined;
+  _cachedPath = undefined;
+}
+
+function formatGoalConfigValue(key: string): string {
+  const config = readPiGoalConfig();
+  const value = (config as Record<string, unknown>)[key];
+  const env = configEnvFor(key);
+  const effective = env !== undefined ? String(env) : (value !== undefined ? String(value) : undefined);
+  const source = env !== undefined ? "env" : (value !== undefined ? "config" : "default");
+  return effective !== undefined ? `${effective} (${source})` : `default (${source})`;
+}
+
+function configEnvFor(key: string): string | undefined {
+  switch (key) {
+    case "maxSubagents": return process.env.AGENT_GOAL_PI_MAX_SUBAGENTS;
+    case "controllerPollMs": return process.env.AGENT_GOAL_PI_CONTROLLER_POLL_MS;
+    default: return undefined;
+  }
 }
 
 function modelArgFromContext(ctx: ExtensionContext | ExtensionCommandContext): string | undefined {
@@ -854,6 +924,63 @@ function modelArgFromContext(ctx: ExtensionContext | ExtensionCommandContext): s
   const provider = typeof model?.provider === "string" ? model.provider : undefined;
   const modelId = typeof model?.id === "string" ? model.id : typeof model?.modelId === "string" ? model.modelId : undefined;
   return provider && modelId ? `${provider}/${modelId}` : undefined;
+}
+
+const GOAL_CONFIG_KEYS = ["maxSubagents", "controllerPollMs"] as const;
+
+async function handleGoalConfigCommand(ctx: ExtensionCommandContext, args: string[]): Promise<void> {
+  const key = args[0];
+  const value = args[1];
+
+  if (!key) {
+    const lines = ["Goal runtime configuration (use /goal config <key> <value> to change):", ""];
+    for (const k of GOAL_CONFIG_KEYS) {
+      const label = { maxSubagents: "max-subagents", controllerPollMs: "controller-poll-ms" }[k] ?? k;
+      lines.push(`  ${label}: ${formatGoalConfigValue(k)}`);
+    }
+    lines.push("", `Config file: ${PI_GOAL_RUNTIME_CONFIG_PATH}`);
+    lines.push("Environment variables override config file values.");
+    lines.push("Use /goal config <key> clear to remove a config value.");
+    ctx.ui.notify(lines.join("\n"), "info");
+    return;
+  }
+
+  const keyMap: Record<string, string> = { "max-subagents": "maxSubagents", "controller-poll-ms": "controllerPollMs" };
+  const resolved = keyMap[key] ?? key;
+  if (!(GOAL_CONFIG_KEYS as readonly string[]).includes(resolved)) {
+    throw new Error(`Unknown config key "${key}". Available: ${GOAL_CONFIG_KEYS.map((k) => keyMap[k] ?? k).join(", ")}`);
+  }
+
+  if (value === undefined) {
+    ctx.ui.notify(`${key}: ${formatGoalConfigValue(resolved)}`, "info");
+    return;
+  }
+
+  if (value === "clear" || value === "null" || value === "default") {
+    writePiGoalConfig({ [resolved]: null as unknown as string });
+    ctx.ui.notify(`Goal config "${key}" cleared (back to default).`, "info");
+    return;
+  }
+
+  if (resolved === "maxSubagents") {
+    const n = Number.parseInt(value, 10);
+    if (!Number.isFinite(n) || n <= 0) throw new Error(`max-subagents must be a positive integer, got "${value}"`);
+    writePiGoalConfig({ maxSubagents: String(n) });
+    ctx.ui.notify(`Goal config max-subagents set to ${n}.`, "info");
+    return;
+  }
+  if (resolved === "controllerPollMs") {
+    if (value !== "0" && value !== "off") {
+      const n = Number.parseInt(value, 10);
+      if (!Number.isFinite(n) || n <= 0) throw new Error(`controller-poll-ms must be a positive integer, 0, or "off", got "${value}"`);
+      writePiGoalConfig({ controllerPollMs: String(n) });
+      ctx.ui.notify(`Goal config controller-poll-ms set to ${n}ms.`, "info");
+    } else {
+      writePiGoalConfig({ controllerPollMs: "0" });
+      ctx.ui.notify("Goal config controller-poll-ms set to 0 (polling disabled).", "info");
+    }
+    return;
+  }
 }
 
 async function showGoalList(runtime: GoalRuntime, ctx: ExtensionCommandContext): Promise<void> {
