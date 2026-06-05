@@ -156,6 +156,26 @@ test("controller asks idle subagents with terminal text but missing outcome mark
   assert.equal((await runtime.getGoalSubagent("goal-1", "subagent-1"))?.status, "running");
 });
 
+test("controller sends stale subagent continuation prompt for stale needs-followup sessions", async () => {
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
+  await runtime.saveGoalDagNode({ ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode), status: "running", updatedAt: now });
+  await runtime.saveGoalSubagent(subagent({ status: "running", integrationStatus: "stale-subagent-session: no transcript activity for 1200s after last message role=toolResult" }));
+  const adapter = new FakeSubagentAdapter();
+  adapter.states.set("subagent-1", {
+    status: "needsFollowup",
+    error: "stale-subagent-session: no transcript activity for 1200s after last message role=toolResult",
+    lastActivityAt: "2026-06-02T00:01:00.000Z",
+  });
+
+  const tick = await runtime.runGoalControllerTick("goal-1", { adapter });
+
+  assert.equal(tick.followups.length, 1);
+  assert.match(adapter.prompts[0]?.prompt ?? "", /STALE_SUBAGENT_SESSION/);
+  assert.match(adapter.prompts[0]?.prompt ?? "", /Continue from the existing session transcript/);
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "running");
+  assert.equal((await runtime.getGoalSubagent("goal-1", "subagent-1"))?.status, "running");
+});
+
 test("controller auto-retries existing failed subagents with WebSocket transport errors", async () => {
   const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
   await runtime.saveGoalDagNode({ ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode), status: "failed", updatedAt: now, lastValidationSummary: "WebSocket error" });

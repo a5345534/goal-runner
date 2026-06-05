@@ -3,6 +3,7 @@ import { launchPiRpcBackgroundGoalSession, } from "./background-session.js";
 const RESULT_MARKER = /(?:^|\n)\s*SUBAGENT_RESULT\s*:\s*([\s\S]*?)(?=\n\s*SUBAGENT_[A-Z_]+\s*:|$)/i;
 const BLOCKED_MARKER = /(?:^|\n)\s*SUBAGENT_BLOCKED\s*:\s*([\s\S]*?)(?=\n\s*SUBAGENT_[A-Z_]+\s*:|$)/i;
 const STATUS_BLOCKED_MARKER = /(?:^|\n)\s*SUBAGENT_STATUS\s*:\s*blocked\b/i;
+const DEFAULT_STALE_SUBAGENT_SESSION_MS = 10 * 60_000;
 export class PiHarnessSubagentAdapter {
     adapterId = "pi";
     launcher;
@@ -37,6 +38,7 @@ export class PiHarnessSubagentAdapter {
     getSessionState(request) {
         return readPiSubagentSessionState(request.subagent, {
             live: this.handles.has(keyForSubagent(request.subagent)) || isLiveSubagentStatus(request.subagent.status),
+            now: this.now,
         });
     }
     async abortSession(request) {
@@ -135,6 +137,10 @@ export function readPiSubagentSessionState(subagent, options = {}) {
     if (terminalish) {
         return withInspectionMetadata({ status: "needsFollowup", selfReportedResult: terminalish, lastActivityAt: parsed.lastActivityAt }, parsed);
     }
+    const staleReason = staleUnresolvedSessionReason(parsed, options);
+    if (staleReason) {
+        return withInspectionMetadata({ status: "needsFollowup", error: staleReason, lastActivityAt: parsed.lastActivityAt }, parsed);
+    }
     const status = parsed.lastMessageRole === "assistant" ? "idle" : options.live ? "running" : "idle";
     return withInspectionMetadata({ status, lastActivityAt: parsed.lastActivityAt }, parsed);
 }
@@ -223,6 +229,25 @@ function terminalishAssistantTextWithoutMarker(text) {
     const successLike = /(\bdone\b|\bcompleted\b|\bfinished\b|\bimplemented\b|verification passed|validation passed|tests? passed|已完成|完成到目前|驗證.*通過|測試.*通過|已處理)/i.test(cleaned);
     const blockedLike = /(\bblocked\b|cannot complete|can't complete|unable to complete|無法完成|阻塞|卡住)/i.test(cleaned);
     return successLike || blockedLike ? cleaned : undefined;
+}
+function staleUnresolvedSessionReason(parsed, options) {
+    const role = parsed.lastMessageRole;
+    if (!role || role === "assistant")
+        return undefined;
+    const lastActivity = parsed.lastActivityAt;
+    if (options.live === false)
+        return `stale-subagent-session: background runner is not live; last message role=${role}${lastActivity ? ` at ${lastActivity}` : ""}`;
+    if (!lastActivity)
+        return undefined;
+    const lastMs = Date.parse(lastActivity);
+    if (!Number.isFinite(lastMs))
+        return undefined;
+    const nowMs = (options.now?.() ?? new Date()).getTime();
+    const staleAfterMs = options.staleAfterMs ?? DEFAULT_STALE_SUBAGENT_SESSION_MS;
+    if (nowMs - lastMs < staleAfterMs)
+        return undefined;
+    const ageSeconds = Math.max(0, Math.floor((nowMs - lastMs) / 1000));
+    return `stale-subagent-session: no transcript activity for ${ageSeconds}s after last message role=${role} at ${lastActivity}`;
 }
 function cleanupMarkerText(value) {
     const trimmed = value?.trim();

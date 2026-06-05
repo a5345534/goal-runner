@@ -196,6 +196,12 @@ function buildContextUpgradePrompt(node: GoalDagNode, oldModel: string, newModel
 
 const OUTCOME_MARKER_FOLLOWUP_TAG = "[SYSTEM FOLLOW-UP: EXPLICIT_OUTCOME_MARKER]";
 
+function buildSubagentFollowupPrompt(node: GoalDagNode, subagent: GoalSubagentRecord): string {
+  return isStaleSubagentSession(subagent)
+    ? buildStaleSubagentContinuationPrompt(node, subagent)
+    : buildExplicitOutcomeMarkerPrompt(node, subagent);
+}
+
 function buildExplicitOutcomeMarkerPrompt(node: GoalDagNode, subagent: GoalSubagentRecord): string {
   const previous = subagent.selfReportedResult ? `\n\nPrevious assistant outcome text (untrusted transcript evidence):\n${truncateForPrompt(subagent.selfReportedResult, 4000)}` : "";
   return [
@@ -207,6 +213,24 @@ function buildExplicitOutcomeMarkerPrompt(node: GoalDagNode, subagent: GoalSubag
     `If the node is blocked, reply with exactly this marker instead:`,
     `SUBAGENT_BLOCKED: <specific blocker and what input/state change is needed>`,
     previous,
+  ].join("\n");
+}
+
+function isStaleSubagentSession(subagent: GoalSubagentRecord): boolean {
+  return /^stale-subagent-session:/i.test(subagent.integrationStatus ?? "");
+}
+
+function buildStaleSubagentContinuationPrompt(node: GoalDagNode, subagent: GoalSubagentRecord): string {
+  return [
+    `[SYSTEM FOLLOW-UP: STALE_SUBAGENT_SESSION]`,
+    `Your previous background Pi session appears to have stopped or gone stale before reporting an outcome for node "${node.nodeId}".`,
+    `Observed condition: ${subagent.integrationStatus ?? "stale session"}`,
+    `Continue from the existing session transcript and current workspace state. Do not assume unfinished tool calls completed beyond their recorded tool results.`,
+    `First inspect current state only as needed (for example git status/diff and relevant files), then continue the node objective: "${node.objective}"`,
+    `When done, report exactly this marker on its own line followed by a concise summary:`,
+    `SUBAGENT_RESULT: <summary of changes, verification, and remaining risks>`,
+    `If blocked, report exactly this marker instead:`,
+    `SUBAGENT_BLOCKED: <specific blocker and what input/state change is needed>`,
   ].join("\n");
 }
 
@@ -422,7 +446,7 @@ async function reconcileSubagentOutcomes(
     }
 
     if (subagent.status === "needsFollowup") {
-      const followupPrompt = buildExplicitOutcomeMarkerPrompt(node, subagent);
+      const followupPrompt = buildSubagentFollowupPrompt(node, subagent);
       const followed = await runtime.sendGoalSubagentPrompt(options.adapter, subagent, followupPrompt, {
         metadata: options.metadata,
         now: tickStartedAt,

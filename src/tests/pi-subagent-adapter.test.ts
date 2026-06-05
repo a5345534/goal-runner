@@ -206,6 +206,25 @@ test("Pi subagent session inspection asks for follow-up when pre-compaction erro
   assert.equal(state.lastActivityAt, "2026-06-02T00:00:03.000Z");
 });
 
+test("Pi subagent session inspection asks for follow-up when a live session is stale after a tool result", () => {
+  const state = readPiSubagentSessionState(subagent({ sessionFile: "/stale" }), {
+    exists: () => true,
+    now: () => new Date("2026-06-02T00:20:00.000Z"),
+    staleAfterMs: 10 * 60_000,
+    live: true,
+    readFile: () => [
+      JSON.stringify({ type: "message", message: { role: "user", content: "start" }, timestamp: "2026-06-02T00:00:00.000Z" }),
+      JSON.stringify({ type: "message", message: { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "git status" } }] }, timestamp: "2026-06-02T00:01:00.000Z" }),
+      JSON.stringify({ type: "message", message: { role: "toolResult", toolCallId: "call-1", toolName: "bash", content: [{ type: "text", text: "ok" }] }, timestamp: "2026-06-02T00:01:30.000Z" }),
+      JSON.stringify({ type: "custom", customType: "agent-goal-runtime-state", data: { kind: "reservation_cleared" }, timestamp: "2026-06-02T00:01:30.000Z" }),
+    ].join("\n"),
+  });
+
+  assert.equal(state.status, "needsFollowup");
+  assert.match(state.error ?? "", /stale-subagent-session/);
+  assert.match(state.error ?? "", /role=toolResult/);
+});
+
 test("Pi subagent session inspection maps blocked markers and missing sessions", () => {
   const blocked = readPiSubagentSessionState(subagent({ sessionFile: "/blocked" }), {
     exists: () => true,
