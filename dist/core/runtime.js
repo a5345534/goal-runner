@@ -364,6 +364,16 @@ export class GoalRuntime {
             await this.callbacks.notifyGoalWarning?.(sessionKey, `Goal completion rejected: ${message}`);
             return { goal, message: `Goal completion rejected: ${message}` };
         }
+        // Enforce DAG terminal state: refuse completion when orchestrated nodes are still in progress.
+        const orchestrationState = await this.getGoalOrchestrationState(goal.goalId);
+        if (orchestrationState.nodes.length > 0) {
+            const nonTerminal = orchestrationState.nodes.filter((node) => !TERMINAL_DAG_NODE_STATUSES.has(node.status));
+            if (nonTerminal.length > 0) {
+                const remaining = nonTerminal.map((node) => `${node.nodeId}:${node.status}`).join(", ");
+                throw new Error(`Goal cannot be completed: ${nonTerminal.length} DAG node(s) still non-terminal (${remaining}). ` +
+                    `All DAG nodes must reach complete, blocked, or failed before the goal can be marked complete.`);
+            }
+        }
         const updated = await this.setGoalStatus(goal, "complete");
         await this.appendLedger("goal_completed", sessionKey, updated.goalId, { audit });
         await this.store.clearReservation(sessionKey);
