@@ -173,6 +173,19 @@ const TRANSIENT_ERROR_PATTERNS = [
   /An error occurred while processing your request/i,
 ];
 
+const PROVIDER_LIMIT_ERROR_PATTERNS = [
+  /GoUsageLimitError/i,
+  /FreeUsageLimitError/i,
+  /Monthly usage limit reached/i,
+  /available balance/i,
+  /insufficient_quota/i,
+  /out of budget/i,
+  /quota exceeded/i,
+  /billing/i,
+  /usage limit/i,
+  /credit limit/i,
+];
+
 const CONTEXT_EXCEEDED_PATTERNS = [
   /context_length_exceeded/i,
   /context window/i,
@@ -198,6 +211,10 @@ function isContextExceededError(message: string): boolean {
   return CONTEXT_EXCEEDED_PATTERNS.some((pattern) => pattern.test(message));
 }
 
+function isProviderLimitError(message: string): boolean {
+  return PROVIDER_LIMIT_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+}
+
 function contextFallbackModel(currentModel: string | undefined): string | undefined {
   if (!currentModel) return undefined;
   const fallback = CONTEXT_FALLBACK_MODELS[currentModel];
@@ -208,13 +225,33 @@ function contextFallbackModel(currentModel: string | undefined): string | undefi
 
 function buildRecoveryPrompt(node: GoalDagNode, errorMessage: string, retryCount: number, maxRetries: number): string {
   return [
-    `[SYSTEM RECOVERY] Your previous attempt encountered a transient error after ${retryCount} retry(s):`,
+    `[SYSTEM RECOVERY] Your previous assistant turn encountered a recoverable error after ${retryCount} recovery attempt(s):`,
     `Error: ${errorMessage}`,
-    `This is likely a temporary server or network issue.`,
-    `Please resume your work on: "${node.objective}"`,
+    `Do not discard prior work. Continue in this same session and preserve the current workspace/context.`,
+    `First inspect only what is needed to resume safely (for example git status/diff and the failing command output).`,
+    `Then continue your work on: "${node.objective}"`,
     `Report with SUBAGENT_RESULT: <summary> when done, or SUBAGENT_BLOCKED: <reason> if blocked.`,
-    `Retry ${retryCount + 1}/${maxRetries}.`,
+    `In-place recovery ${retryCount + 1}/${maxRetries}.`,
   ].join("\n");
+}
+
+function buildUnhandledScenarioRecoveryPrompt(node: GoalDagNode, errorMessage: string, retryCount: number, maxRetries: number): string {
+  return [
+    `[SYSTEM RECOVERY: UNHANDLED_SCENARIO] The controller observed an unclassified error but is preserving this session instead of abandoning it.`,
+    `Error: ${errorMessage}`,
+    `Diagnose the situation from the existing transcript/workspace. If you can remediate, continue the node objective: "${node.objective}"`,
+    `If this is a runtime/controller bug or requires developer input, report SUBAGENT_BLOCKED with a concise reproduction and proposed handler.`,
+    `Do not start over unless current workspace inspection proves prior work is unusable.`,
+    `In-place diagnostic recovery ${retryCount + 1}/${maxRetries}.`,
+  ].join("\n");
+}
+
+function quotaBlockedSummary(errorMessage: string): string {
+  return `blocked: provider/model quota or billing limit reached; configure credentials, quota, or a fallback model before continuing. Error: ${errorMessage}`;
+}
+
+function unhandledScenarioBlockedSummary(errorMessage: string): string {
+  return `blocked: unhandled subagent error after in-place recovery attempts; add a controller recovery handler or provide developer guidance. Error: ${errorMessage}`;
 }
 
 function buildContextUpgradePrompt(node: GoalDagNode, oldModel: string, newModel: string): string {
@@ -279,25 +316,48 @@ async function tryAutoRecoverFailedNode(
   result: GoalControllerTickResult,
   options: GoalControllerTickOptions,
   tickStartedAt: string,
+  observedError?: string,
 ): Promise<boolean> {
-  const errorMessage = subagent.integrationStatus ?? subagent.selfReportedResult ?? "unknown error";
+  const errorMessage = observedError ?? subagent.integrationStatus ?? subagent.selfReportedResult ?? "unknown error";
   const maxRetries = options.maxAutoRetries ?? MAX_AUTO_RETRIES_DEFAULT;
   const retryCount = subagent.retryCount ?? 0;
 
-  if (!isTransientError(errorMessage) && !isContextExceededError(errorMessage)) return false;
-  if (retryCount >= maxRetries && !isContextExceededError(errorMessage)) return false;
+  if (isProviderLimitError(errorMessage)) {
+    const summary = quotaBlockedSummary(errorMessage);
+    const blockedSubagent = withSubagentPatch(subagent, {
+      status: "blocked",
+      integrationStatus: summary,
+      retryCount,
+      updatedAt: tickStartedAt,
+    });
+    const blockedNode = withNodePatch(node, { status: "blocked", lastValidationSummary: summary, updatedAt: tickStartedAt });
+    await runtime.saveGoalSubagent(blockedSubagent);
+    await runtime.saveGoalDagNode(blockedNode);
+    result.blocked.push(blockedNode);
+    result.synced.push(blockedSubagent);
+    return true;
+  }
 
   const isContext = isContextExceededError(errorMessage);
   const oldModel = node.modelArg ?? subagent.workspacePath ?? "unknown";
 
   if (isContext) {
     const fallback = contextFallbackModel(node.modelArg);
-    if (!fallback) return false; // No larger model available, let it fail permanently
+    if (!fallback) {
+      const summary = unhandledScenarioBlockedSummary(errorMessage);
+      const blockedSubagent = withSubagentPatch(subagent, { status: "blocked", integrationStatus: summary, retryCount, updatedAt: tickStartedAt });
+      const blockedNode = withNodePatch(node, { status: "blocked", lastValidationSummary: summary, updatedAt: tickStartedAt });
+      await runtime.saveGoalSubagent(blockedSubagent);
+      await runtime.saveGoalDagNode(blockedNode);
+      result.blocked.push(blockedNode);
+      result.synced.push(blockedSubagent);
+      return true;
+    }
     await runtime.saveGoalDagNode(withNodePatch(node, {
       status: "running",
       modelArg: fallback,
       thinkingLevel: "high",
-      lastValidationSummary: `auto-escalated from ${node.modelArg ?? "unknown"} to ${fallback} (context exceeded)`,
+      lastValidationSummary: `last-resort context fallback from ${node.modelArg ?? "unknown"} to ${fallback}`,
       updatedAt: tickStartedAt,
     }));
     node = { ...node, modelArg: fallback, thinkingLevel: "high" };
@@ -315,36 +375,50 @@ async function tryAutoRecoverFailedNode(
       thinkingLevel: "high",
     };
     await runtime.saveGoalSubagent(withSubagentPatch(subagent, {
-      status: "failed",
-      integrationStatus: `context exceeded with ${oldModel}; auto-escalated to ${fallback}`,
-      retryCount: (subagent.retryCount ?? 0) + 1,
+      status: "blocked",
+      integrationStatus: `context exceeded with ${oldModel}; work transferred to last-resort fallback model ${fallback}`,
+      retryCount: retryCount + 1,
+      updatedAt: tickStartedAt,
     }));
     const newSubagent = await runtime.startGoalSubagent(adapter, node, startOptions);
     result.started.push(newSubagent);
     return true;
   }
 
-  // Transient error retry
-  const recoveryPrompt = buildRecoveryPrompt(node, errorMessage, retryCount, maxRetries);
-  const allocation = await options.workspaceAllocator?.({ goalId: subagent.goalId, node, state, adapterId: adapter.adapterId, tickStartedAt });
-  const startOptions: StartGoalSubagentOptions = {
-    subagentId: allocation?.subagentId,
-    cwd: allocation?.cwd ?? subagent.workspacePath,
-    branch: allocation?.branch ?? subagent.branch,
-    ref: allocation?.ref ?? subagent.ref,
-    initialPrompt: recoveryPrompt,
-    metadata: { ...(options.metadata ?? {}), ...(allocation?.metadata ?? {}) },
+  const isTransient = isTransientError(errorMessage);
+  if (retryCount >= maxRetries) {
+    const summary = unhandledScenarioBlockedSummary(errorMessage);
+    const blockedSubagent = withSubagentPatch(subagent, { status: "blocked", integrationStatus: summary, retryCount, updatedAt: tickStartedAt });
+    const blockedNode = withNodePatch(node, { status: "blocked", lastValidationSummary: summary, updatedAt: tickStartedAt });
+    await runtime.saveGoalSubagent(blockedSubagent);
+    await runtime.saveGoalDagNode(blockedNode);
+    result.blocked.push(blockedNode);
+    result.synced.push(blockedSubagent);
+    return true;
+  }
+
+  const recoveryPrompt = isTransient
+    ? buildRecoveryPrompt(node, errorMessage, retryCount, maxRetries)
+    : buildUnhandledScenarioRecoveryPrompt(node, errorMessage, retryCount, maxRetries);
+  const recovered = await runtime.sendGoalSubagentPrompt(adapter, subagent, recoveryPrompt, {
+    metadata: options.metadata,
     now: tickStartedAt,
-    thinkingLevel: node.thinkingLevel,
-  };
-  await runtime.saveGoalSubagent(withSubagentPatch(subagent, {
-    status: "failed",
-    integrationStatus: `auto-retry ${retryCount + 1}/${maxRetries}: ${errorMessage}`,
+  });
+  const status = isTransient
+    ? `in-place recovery ${retryCount + 1}/${maxRetries}: ${errorMessage}`
+    : `unhandled-scenario recovery ${retryCount + 1}/${maxRetries}: ${errorMessage}`;
+  const runningSubagent = withSubagentPatch(recovered, {
+    status: "running",
+    integrationStatus: status,
     retryCount: retryCount + 1,
-  }));
-  await runtime.saveGoalDagNode(withNodePatch(node, { status: "running", updatedAt: tickStartedAt }));
-  const newSubagent = await runtime.startGoalSubagent(adapter, node, startOptions);
-  result.started.push(newSubagent);
+    updatedAt: tickStartedAt,
+    lastActivityAt: tickStartedAt,
+  });
+  const runningNode = withNodePatch(node, { status: "running", lastValidationSummary: status, updatedAt: tickStartedAt });
+  await runtime.saveGoalSubagent(runningSubagent);
+  await runtime.saveGoalDagNode(runningNode);
+  result.followups.push(runningSubagent);
+  result.synced.push(runningSubagent);
   return true;
 }
 
@@ -425,9 +499,21 @@ async function syncSubagents(
       const node = state.nodes.find((item) => item.nodeId === subagent.nodeId);
       if (node) {
         try {
-          const recovered = await tryAutoRecoverFailedNode(runtime, adapter, node, subagent, state, result, options, tickStartedAt);
+          const recovered = await tryAutoRecoverFailedNode(runtime, adapter, node, subagent, state, result, options, tickStartedAt, errorMessage);
           if (recovered) continue;
-        } catch (_retryError) { /* fall through */ }
+        } catch (retryError) {
+          const retryErrorMessage = retryError instanceof Error ? retryError.message : String(retryError);
+          const summary = isProviderLimitError(retryErrorMessage)
+            ? quotaBlockedSummary(retryErrorMessage)
+            : unhandledScenarioBlockedSummary(`${errorMessage}; recovery failed: ${retryErrorMessage}`);
+          const blocked = withSubagentPatch(subagent, { status: "blocked", integrationStatus: summary, updatedAt: tickStartedAt });
+          const blockedNode = withNodePatch(node, { status: "blocked", lastValidationSummary: summary, updatedAt: tickStartedAt });
+          await runtime.saveGoalSubagent(blocked);
+          await runtime.saveGoalDagNode(blockedNode);
+          result.blocked.push(blockedNode);
+          result.synced.push(blocked);
+          continue;
+        }
       }
 
       const failed = withSubagentPatch(subagent, {
@@ -469,7 +555,20 @@ async function reconcileSubagentOutcomes(
       try {
         const recovered = await tryAutoRecoverFailedNode(runtime, options.adapter, node, subagent, state, result, options, tickStartedAt);
         if (recovered) continue;
-      } catch (_retryError) { /* fall through */ }
+      } catch (retryError) {
+        const retryErrorMessage = retryError instanceof Error ? retryError.message : String(retryError);
+        const originalError = subagent.integrationStatus ?? subagent.selfReportedResult ?? "unknown error";
+        const summary = isProviderLimitError(retryErrorMessage)
+          ? quotaBlockedSummary(retryErrorMessage)
+          : unhandledScenarioBlockedSummary(`${originalError}; recovery failed: ${retryErrorMessage}`);
+        const blockedSubagent = withSubagentPatch(subagent, { status: "blocked", integrationStatus: summary, updatedAt: tickStartedAt });
+        const blockedNode = withNodePatch(node, { status: "blocked", lastValidationSummary: summary, updatedAt: tickStartedAt });
+        await runtime.saveGoalSubagent(blockedSubagent);
+        await runtime.saveGoalDagNode(blockedNode);
+        result.blocked.push(blockedNode);
+        result.synced.push(blockedSubagent);
+        continue;
+      }
 
       const failedNode = withNodePatch(node, { status: "failed", lastValidationSummary: subagent.integrationStatus ?? subagent.selfReportedResult });
       await runtime.saveGoalDagNode(failedNode);

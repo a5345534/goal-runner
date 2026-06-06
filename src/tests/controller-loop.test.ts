@@ -176,7 +176,7 @@ test("controller sends stale subagent continuation prompt for stale needs-follow
   assert.equal((await runtime.getGoalSubagent("goal-1", "subagent-1"))?.status, "running");
 });
 
-test("controller auto-retries existing failed subagents with WebSocket transport errors", async () => {
+test("controller recovers transient failed subagents in the same session", async () => {
   const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
   await runtime.saveGoalDagNode({ ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode), status: "failed", updatedAt: now, lastValidationSummary: "WebSocket error" });
   await runtime.saveGoalSubagent(subagent({ status: "failed", integrationStatus: "WebSocket error", workspacePath: "/repo/.worktrees/build" }));
@@ -184,11 +184,70 @@ test("controller auto-retries existing failed subagents with WebSocket transport
 
   const tick = await runtime.runGoalControllerTick("goal-1", { adapter, maxAutoRetries: 2 });
 
-  assert.equal(tick.started.length, 1);
-  assert.equal(adapter.starts.length, 1);
-  assert.equal(adapter.starts[0]?.cwd, "/repo/.worktrees/build");
+  assert.equal(tick.started.length, 0);
+  assert.equal(adapter.starts.length, 0);
+  assert.equal(tick.followups.length, 1);
+  assert.equal(adapter.prompts.length, 1);
+  assert.match(adapter.prompts[0]?.prompt ?? "", /same session/);
   assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "running");
-  assert.equal((await runtime.getGoalSubagent("goal-1", "subagent-1"))?.retryCount, 1);
+  const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
+  assert.equal(saved?.status, "running");
+  assert.equal(saved?.retryCount, 1);
+  assert.match(saved?.integrationStatus ?? "", /in-place recovery 1\/2/);
+});
+
+test("controller recovers unknown subagent errors in the same session before blocking", async () => {
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
+  await runtime.saveGoalDagNode({ ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode), status: "failed", updatedAt: now, lastValidationSummary: "strange adapter error" });
+  await runtime.saveGoalSubagent(subagent({ status: "failed", integrationStatus: "strange adapter error", workspacePath: "/repo/.worktrees/build" }));
+  const adapter = new FakeSubagentAdapter();
+
+  const tick = await runtime.runGoalControllerTick("goal-1", { adapter, maxAutoRetries: 2 });
+
+  assert.equal(tick.started.length, 0);
+  assert.equal(tick.followups.length, 1);
+  assert.match(adapter.prompts[0]?.prompt ?? "", /UNHANDLED_SCENARIO/);
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "running");
+  assert.match((await runtime.getGoalSubagent("goal-1", "subagent-1"))?.integrationStatus ?? "", /unhandled-scenario recovery 1\/2/);
+});
+
+test("controller blocks provider quota errors instead of failing or spawning replacements", async () => {
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
+  await runtime.saveGoalDagNode({ ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode), status: "failed", updatedAt: now, lastValidationSummary: "quota" });
+  await runtime.saveGoalSubagent(subagent({ status: "failed", integrationStatus: "insufficient_quota: available balance exhausted", workspacePath: "/repo/.worktrees/build" }));
+  const adapter = new FakeSubagentAdapter();
+
+  const tick = await runtime.runGoalControllerTick("goal-1", { adapter, maxAutoRetries: 2 });
+
+  assert.equal(tick.started.length, 0);
+  assert.equal(tick.followups.length, 0);
+  assert.equal(tick.blocked.length, 1);
+  assert.equal(adapter.prompts.length, 0);
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "blocked");
+  const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
+  assert.equal(saved?.status, "blocked");
+  assert.match(saved?.integrationStatus ?? "", /quota or billing limit/);
+});
+
+test("controller blocks quota errors raised while sending recovery prompts", async () => {
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
+  await runtime.saveGoalDagNode({ ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode), status: "failed", updatedAt: now, lastValidationSummary: "WebSocket error" });
+  await runtime.saveGoalSubagent(subagent({ status: "failed", integrationStatus: "WebSocket error", workspacePath: "/repo/.worktrees/build" }));
+  const adapter = new FakeSubagentAdapter();
+  adapter.sendPrompt = () => {
+    throw new Error("Monthly usage limit reached");
+  };
+
+  const tick = await runtime.runGoalControllerTick("goal-1", { adapter, maxAutoRetries: 2 });
+
+  assert.equal(tick.started.length, 0);
+  assert.equal(tick.followups.length, 0);
+  assert.equal(tick.failed.length, 0);
+  assert.equal(tick.blocked.length, 1);
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "blocked");
+  const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
+  assert.equal(saved?.status, "blocked");
+  assert.match(saved?.integrationStatus ?? "", /quota or billing limit/);
 });
 
 test("controller does not auto-escalate context overflow while Pi reports recovery as running", async () => {

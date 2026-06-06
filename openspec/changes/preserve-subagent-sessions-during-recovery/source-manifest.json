@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "1.0",
+  "changeName": "preserve-subagent-sessions-during-recovery",
+  "generatedAt": "2026-06-06T09:06:18.541579+00:00",
+  "sources": [
+    {
+      "path": "proposal.md",
+      "kind": "proposal",
+      "sha256": "f08a0c5a7e6b366d2f7080dca7ce3391c6a302334bcddfdda2b215e230fd6d0f"
+    },
+    {
+      "path": "design.md",
+      "kind": "design",
+      "sha256": "725fc80018a490416dc366b3f02d333937718fed8853009504194457a22efce1"
+    },
+    {
+      "path": "tasks.md",
+      "kind": "tasks",
+      "sha256": "cc97421e187d847a1607fac282aaa9607abc254e6369e83c46e8c34a007dec74"
+    }
+  ]
+}
