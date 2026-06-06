@@ -132,7 +132,7 @@ function isEvidenceSatisfied(requirement, request, result) {
         case "post-merge-validation-ran":
             return request.node.validators.length > 0 && result.commandResults.length === request.node.validators.length && result.skippedValidators.length === 0;
         case "audit-report-present":
-            return auditReportPaths(request).some((path) => existsSync(path));
+            return auditReportPaths(request).some((path) => auditReportExistsAndAcceptsCompletion(path));
         default:
             return false;
     }
@@ -160,6 +160,25 @@ function isTestOrValidationArtifactPath(path, request) {
     if ((request.node.validation?.artifactLocks ?? []).some((lock) => lock.path === path))
         return true;
     return /(^|\/)(tests?|specs?|validators?|validation)(\/|$)/i.test(path) || /(^|\/)(test|spec|validator)[^/]*\./i.test(path);
+}
+function auditReportExistsAndAcceptsCompletion(path) {
+    if (!existsSync(path))
+        return false;
+    try {
+        return !auditReportHasRemainingViolations(readFileSync(path, "utf8"));
+    }
+    catch {
+        return false;
+    }
+}
+function auditReportHasRemainingViolations(content) {
+    const numbered = content.match(/\b(\d+)\s+(?:violation(?:s)?(?:\s+paths?)?|violating\s+files?|remaining\s+violations?)\b[^\n.]*\bremain(?:s|ing)?\b/i);
+    if (numbered)
+        return Number.parseInt(numbered[1] ?? "0", 10) > 0;
+    const summary = content.match(/\bviolation(?:s)?\b[^\n.]*\bremain(?:s|ing)?\b/i);
+    if (!summary)
+        return false;
+    return !/\b0\s+violation(?:s)?\b/i.test(summary[0]);
 }
 function auditReportPaths(request) {
     const cwd = request.subagent.workspacePath;

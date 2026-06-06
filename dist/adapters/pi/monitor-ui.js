@@ -210,12 +210,29 @@ function renderDagLines(snapshot, now) {
                 lines.push(`      branch: ${shortenMiddle(subagent.branch, 88)}`);
             if (subagent.workspacePath)
                 lines.push(`      workspace: ${shortenPath(subagent.workspacePath)}`);
+            const integration = formatSubagentIntegration(subagent);
+            if (integration)
+                lines.push(`      integration: ${shortenMiddle(integration, 92)}`);
             const note = subagent.integrationStatus ?? subagent.selfReportedResult;
             if (note)
                 lines.push(`      note: ${shortenMiddle(note, 92)}`);
         }
     }
     return lines;
+}
+function formatSubagentIntegration(subagent) {
+    if (!subagent.integrationState && !subagent.integrationCommitSha && !subagent.integrationSourceHead && !subagent.integrationError)
+        return undefined;
+    const parts = [
+        subagent.integrationState ?? "unknown",
+        subagent.integrationSourceHead ? `source=${shortSha(subagent.integrationSourceHead)}` : undefined,
+        subagent.integrationCommitSha ? `controller=${shortSha(subagent.integrationCommitSha)}` : undefined,
+        subagent.integrationError ? `error=${subagent.integrationError}` : undefined,
+    ].filter((part) => Boolean(part));
+    return parts.join(" ");
+}
+function shortSha(value) {
+    return value.slice(0, 12);
 }
 function derivedMonitorStatus(goal, dag) {
     const nodeStatuses = dag.nodes.map((node) => node.status);

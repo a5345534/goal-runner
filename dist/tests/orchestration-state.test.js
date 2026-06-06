@@ -88,7 +88,14 @@ test("runtime finalizes an active goal when all DAG nodes are complete", async (
     const created = await runtime.createOrReplaceGoal("session-1", "Complete People Frappe slice", { confirmReplace: false });
     assert.equal(created.goal?.goalId, "goal-finalize");
     await runtime.saveGoalDagNode(node({ goalId: "goal-finalize", status: "complete", lastValidationSummary: "controller validation passed" }));
-    await runtime.saveGoalSubagent(subagent({ goalId: "goal-finalize", status: "complete", selfReportedResult: "done" }));
+    await runtime.saveGoalSubagent(subagent({
+        goalId: "goal-finalize",
+        status: "complete",
+        selfReportedResult: "done",
+        integrationState: "complete",
+        integrationSourceHead: "a".repeat(40),
+        integrationCommitSha: "b".repeat(40),
+    }));
     const result = await runtime.finalizeGoalFromDagTerminalState("goal-finalize");
     assert.equal(result.terminal, true);
     assert.equal(result.changed, true);
@@ -97,6 +104,22 @@ test("runtime finalizes an active goal when all DAG nodes are complete", async (
     const ledger = await runtime.listLedgerEvents("session-1", "goal-finalize");
     assert.equal(ledger.at(-1)?.type, "goal_completed");
     assert.equal(ledger.at(-1)?.details?.source, "controller_dag_terminal_state");
+});
+test("runtime blocks terminal complete DAGs when required subagent integration is missing", async () => {
+    let id = 0;
+    const runtime = new GoalRuntime({
+        store: new MemoryGoalStore(),
+        config: { now: () => new Date(now), randomId: () => (id++ === 0 ? "goal-integration-missing" : `integration-event-${id}`) },
+    });
+    await runtime.createOrReplaceGoal("session-1", "Complete People Frappe slice", { confirmReplace: false });
+    await runtime.saveGoalDagNode(node({ goalId: "goal-integration-missing", status: "complete" }));
+    await runtime.saveGoalSubagent(subagent({ goalId: "goal-integration-missing", status: "complete", selfReportedResult: "done" }));
+    const result = await runtime.finalizeGoalFromDagTerminalState("goal-integration-missing");
+    assert.equal(result.terminal, true);
+    assert.equal(result.changed, true);
+    assert.equal(result.status, "blocked");
+    assert.match(result.reason, /required subagent integration incomplete/);
+    assert.equal((await runtime.getGoal("session-1")).goal?.status, "blocked");
 });
 test("runtime marks an active goal blocked when terminal DAG nodes include failures", async () => {
     let id = 0;

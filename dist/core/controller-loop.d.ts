@@ -51,6 +51,29 @@ export interface GoalControllerValidationResult {
     validationSignals?: string[];
 }
 export type GoalControllerValidator = (request: GoalControllerValidationRequest) => Promise<GoalControllerValidationResult> | GoalControllerValidationResult;
+export interface GoalControllerIntegrationRequest {
+    goalId: string;
+    node: GoalDagNode;
+    subagent: GoalSubagentRecord;
+    state: GoalOrchestrationState;
+    validationSummary?: string;
+    validationSignals?: string[];
+    tickStartedAt: string;
+}
+export type GoalControllerIntegrationStatus = "complete" | "notRequired" | "failed" | "blocked";
+export interface GoalControllerIntegrationResult {
+    status: GoalControllerIntegrationStatus;
+    summary?: string;
+    followupPrompt?: string;
+    validationSignals?: string[];
+    sourceBranch?: string;
+    sourceRef?: string;
+    sourceHead?: string;
+    integrationCommitSha?: string;
+    error?: string;
+    completedAt?: string;
+}
+export type GoalControllerIntegrator = (request: GoalControllerIntegrationRequest) => Promise<GoalControllerIntegrationResult> | GoalControllerIntegrationResult;
 export interface GoalControllerInitialPromptRequest {
     goalId: string;
     node: GoalDagNode;
@@ -61,6 +84,8 @@ export interface GoalControllerTickOptions {
     schedulingPolicy?: GoalDagSchedulingPolicy;
     workspaceAllocator?: GoalControllerWorkspaceAllocator;
     validator?: GoalControllerValidator;
+    /** Integrates repository-changing subagent branches before node completion. */
+    integrator?: GoalControllerIntegrator;
     renderInitialPrompt?: (request: GoalControllerInitialPromptRequest) => string;
     maxStartsPerTick?: number;
     /** Maximum auto-retry attempts for transient subagent failures (default 2). */

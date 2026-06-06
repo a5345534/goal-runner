@@ -151,6 +151,7 @@ export function renderOpencodeSubagentInitialPrompt(request: HarnessSubagentStar
     request.node.scope ? `Scope: ${request.node.scope}` : undefined,
     request.cwd ? `Workspace: ${request.cwd}` : undefined,
     request.branch ? `Branch: ${request.branch}` : request.ref ? `Ref: ${request.ref}` : undefined,
+    request.cwd && request.branch ? "If you change repository files, commit the intended changes on this branch before reporting SUBAGENT_RESULT; uncommitted work cannot be integrated by the controller." : undefined,
     request.node.expectedOutputs.length ? `Expected outputs: ${request.node.expectedOutputs.join(", ")}` : undefined,
     request.node.validators.length ? `Validators: ${request.node.validators.join(", ")}` : undefined,
     "",

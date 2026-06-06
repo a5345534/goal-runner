@@ -153,7 +153,7 @@ Nodes with no `after` dependencies are immediately schedulable, subject to contr
 | --- | --- | --- | --- |
 | `id` | yes | kebab-case string | Stable node id and slug. Must match `^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`. |
 | `objective` | yes | non-empty string | Work assigned to the subagent for this node. |
-| `after` | no | array of node ids | Dependencies that must be `complete` before this node can run. |
+| `after` | no | array of node ids | Dependencies that must be `complete` and have successful required subagent integration before this node can run. |
 | `outputs` | no | string array | Expected files/directories checked by controller validation. |
 | `validators` | no | string array | Shell validators for controller validation. |
 | `conflicts` | no | object | File/module/capability conflict hints for scheduler serialization. |
@@ -162,7 +162,7 @@ Nodes with no `after` dependencies are immediately schedulable, subject to contr
 | `validation` | no | object | Optional validation contract metadata: profile, test-spec provenance, artifact locks, required evidence, audit test-gap policy, and generic diff/report settings. |
 | `workspaceStrategy` | no | string | Workspace allocation strategy. Defaults to native Git worktree in Pi. |
 | `risk` | no | `low` / `medium` / `high` | Risk label for scheduling/model-routing/review policy. |
-| `completionGates` | no | string array | Completion gates. Defaults to `controller-validation`. |
+| `completionGates` | no | string array | Completion gates. Defaults to `controller-validation`. Integration gate names such as `subagent-integration`, `subagent-branch-integration`, `branch-integration`, or `native-git-integration` explicitly require branch integration before completion. |
 | `modelScenario` | no | scenario id | Explicit model-routing scenario for this node. Overrides defaults and rules. |
 
 ## Validation contract
@@ -198,9 +198,24 @@ A node can declare a generic validation contract. Runtime persists this metadata
 }
 ```
 
-Supported built-in evidence labels include `validators-ran`, `locked-artifacts-unchanged`, `implementation-diff-present`, `non-test-diff-present`, `post-merge-validation-ran`, and `audit-report-present`. Unknown labels fail closed until a planner/runtime adapter teaches the controller how to satisfy them.
+Supported built-in evidence labels include `validators-ran`, `locked-artifacts-unchanged`, `implementation-diff-present`, `non-test-diff-present`, `post-merge-validation-ran`, and `audit-report-present`. `audit-report-present` requires a readable report file and fails if the report explicitly says violations remain (for example `9 violation paths / 98 files remain`). Unknown labels fail closed until a planner/runtime adapter teaches the controller how to satisfy them.
 
 For high-risk `kind=implementation` nodes, controller validation fails if the node has no validators, outputs, validation profile, approved test-spec reference, artifact locks, or required evidence. This prevents high-risk work from completing on self-report alone.
+
+## Subagent branch integration
+
+For `workspaceStrategy: "native-git-worktree"`, Pi/OpenCode allocate a controller worktree and per-node subagent worktrees/branches. After a subagent reports `SUBAGENT_RESULT:` and controller validation passes, the runtime attempts to integrate the committed subagent branch head into the controller workspace before marking the node `complete`.
+
+Integration metadata is stored on the subagent record:
+
+- `integrationState`: `pending`, `integrating`, `complete`, `failed`, or `not-required`
+- `integrationSourceBranch` / `integrationSourceRef` / `integrationSourceHead`
+- `integrationCommitSha`
+- `integrationError` and human-readable `integrationStatus`
+
+A node is not considered complete until required integration is `complete` or `not-required`. Dependent nodes and final audit nodes stay blocked while required upstream integration is pending or failed. If the source branch has no changes already outside the controller branch, integration is recorded as `not-required`. If the source or controller worktree has uncommitted changes, or a merge conflict occurs, integration fails closed and the subagent receives a follow-up prompt to commit/rebase/resolve before reporting again.
+
+Subagents running in native-git workspaces should commit intended repository changes on their assigned branch before reporting `SUBAGENT_RESULT:`. Uncommitted changes cannot be safely merged by the controller.
 
 ## Defaults
 

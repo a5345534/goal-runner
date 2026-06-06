@@ -3,6 +3,7 @@ import { runGoalControllerLoop as runGoalControllerLoopCore, runGoalControllerTi
 import { createGoalDagNodesFromObjective, } from "./dag-planner.js";
 import { createGoalDagNodesFromFileDocument } from "./dag-file.js";
 import { createGoalDagNodes, getGoalDagReadyQueue as computeGoalDagReadyQueue, } from "./dag-scheduler.js";
+import { findRequiredSubagentIntegrationIssues } from "./integration.js";
 import { parseGoalCommand, validateGoalObjective } from "./parser.js";
 import { renderBudgetLimitPrompt, renderContinuationPrompt, renderObjectiveUpdatedPrompt } from "./prompts.js";
 import { isAutoContinuableStatus, normalizeGoalStatus } from "./status.js";
@@ -88,6 +89,7 @@ export class GoalRuntime {
                 reason: `non-terminal DAG nodes remain: ${nonTerminal.map((node) => `${node.nodeId}:${node.status}`).join(", ")}`,
             };
         }
+        const integrationIssues = findRequiredSubagentIntegrationIssues(state);
         const goal = await this.getGoalById(goalId);
         if (!goal)
             return { goalId, terminal: true, changed: false, reason: "goal record not found" };
@@ -95,7 +97,7 @@ export class GoalRuntime {
             return { goalId, terminal: true, changed: false, reason: `goal already ${goal.status}`, status: goal.status, goal };
         }
         const allComplete = state.nodes.every((node) => node.status === "complete" || node.status === "superseded");
-        const nextStatus = allComplete ? "complete" : "blocked";
+        const nextStatus = allComplete && integrationIssues.length === 0 ? "complete" : "blocked";
         const updated = await this.setGoalStatus(goal, nextStatus);
         await this.store.clearReservation(goal.sessionKey);
         await this.appendLedger(nextStatus === "complete" ? "goal_completed" : "goal_blocked", goal.sessionKey, updated.goalId, {
@@ -111,14 +113,20 @@ export class GoalRuntime {
                 status: subagent.status,
                 result: subagent.selfReportedResult,
                 integrationStatus: subagent.integrationStatus,
+                integrationState: subagent.integrationState,
+                integrationCommitSha: subagent.integrationCommitSha,
+                integrationError: subagent.integrationError,
             })),
+            integrationIssues,
         });
         this.activeTurns.delete(goal.sessionKey);
         return {
             goalId,
             terminal: true,
             changed: true,
-            reason: allComplete ? "all DAG nodes complete" : "one or more DAG nodes ended blocked/failed",
+            reason: integrationIssues.length > 0
+                ? `required subagent integration incomplete: ${integrationIssues.map((issue) => `${issue.nodeId}/${issue.subagentId}`).join(", ")}`
+                : allComplete ? "all DAG nodes complete" : "one or more DAG nodes ended blocked/failed",
             status: updated.status,
             goal: updated,
         };
@@ -372,6 +380,11 @@ export class GoalRuntime {
                 const remaining = nonTerminal.map((node) => `${node.nodeId}:${node.status}`).join(", ");
                 throw new Error(`Goal cannot be completed: ${nonTerminal.length} DAG node(s) still non-terminal (${remaining}). ` +
                     `All DAG nodes must reach complete, blocked, or failed before the goal can be marked complete.`);
+            }
+            const integrationIssues = findRequiredSubagentIntegrationIssues(orchestrationState);
+            if (integrationIssues.length > 0) {
+                throw new Error(`Goal cannot be completed: ${integrationIssues.length} required subagent integration(s) incomplete ` +
+                    `(${integrationIssues.map((issue) => `${issue.nodeId}/${issue.subagentId}: ${issue.reason}`).join("; ")}).`);
             }
         }
         const updated = await this.setGoalStatus(goal, "complete");

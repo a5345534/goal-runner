@@ -26,8 +26,8 @@ Goal `6968fef0` exposed this gap: all DAG nodes reached `complete`, but final au
 
 ## Impact
 
-- Directly affected: `src/core/controller-loop.ts`, `src/core/git-workspace.ts`, `src/core/types.ts`, stores, Pi adapter/monitor, validation runner, docs.
-- Related but unchanged: planner DAG generation, OpenCode adapter semantics unless/until a matching integration backend is added.
+- Directly affected: `src/core/controller-loop.ts`, `src/core/git-workspace.ts`, `src/core/types.ts`, stores, Pi/OpenCode adapters, Pi monitor, validation runner, docs.
+- Related but unchanged: planner DAG generation.
 
 ## Scope
 
@@ -41,4 +41,4 @@ Goal `6968fef0` exposed this gap: all DAG nodes reached `complete`, but final au
 ### Out
 - Fully automatic conflict resolution beyond safe merge/cherry-pick attempts.
 - Planner changes to generate new integration nodes.
-- Cross-adapter integration beyond Pi/native-git unless an adapter already exposes enough metadata.
+- Cross-adapter integration beyond native-git workspace adapters.

@@ -1,3 +1,4 @@
+import { nodeRequiredIntegrationsSatisfied } from "./integration.js";
 const RUNNING_NODE_STATUSES = new Set(["running", "selfReportedComplete", "controllerValidating"]);
 const TERMINAL_SUCCESS_STATUSES = new Set(["complete"]);
 const TERMINAL_BLOCKED_STATUSES = new Set(["blocked", "failed", "superseded"]);
@@ -70,6 +71,7 @@ export function assertValidGoalDag(nodes) {
 export function getGoalDagReadyQueue(state, policy = {}) {
     assertValidGoalDag(state.nodes);
     const nodeById = new Map(state.nodes.map((node) => [node.nodeId, node]));
+    const subagentsByNode = groupSubagentsByNode(state.subagents);
     const runningNodeIds = new Set(state.subagents.filter(isActiveSubagent).map((subagent) => subagent.nodeId));
     for (const node of state.nodes) {
         if (RUNNING_NODE_STATUSES.has(node.status))
@@ -92,7 +94,7 @@ export function getGoalDagReadyQueue(state, policy = {}) {
             blocked.push({ node, reasons: [`status ${node.status} is not schedulable`] });
             continue;
         }
-        const reasons = dependencyBlockers(node, nodeById);
+        const reasons = dependencyBlockers(node, nodeById, subagentsByNode);
         const conflict = firstConflict(node, blockers, policy);
         if (conflict)
             reasons.push(conflict);
@@ -109,7 +111,7 @@ export function getGoalDagReadyQueue(state, policy = {}) {
     }
     return { ready, blocked, running, capacity: Number.isFinite(capacity) ? capacity : ready.length };
 }
-function dependencyBlockers(node, nodeById) {
+function dependencyBlockers(node, nodeById, subagentsByNode) {
     const reasons = [];
     for (const dependencyId of node.dependencyNodeIds) {
         const dependency = nodeById.get(dependencyId);
@@ -118,6 +120,9 @@ function dependencyBlockers(node, nodeById) {
         }
         else if (dependency.status !== "complete") {
             reasons.push(`dependency ${dependencyId} is ${dependency.status}`);
+        }
+        else if (!nodeRequiredIntegrationsSatisfied(dependency, subagentsByNode.get(dependencyId) ?? [])) {
+            reasons.push(`dependency ${dependencyId} has required subagent integration pending or failed`);
         }
     }
     return reasons;
@@ -151,6 +156,15 @@ function intersects(left, right) {
 }
 function isActiveSubagent(subagent) {
     return ["workspaceCreated", "sessionStarted", "running", "idle", "selfReportedComplete", "controllerValidating"].includes(subagent.status);
+}
+function groupSubagentsByNode(subagents) {
+    const grouped = new Map();
+    for (const subagent of subagents) {
+        const list = grouped.get(subagent.nodeId) ?? [];
+        list.push(subagent);
+        grouped.set(subagent.nodeId, list);
+    }
+    return grouped;
 }
 function topologicalSort(nodes) {
     const byId = new Map(nodes.map((node) => [node.nodeId, node]));

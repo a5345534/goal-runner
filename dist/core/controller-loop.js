@@ -1,3 +1,4 @@
+import { nodeRequiresSubagentIntegration, subagentIntegrationTerminalSuccess } from "./integration.js";
 const SYNCABLE_SUBAGENT_STATUSES = new Set(["sessionStarted", "running", "idle"]);
 const NON_TERMINAL_SUBAGENT_STATUSES = new Set([
     "planned",
@@ -325,11 +326,7 @@ async function validateOrHold(runtime, options, state, node, subagent, result, t
     const validationSummary = validation.summary ?? validation.validationSignals?.join("; ");
     const validationResults = appendValidationResults(validatingSubagent, validation);
     if (validation.status === "passed") {
-        const completedNode = withNodePatch(validatingNode, { status: "complete", lastValidationSummary: validationSummary });
-        const completedSubagent = withSubagentPatch(validationResults, { status: "complete" });
-        await runtime.saveGoalDagNode(completedNode);
-        await runtime.saveGoalSubagent(completedSubagent);
-        result.completed.push(completedNode);
+        await integrateOrCompleteValidatedSubagent(runtime, options, state, validatingNode, validationResults, result, tickStartedAt, validationSummary, validation.validationSignals);
         return;
     }
     if (validation.status === "blocked") {
@@ -357,6 +354,104 @@ async function validateOrHold(runtime, options, state, node, subagent, result, t
     await runtime.saveGoalDagNode(needsFollowupNode);
     await runtime.saveGoalSubagent(needsFollowupSubagent);
     result.followups.push(needsFollowupSubagent);
+}
+async function integrateOrCompleteValidatedSubagent(runtime, options, state, node, subagent, result, tickStartedAt, validationSummary, validationSignals) {
+    if (!nodeRequiresSubagentIntegration(node, subagent)) {
+        await completeValidatedSubagent(runtime, node, subagent, result, validationSummary, { integrationState: "not-required", integrationStatus: "integration not required" });
+        return;
+    }
+    if (subagentIntegrationTerminalSuccess(subagent)) {
+        await completeValidatedSubagent(runtime, node, subagent, result, validationSummary);
+        return;
+    }
+    if (!options.integrator) {
+        const message = "required subagent branch integration cannot run: no controller integrator is configured";
+        const blockedNode = withNodePatch(node, { status: "blocked", lastValidationSummary: appendSummary(validationSummary, message) });
+        const blockedSubagent = withSubagentPatch(subagent, {
+            status: "blocked",
+            integrationState: "failed",
+            integrationStatus: message,
+            integrationError: message,
+        });
+        await runtime.saveGoalDagNode(blockedNode);
+        await runtime.saveGoalSubagent(blockedSubagent);
+        result.blocked.push(blockedNode);
+        return;
+    }
+    const integratingSubagent = withSubagentPatch(subagent, {
+        integrationState: "integrating",
+        integrationStatus: "integrating subagent branch into controller workspace",
+    });
+    await runtime.saveGoalSubagent(integratingSubagent);
+    const integration = await options.integrator({
+        goalId: node.goalId,
+        node,
+        subagent: integratingSubagent,
+        state,
+        validationSummary,
+        validationSignals,
+        tickStartedAt,
+    });
+    const integrationSummary = integration.summary ?? integration.error ?? `integration ${integration.status}`;
+    const integrationPatch = {
+        integrationSourceBranch: integration.sourceBranch ?? integratingSubagent.branch,
+        integrationSourceRef: integration.sourceRef ?? integratingSubagent.ref,
+        integrationSourceHead: integration.sourceHead ?? integratingSubagent.commitSha,
+        integrationCommitSha: integration.integrationCommitSha,
+        commitSha: integration.sourceHead ?? integratingSubagent.commitSha,
+        integrationCompletedAt: integration.status === "complete" || integration.status === "notRequired" ? integration.completedAt ?? tickStartedAt : undefined,
+        integrationStatus: integrationSummary,
+        integrationError: integration.error,
+    };
+    if (integration.status === "complete" || integration.status === "notRequired") {
+        await completeValidatedSubagent(runtime, node, withSubagentPatch(integratingSubagent, {
+            ...integrationPatch,
+            integrationState: integration.status === "complete" ? "complete" : "not-required",
+        }), result, appendSummary(validationSummary, integrationSummary));
+        return;
+    }
+    const failedState = integration.status === "blocked" ? "blocked" : "needsFollowup";
+    const failedSubagent = withSubagentPatch(integratingSubagent, {
+        ...integrationPatch,
+        integrationState: "failed",
+        status: failedState,
+    });
+    if (integration.followupPrompt) {
+        const followed = await runtime.sendGoalSubagentPrompt(options.adapter, failedSubagent, integration.followupPrompt, {
+            metadata: options.metadata,
+            now: tickStartedAt,
+        });
+        const runningSubagent = withSubagentPatch(followed, {
+            status: "running",
+            integrationState: "failed",
+            integrationStatus: integrationSummary,
+            integrationError: integration.error ?? integrationSummary,
+        });
+        const runningNode = withNodePatch(node, { status: "running", lastValidationSummary: appendSummary(validationSummary, `integration follow-up required: ${integrationSummary}`) });
+        await runtime.saveGoalSubagent(runningSubagent);
+        await runtime.saveGoalDagNode(runningNode);
+        result.followups.push(runningSubagent);
+        return;
+    }
+    const blockedNode = withNodePatch(node, { status: "blocked", lastValidationSummary: appendSummary(validationSummary, `integration failed: ${integrationSummary}`) });
+    const blockedSubagent = withSubagentPatch(failedSubagent, { status: "blocked" });
+    await runtime.saveGoalDagNode(blockedNode);
+    await runtime.saveGoalSubagent(blockedSubagent);
+    result.blocked.push(blockedNode);
+}
+async function completeValidatedSubagent(runtime, node, subagent, result, validationSummary, subagentPatch = {}) {
+    const completedNode = withNodePatch(node, { status: "complete", lastValidationSummary: validationSummary });
+    const completedSubagent = withSubagentPatch(subagent, { ...subagentPatch, status: "complete" });
+    await runtime.saveGoalDagNode(completedNode);
+    await runtime.saveGoalSubagent(completedSubagent);
+    result.completed.push(completedNode);
+}
+function appendSummary(left, right) {
+    if (!left)
+        return right;
+    if (!right)
+        return left;
+    return `${left} ${right}`;
 }
 async function startReadyNodes(runtime, goalId, options, result, tickStartedAt) {
     const state = await runtime.getGoalOrchestrationState(goalId);

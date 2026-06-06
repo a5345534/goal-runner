@@ -1,22 +1,22 @@
 {
   "schemaVersion": "1.0",
   "changeName": "add-subagent-branch-integration-gate",
-  "generatedAt": "2026-06-06T03:15:57.964344+00:00",
+  "generatedAt": "2026-06-06T03:46:30.337003+00:00",
   "sources": [
     {
       "path": "proposal.md",
       "kind": "proposal",
-      "sha256": "4ce81f2fad8398826e155a50c7b3776b54e6ea6df5e8e10268a9038c83518ebc"
+      "sha256": "8bb254b4f1dd1d9a43a8108344f9b9af56d81f9022b70b172c1561a2001483b7"
     },
     {
       "path": "design.md",
       "kind": "design",
-      "sha256": "8aadb6f8dad7de75e2ad4316b4217bd20acaeb29ac377c757959b76f7d83507e"
+      "sha256": "f9c9620a2219b77f1fb66ee87de93f98013a69f6b6c6ddcc765a0f6b61dcea48"
     },
     {
       "path": "tasks.md",
       "kind": "tasks",
-      "sha256": "43b03a5d1695010efcbd585532152346a091dfc0de2b3694afa8780e4ed0f02f"
+      "sha256": "e71560679cd9ac139a755e333d3d7fbc5af01ac3a338db7d1bb5b050426d1d1d"
     }
   ]
 }

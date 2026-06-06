@@ -133,6 +133,35 @@ test("controller validation runner verifies locked validation artifacts", () => 
         rmSync(dir, { recursive: true, force: true });
     }
 });
+test("controller validation runner rejects audit reports that still list remaining violations", () => {
+    const dir = mkdtempSync(join(tmpdir(), "goal-validation-audit-"));
+    try {
+        writeFileSync(join(dir, "report.md"), "# Audit\n\n9 violation paths / 98 files remain\n");
+        const failing = runControllerValidation(request({
+            node: {
+                ...request().node,
+                kind: "audit",
+                validation: { requiredEvidence: ["audit-report-present"], auditReportPaths: ["report.md"] },
+            },
+            subagent: { ...request().subagent, workspacePath: dir },
+        }));
+        assert.equal(failing.status, "failed");
+        assert.match(failing.summary ?? "", /missing evidence: audit-report-present/);
+        writeFileSync(join(dir, "report.md"), "# Audit\n\n0 violations remain\n");
+        const passing = runControllerValidation(request({
+            node: {
+                ...request().node,
+                kind: "audit",
+                validation: { requiredEvidence: ["audit-report-present"], auditReportPaths: ["report.md"] },
+            },
+            subagent: { ...request().subagent, workspacePath: dir },
+        }));
+        assert.equal(passing.status, "passed");
+    }
+    finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
 test("controller validation runner blocks high-risk implementation nodes without validation contract", () => {
     const result = runControllerValidation(request({
         node: { ...request().node, kind: "implementation", risk: "high" },

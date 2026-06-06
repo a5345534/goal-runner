@@ -28,7 +28,7 @@ The runtime schedules DAG nodes in isolated subagent workspaces. Validation can 
 
 **Choice**
 - For `workspaceStrategy=native-git-worktree`, persist subagent branch/ref/head metadata and integration status.
-- Attempt a deterministic integration operation into the controller workspace (merge or cherry-pick, implementation choice to be finalized).
+- Attempt a deterministic integration operation into the controller workspace using a native `git merge --no-ff --no-edit <sourceHead>` strategy.
 - If conflicts or validation failures occur, leave the node in `needsFollowup`/integration-failed state with a recovery prompt and evidence.
 
 **Rationale**
@@ -78,6 +78,6 @@ The runtime schedules DAG nodes in isolated subagent workspaces. Validation can 
 
 ## Open Questions
 
-- Should native-git integration prefer merge commits, fast-forward where possible, or cherry-pick per-node commits?
-- What metadata is enough to distinguish no-op/report-only nodes from implementation nodes that must integrate code changes?
-- Should final-audit validators parse project-specific report formats, or should DAG validation contracts declare machine-checkable acceptance criteria?
+- Resolved: native-git integration uses merge commits/no-ff rather than cherry-pick so branch provenance is preserved and multiple subagent branches can be integrated in order.
+- Resolved: required/no-op integration decisions are recorded with `integrationState` (`pending`, `integrating`, `complete`, `failed`, `not-required`) plus source branch/ref/head, controller integration commit, error, completion timestamp, and human-readable status.
+- Open: richer final-audit validators may still need project-specific machine-checkable acceptance criteria beyond the generic "report says violations remain" heuristic.

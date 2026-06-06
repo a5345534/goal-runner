@@ -234,11 +234,28 @@ function renderDagLines(snapshot: GoalMonitorDagSnapshot, now: Date): string[] {
       lines.push(`   ↳ [${subagent.status}] ${shortenMiddle(subagent.subagentId, 62)} runtime=${runtime} last=${activity}`);
       if (subagent.branch) lines.push(`      branch: ${shortenMiddle(subagent.branch, 88)}`);
       if (subagent.workspacePath) lines.push(`      workspace: ${shortenPath(subagent.workspacePath)}`);
+      const integration = formatSubagentIntegration(subagent);
+      if (integration) lines.push(`      integration: ${shortenMiddle(integration, 92)}`);
       const note = subagent.integrationStatus ?? subagent.selfReportedResult;
       if (note) lines.push(`      note: ${shortenMiddle(note, 92)}`);
     }
   }
   return lines;
+}
+
+function formatSubagentIntegration(subagent: GoalSubagentRecord): string | undefined {
+  if (!subagent.integrationState && !subagent.integrationCommitSha && !subagent.integrationSourceHead && !subagent.integrationError) return undefined;
+  const parts = [
+    subagent.integrationState ?? "unknown",
+    subagent.integrationSourceHead ? `source=${shortSha(subagent.integrationSourceHead)}` : undefined,
+    subagent.integrationCommitSha ? `controller=${shortSha(subagent.integrationCommitSha)}` : undefined,
+    subagent.integrationError ? `error=${subagent.integrationError}` : undefined,
+  ].filter((part): part is string => Boolean(part));
+  return parts.join(" ");
+}
+
+function shortSha(value: string): string {
+  return value.slice(0, 12);
 }
 
 function derivedMonitorStatus(goal: GoalSummary, dag: GoalMonitorDagSnapshot): string {

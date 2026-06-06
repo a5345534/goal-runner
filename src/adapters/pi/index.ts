@@ -10,6 +10,7 @@ import {
   SQLiteGoalStore,
   cleanupTerminalSubagentWorkspaces,
   createControllerValidationRunner,
+  createNativeGitSubagentBranchIntegrator,
   createNativeGitSubagentWorkspaceAllocator,
   parseGoalCommand,
   parseGoalDagFileContent,
@@ -579,6 +580,7 @@ function buildPiGoalControllerLoopOptions(
       };
     },
     validator: createControllerValidationRunner(),
+    integrator: createNativeGitSubagentBranchIntegrator(workspaceManager, { controllerWorkspacePath: binding.workspace }),
     metadata: { controllerGoalId: goal.goalId },
   };
 }

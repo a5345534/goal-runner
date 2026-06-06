@@ -243,6 +243,7 @@ export interface GoalDagNode {
     updatedAt: string;
 }
 export type GoalSubagentStatus = "planned" | "workspaceCreated" | "sessionStarted" | "running" | "idle" | "selfReportedComplete" | "controllerValidating" | "needsFollowup" | "complete" | "blocked" | "failed";
+export type GoalSubagentIntegrationState = "pending" | "integrating" | "complete" | "failed" | "not-required";
 export interface GoalSubagentRecord {
     goalId: string;
     nodeId: string;
@@ -258,8 +259,18 @@ export interface GoalSubagentRecord {
     lastActivityAt?: string;
     selfReportedResult?: string;
     controllerValidationResults?: string[];
+    /** Source commit produced by the subagent branch/worktree, when known. */
     commitSha?: string;
+    /** Human-readable integration note retained for legacy monitor/status displays. */
     integrationStatus?: string;
+    /** Controller-side branch/worktree integration state for repository-changing subagents. */
+    integrationState?: GoalSubagentIntegrationState;
+    integrationSourceBranch?: string;
+    integrationSourceRef?: string;
+    integrationSourceHead?: string;
+    integrationCommitSha?: string;
+    integrationError?: string;
+    integrationCompletedAt?: string;
     /** Number of automatic retries attempted for this subagent. */
     retryCount?: number;
     createdAt: string;

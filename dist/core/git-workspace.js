@@ -88,6 +88,72 @@ export class NativeGitWorkspaceManager {
             git(repoRoot, deleteArgs);
         }
     }
+    integrateSubagentBranch(request) {
+        const controllerWorkspacePath = resolve(request.controllerWorkspacePath);
+        const controllerRepo = findGitRepositoryRoot(controllerWorkspacePath);
+        if (!controllerRepo) {
+            return nativeGitIntegrationFailure(request, `controller workspace is not inside a Git repository: ${controllerWorkspacePath}`);
+        }
+        const source = resolveSubagentIntegrationSource(controllerWorkspacePath, request.subagent);
+        if (!source.ok)
+            return nativeGitIntegrationFailure(request, source.error);
+        const sourceBranch = source.branch ?? request.subagent.branch;
+        const sourceRef = source.ref ?? request.subagent.ref ?? sourceBranch;
+        const sourceHead = source.head;
+        const controllerDirty = gitStatusPorcelain(controllerWorkspacePath, { ignoreWorktreeRoot: true });
+        if (controllerDirty) {
+            return nativeGitIntegrationFailure(request, `controller workspace has uncommitted changes; cannot integrate safely:\n${controllerDirty}`, { sourceBranch, sourceRef, sourceHead });
+        }
+        if (source.workspacePath) {
+            const sourceDirty = gitStatusPorcelain(source.workspacePath);
+            if (sourceDirty) {
+                return nativeGitIntegrationFailure(request, `subagent workspace has uncommitted changes; commit them on the subagent branch before reporting completion:\n${sourceDirty}`, { sourceBranch, sourceRef, sourceHead }, buildCommitBeforeIntegrationPrompt(request, sourceDirty));
+            }
+        }
+        const controllerHead = safeGit(controllerWorkspacePath, ["rev-parse", "--verify", "HEAD"]);
+        if (!controllerHead)
+            return nativeGitIntegrationFailure(request, "controller workspace has no HEAD", { sourceBranch, sourceRef, sourceHead });
+        if (sourceHead === controllerHead) {
+            return {
+                status: "notRequired",
+                summary: `subagent branch already matches controller HEAD ${shortSha(controllerHead)}`,
+                sourceBranch,
+                sourceRef,
+                sourceHead,
+                integrationCommitSha: controllerHead,
+                completedAt: new Date().toISOString(),
+            };
+        }
+        if (gitIsAncestor(controllerWorkspacePath, sourceHead, controllerHead)) {
+            return {
+                status: "complete",
+                summary: `subagent commit ${shortSha(sourceHead)} is already integrated in controller HEAD ${shortSha(controllerHead)}`,
+                sourceBranch,
+                sourceRef,
+                sourceHead,
+                integrationCommitSha: controllerHead,
+                completedAt: new Date().toISOString(),
+            };
+        }
+        try {
+            git(controllerWorkspacePath, ["merge", "--no-ff", "--no-edit", sourceHead]);
+            const integrationCommitSha = git(controllerWorkspacePath, ["rev-parse", "--verify", "HEAD"]);
+            return {
+                status: "complete",
+                summary: `merged subagent ${request.subagent.subagentId} ${shortSha(sourceHead)} into controller ${shortSha(integrationCommitSha)}`,
+                sourceBranch,
+                sourceRef,
+                sourceHead,
+                integrationCommitSha,
+                completedAt: new Date().toISOString(),
+            };
+        }
+        catch (error) {
+            safeGit(controllerWorkspacePath, ["merge", "--abort"]);
+            const message = `git merge failed while integrating subagent ${request.subagent.subagentId}: ${gitErrorMessage(error)}`;
+            return nativeGitIntegrationFailure(request, message, { sourceBranch, sourceRef, sourceHead }, buildMergeConflictFollowupPrompt(request, message));
+        }
+    }
     resolveBaseRef(repoRoot, overrideBaseRef) {
         if (overrideBaseRef?.trim())
             return overrideBaseRef.trim();
@@ -146,6 +212,27 @@ export function createNativeGitSubagentWorkspaceAllocator(manager, options = {})
         };
     };
 }
+export function createNativeGitSubagentBranchIntegrator(manager, options) {
+    return (request) => {
+        const result = manager.integrateSubagentBranch({
+            controllerWorkspacePath: options.controllerWorkspacePath,
+            node: request.node,
+            subagent: request.subagent,
+            strategy: options.strategy,
+        });
+        return {
+            status: result.status === "notRequired" ? "notRequired" : result.status,
+            summary: result.summary,
+            followupPrompt: result.followupPrompt,
+            sourceBranch: result.sourceBranch,
+            sourceRef: result.sourceRef,
+            sourceHead: result.sourceHead,
+            integrationCommitSha: result.integrationCommitSha,
+            error: result.error,
+            completedAt: result.completedAt,
+        };
+    };
+}
 export function cleanupTerminalSubagentWorkspaces(manager, state, policy = {}) {
     return state.subagents.map((subagent) => cleanupSubagentWorkspace(manager, subagent, policy));
 }
@@ -187,6 +274,92 @@ function cleanupResult(subagent, action, reason, error) {
         branch: subagent.branch,
         error,
     };
+}
+function resolveSubagentIntegrationSource(controllerWorkspacePath, subagent) {
+    const workspacePath = subagent.workspacePath ? resolve(subagent.workspacePath) : undefined;
+    if (workspacePath && findGitRepositoryRoot(workspacePath)) {
+        const head = safeGit(workspacePath, ["rev-parse", "--verify", "HEAD"]);
+        if (!head)
+            return { ok: false, error: `subagent workspace has no HEAD: ${workspacePath}` };
+        return {
+            ok: true,
+            workspacePath,
+            branch: safeGit(workspacePath, ["branch", "--show-current"]) || subagent.branch,
+            ref: subagent.ref,
+            head,
+        };
+    }
+    const sourceRef = subagent.branch ?? subagent.ref ?? subagent.commitSha ?? subagent.integrationSourceHead;
+    if (!sourceRef)
+        return { ok: false, error: "subagent has no workspace, branch, ref, or commit SHA to integrate" };
+    const head = safeGit(controllerWorkspacePath, ["rev-parse", "--verify", `${sourceRef}^{commit}`]);
+    if (!head)
+        return { ok: false, error: `cannot resolve subagent integration ref ${sourceRef}` };
+    return { ok: true, branch: subagent.branch, ref: sourceRef, head };
+}
+function nativeGitIntegrationFailure(request, error, source = {}, followupPrompt) {
+    return {
+        status: "failed",
+        summary: error,
+        error,
+        followupPrompt,
+        sourceBranch: source.sourceBranch,
+        sourceRef: source.sourceRef,
+        sourceHead: source.sourceHead,
+    };
+}
+function gitStatusPorcelain(cwd, options = {}) {
+    const output = safeGit(cwd, ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"]);
+    if (!options.ignoreWorktreeRoot)
+        return output;
+    return output
+        .split(/\r?\n/)
+        .filter((line) => line.trim() && !statusPath(line).startsWith(".worktrees/"))
+        .join("\n");
+}
+function statusPath(line) {
+    const raw = line.length > 3 ? line.slice(3).trim() : line.trim();
+    const renamed = raw.includes(" -> ") ? raw.split(" -> ").at(-1) ?? raw : raw;
+    return renamed.replace(/^"|"$/g, "");
+}
+function gitIsAncestor(cwd, ancestor, descendant) {
+    try {
+        execFileSync("git", ["merge-base", "--is-ancestor", ancestor, descendant], { cwd, stdio: "ignore" });
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+function buildCommitBeforeIntegrationPrompt(request, dirtyStatus) {
+    return [
+        `[SYSTEM FOLLOW-UP: SUBAGENT_BRANCH_INTEGRATION]`,
+        `Controller validation passed for node "${request.node?.nodeId ?? request.subagent.nodeId}", but your subagent worktree cannot be integrated yet because it has uncommitted changes.`,
+        `Commit or otherwise persist all intended repository changes on your assigned branch (${request.subagent.branch ?? "current branch"}).`,
+        `Current dirty git status:\n${dirtyStatus}`,
+        `After committing, report again with SUBAGENT_RESULT: <summary including commit SHA and verification>.`,
+    ].join("\n");
+}
+function buildMergeConflictFollowupPrompt(request, mergeError) {
+    return [
+        `[SYSTEM FOLLOW-UP: SUBAGENT_BRANCH_INTEGRATION]`,
+        `Controller validation passed for node "${request.node?.nodeId ?? request.subagent.nodeId}", but merging your branch into the controller workspace failed.`,
+        mergeError,
+        `Rebase or merge the latest controller branch into your assigned branch (${request.subagent.branch ?? "current branch"}), resolve conflicts there, rerun relevant validation, commit the result, and report again with SUBAGENT_RESULT: <summary>.`,
+    ].join("\n");
+}
+function gitErrorMessage(error) {
+    const record = error;
+    const output = `${toText(record.stdout)}${toText(record.stderr)}`.trim();
+    return output || record.message || String(error);
+}
+function toText(value) {
+    if (value === undefined)
+        return "";
+    return typeof value === "string" ? value : value.toString("utf8");
+}
+function shortSha(value) {
+    return value.slice(0, 12);
 }
 export function findGitRepositoryRoot(startPath) {
     const output = safeGit(resolve(startPath), ["rev-parse", "--show-toplevel"]);

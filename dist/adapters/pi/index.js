@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { GoalRuntime, NativeGitWorkspaceManager, SQLiteGoalStore, cleanupTerminalSubagentWorkspaces, createControllerValidationRunner, createNativeGitSubagentWorkspaceAllocator, parseGoalCommand, parseGoalDagFileContent, parseGoalModelRoutingConfigJson, parseTokenBudget, renderActiveGoalReminderPrompt, resolveControllerModelArg, resolveDefaultStateRoot, selectModelScenarioForNode, } from "../../core/index.js";
+import { GoalRuntime, NativeGitWorkspaceManager, SQLiteGoalStore, cleanupTerminalSubagentWorkspaces, createControllerValidationRunner, createNativeGitSubagentBranchIntegrator, createNativeGitSubagentWorkspaceAllocator, parseGoalCommand, parseGoalDagFileContent, parseGoalModelRoutingConfigJson, parseTokenBudget, renderActiveGoalReminderPrompt, resolveControllerModelArg, resolveDefaultStateRoot, selectModelScenarioForNode, } from "../../core/index.js";
 import { launchPiRpcBackgroundGoalSession, } from "./background-session.js";
 import { GoalListController } from "./goal-list-ui.js";
 import { GoalMonitorController } from "./monitor-ui.js";
@@ -474,6 +474,7 @@ function buildPiGoalControllerLoopOptions(ctx, goal, binding, modelRouting = rea
             };
         },
         validator: createControllerValidationRunner(),
+        integrator: createNativeGitSubagentBranchIntegrator(workspaceManager, { controllerWorkspacePath: binding.workspace }),
         metadata: { controllerGoalId: goal.goalId },
     };
 }

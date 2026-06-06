@@ -1,5 +1,5 @@
-import type { GoalControllerWorkspaceAllocator, GoalControllerWorkspaceAllocationRequest } from "./controller-loop.js";
-import type { GoalOrchestrationState, GoalSubagentRecord } from "./types.js";
+import type { GoalControllerIntegrator, GoalControllerWorkspaceAllocator, GoalControllerWorkspaceAllocationRequest } from "./controller-loop.js";
+import type { GoalDagNode, GoalOrchestrationState, GoalSubagentRecord } from "./types.js";
 export interface NativeGitWorkspaceManagerOptions {
     /** Directory inside the repository where goal worktrees are created. Defaults to <repo>/.worktrees. */
     worktreeRoot?: string;
@@ -79,6 +79,29 @@ export interface NativeGitSubagentCleanupPolicy {
     /** Force-remove worktrees and branches when cleanup action is remove. Defaults false. */
     force?: boolean;
 }
+export interface NativeGitSubagentBranchIntegrationRequest {
+    controllerWorkspacePath: string;
+    node?: GoalDagNode;
+    subagent: GoalSubagentRecord;
+    /** Reserved for future strategy selection. Current implementation uses git merge. */
+    strategy?: "merge";
+}
+export type NativeGitSubagentBranchIntegrationStatus = "complete" | "notRequired" | "failed";
+export interface NativeGitSubagentBranchIntegrationResult {
+    status: NativeGitSubagentBranchIntegrationStatus;
+    summary: string;
+    sourceBranch?: string;
+    sourceRef?: string;
+    sourceHead?: string;
+    integrationCommitSha?: string;
+    error?: string;
+    followupPrompt?: string;
+    completedAt?: string;
+}
+export interface NativeGitSubagentBranchIntegratorOptions {
+    controllerWorkspacePath: string;
+    strategy?: "merge";
+}
 export interface NativeGitSubagentCleanupResult {
     subagentId: string;
     nodeId: string;
@@ -95,11 +118,13 @@ export declare class NativeGitWorkspaceManager {
     allocateControllerWorkspace(request: ControllerWorkspaceAllocationRequest): NativeGitControllerWorkspaceAllocation;
     allocateSubagentWorkspace(request: NativeGitSubagentWorkspaceAllocationRequest): NativeGitSubagentWorkspaceAllocation;
     cleanupWorkspace(request: NativeGitWorkspaceCleanupRequest): void;
+    integrateSubagentBranch(request: NativeGitSubagentBranchIntegrationRequest): NativeGitSubagentBranchIntegrationResult;
     resolveBaseRef(repoRoot: string, overrideBaseRef?: string): string;
     private resolveSubagentBaseRef;
     private resolveWorktreeRoot;
 }
 export declare function createNativeGitSubagentWorkspaceAllocator(manager: NativeGitWorkspaceManager, options?: NativeGitSubagentWorkspaceAllocatorOptions): GoalControllerWorkspaceAllocator;
+export declare function createNativeGitSubagentBranchIntegrator(manager: NativeGitWorkspaceManager, options: NativeGitSubagentBranchIntegratorOptions): GoalControllerIntegrator;
 export declare function cleanupTerminalSubagentWorkspaces(manager: NativeGitWorkspaceManager, state: GoalOrchestrationState, policy?: NativeGitSubagentCleanupPolicy): NativeGitSubagentCleanupResult[];
 export declare function cleanupSubagentWorkspace(manager: NativeGitWorkspaceManager, subagent: GoalSubagentRecord, policy?: NativeGitSubagentCleanupPolicy): NativeGitSubagentCleanupResult;
 export declare function findGitRepositoryRoot(startPath: string): string | undefined;

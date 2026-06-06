@@ -140,6 +140,7 @@ export async function startGoalSubagent(
     branch: startResult.branch ?? options.branch,
     ref: startResult.ref ?? options.ref,
     status: mapHarnessStatusToSubagentStatus(startResult.status ?? "starting"),
+    integrationState: options.cwd || options.branch || options.ref ? "pending" : undefined,
     prompts: [options.initialPrompt],
     lastActivityAt: startResult.lastActivityAt ?? startedAt,
     createdAt: startedAt,

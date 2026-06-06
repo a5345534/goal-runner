@@ -81,16 +81,20 @@ controller runtime:
 - keep subagent self-reports in `controllerValidating` unless a controller
   validator approves them,
 - apply controller validation results to complete, block, or follow up a node,
+- run an optional subagent integration gate after validation and before node completion,
 - compute the next ready queue and start schedulable DAG nodes,
 - accept a workspace allocator hook so native Git worktree allocation can remain
   a strategy instead of hard-coded controller behavior.
 
 `GoalRuntime` exposes the same APIs as instance methods so adapters can drive the
-loop without reaching into the store directly. When every DAG node reaches a
-terminal state, adapters can call `finalizeGoalFromDagTerminalState()` to close
-the parent goal: all `complete`/`superseded` nodes mark the goal `complete`, while
-any `blocked`/`failed` node marks the goal `blocked` with ledger evidence from the
-terminal DAG state.
+loop without reaching into the store directly. For native-git worktree nodes,
+subagent branch integration must reach `complete` or `not-required` before the
+node can be marked `complete`; failed integration leaves the node blocked or sends
+a follow-up prompt. When every DAG node reaches a terminal state, adapters can
+call `finalizeGoalFromDagTerminalState()` to close the parent goal: all
+`complete`/`superseded` nodes with successful required integrations mark the goal
+`complete`, while any `blocked`/`failed` node or missing required integration
+marks the goal `blocked` with ledger evidence from the terminal DAG state.
 
 ## Goal DAG planning and scheduling
 
@@ -126,6 +130,8 @@ default Git-backed workspace strategy. It can:
 - create unique controller and subagent worktrees/branches under `.worktrees/`,
 - record allocation shapes suitable for goal/subagent state metadata,
 - clean up generated worktrees/branches when a host policy allows it,
+- merge committed subagent branch heads into the controller workspace through
+  `createNativeGitSubagentBranchIntegrator()` before node completion,
 - apply terminal subagent cleanup policy that removes completed worktrees by
   default while preserving blocked/failed worktrees for inspection.
 
@@ -133,7 +139,11 @@ Subagent allocation is available through `allocateSubagentWorkspace()` and the
 controller-loop adapter `createNativeGitSubagentWorkspaceAllocator()`. The
 allocator returns the subagent id, worktree path, branch, and allocation metadata
 for the controller loop's workspace hook, so each DAG node can run in its own
-branch/worktree without coupling the scheduler to Git. Cleanup helpers
+branch/worktree without coupling the scheduler to Git. The branch integrator uses
+safe native-git merges, fails closed when the controller or subagent worktree has
+uncommitted changes, aborts merge conflicts, records source/integrated commit
+metadata, and returns a recovery prompt for conflict/dirty-worktree follow-up.
+Cleanup helpers
 `cleanupTerminalSubagentWorkspaces()` and `cleanupSubagentWorkspace()` are
 explicit host-policy calls; the portable controller loop does not delete
 worktrees implicitly. Harness adapters decide when terminal cleanup is safe; the
@@ -203,9 +213,9 @@ The Pi bridge registers these commands and model-visible tools:
 
 It deliberately does **not** register `goal_complete`, `pause_goal`, or `abort_goal`; completion remains `update_goal({"status":"complete"})`.
 
-`/goal --tokens <budget> ...` accepts positive numbers with optional `k` or `m` suffixes, for example `100k` or `1.5m`. New Pi goals are always orchestrated. Free-form objectives produce one execution node; multi-node DAGs require `/goal --dag <path>` with a JSON file matching `schemas/goal-dag.schema.json`. DAG files can declare `modelRouting.scenarios` plus rules so the controller session and each subagent node can use different models by scenario; reusable routing can also be provided through `AGENT_GOAL_MODEL_ROUTING_FILE` or `AGENT_GOAL_MODEL_ROUTING_JSON`, with DAG-local routing taking precedence. The controller can either use the supplied Git workspace or auto-allocate a native Git controller worktree/branch when workspace/branch/ref are omitted, then create subagent worktrees/branches under `.worktrees/`. Controller startup reports planned/started counts to the caller but does not send an initial model prompt to the controller session; token-consuming turns begin with subagent work or later controller validation/decision prompts. Explicit Git workspaces require a matching `--branch` or `--ref`. The adapter validates configured workspaces with read-only filesystem/git inspection and refuses missing, inaccessible, non-git, branch/ref-mismatched, or host-policy-disallowed bindings. Pi persists orchestration state in the goal store and restores active controller pollers on later session starts or `/goal` command entry. After all DAG nodes are terminal and controller validation passes, Pi marks the parent goal complete/blocked, clears stale subagent error notes, stops the controller poller, removes completed subagent worktrees, and removes auto-allocated controller worktrees; explicit workspaces and blocked/failed subagent worktrees are preserved. Set `AGENT_GOAL_ALLOWED_WORKSPACE_ROOTS` to a colon-separated list of allowed roots (semicolon-separated on Windows) to restrict eligible execution workspaces. Set `AGENT_GOAL_PI_CONTROLLER_POLL_MS=0` to disable polling. Pi controller validation always executes declared shell validators; nodes that declare validators never pass on self-report alone.
+`/goal --tokens <budget> ...` accepts positive numbers with optional `k` or `m` suffixes, for example `100k` or `1.5m`. New Pi goals are always orchestrated. Free-form objectives produce one execution node; multi-node DAGs require `/goal --dag <path>` with a JSON file matching `schemas/goal-dag.schema.json`. DAG files can declare `modelRouting.scenarios` plus rules so the controller session and each subagent node can use different models by scenario; reusable routing can also be provided through `AGENT_GOAL_MODEL_ROUTING_FILE` or `AGENT_GOAL_MODEL_ROUTING_JSON`, with DAG-local routing taking precedence. The controller can either use the supplied Git workspace or auto-allocate a native Git controller worktree/branch when workspace/branch/ref are omitted, then create subagent worktrees/branches under `.worktrees/`. Controller startup reports planned/started counts to the caller but does not send an initial model prompt to the controller session; token-consuming turns begin with subagent work or later controller validation/decision prompts. Explicit Git workspaces require a matching `--branch` or `--ref`. The adapter validates configured workspaces with read-only filesystem/git inspection and refuses missing, inaccessible, non-git, branch/ref-mismatched, or host-policy-disallowed bindings. Pi persists orchestration state in the goal store and restores active controller pollers on later session starts or `/goal` command entry. After all DAG nodes are terminal, controller validation passes, and required subagent branch integrations succeed (or are recorded as `not-required`), Pi marks the parent goal complete/blocked, clears stale subagent error notes, stops the controller poller, removes completed subagent worktrees, and removes auto-allocated controller worktrees; explicit workspaces and blocked/failed subagent worktrees are preserved. Subagents are prompted to commit intended repository changes on their assigned branch before reporting `SUBAGENT_RESULT:` because uncommitted work cannot be merged into the controller workspace. Set `AGENT_GOAL_ALLOWED_WORKSPACE_ROOTS` to a colon-separated list of allowed roots (semicolon-separated on Windows) to restrict eligible execution workspaces. Set `AGENT_GOAL_PI_CONTROLLER_POLL_MS=0` to disable polling. Pi controller validation always executes declared shell validators; nodes that declare validators never pass on self-report alone.
 
-DAG nodes can also declare a generic test-spec validation contract through `kind` and `validation` metadata. A planner can model test-spec-first work as visible `test-spec` / `test-review` / `implementation` / `audit` nodes, lock approved test artifacts by sha256, and require evidence such as `validators-ran`, `locked-artifacts-unchanged`, `implementation-diff-present`, or `audit-report-present`. Controller validation fails closed when locked artifacts change, required evidence is missing, declared validators are skipped, or a high-risk `kind=implementation` node has no validation contract.
+DAG nodes can also declare a generic test-spec validation contract through `kind` and `validation` metadata. A planner can model test-spec-first work as visible `test-spec` / `test-review` / `implementation` / `audit` nodes, lock approved test artifacts by sha256, and require evidence such as `validators-ran`, `locked-artifacts-unchanged`, `implementation-diff-present`, or `audit-report-present`. Controller validation fails closed when locked artifacts change, required evidence is missing, declared validators are skipped, a high-risk `kind=implementation` node has no validation contract, or an audit report used for `audit-report-present` explicitly says violations remain.
 
 Bare `/goal` shows the current/default goal's objective, status, elapsed time, token usage/budget, goal-turn count, and currently useful subcommands. `/goal status` groups the objective, workspace, session, DAG summary, DAG nodes, and subagent records into readable sections with shortened ids/paths, and reports stalled DAGs when an otherwise active goal has only terminal failed/blocked nodes. `/goal monitor` opens a live dashboard that refreshes DAG and subagent state every second, showing node/subagent status counts, runtime duration, last activity age, branch/workspace, validation, notes, and transcript tail. The monitor has separate `DAG / Subagents` and `Transcript tail` panes: press `d` or `t` to focus a pane, `↑↓` to scroll the focused pane, `PageUp`/`PageDown` for page scrolling, `Home` for top, and `End` for DAG bottom or transcript live tail. `/goal list` lists recent materialized goals from the portable registry. Selecting a goal opens the same read-only monitor and keeps lifecycle actions as explicit buttons/commands rather than free-form input into the goal session. Targeted commands resolve full or short goal ids and reject ambiguous prefixes; when the goal-ref is omitted, commands prefer the current controller session's goal, then the latest non-terminal goal, then the latest goal. The Pi status line uses compact status strings such as `🎯 active 18k/100k`, `🎯 paused`, `🎯 blocked`, `🎯 budget 100k/100k`, or `🎯 complete`.
 

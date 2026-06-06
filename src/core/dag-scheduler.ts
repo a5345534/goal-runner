@@ -1,3 +1,4 @@
+import { nodeRequiredIntegrationsSatisfied } from "./integration.js";
 import type { GoalDagConflictHints, GoalDagNode, GoalDagNodeStatus, GoalOrchestrationState, GoalSubagentRecord } from "./types.js";
 
 export interface GoalDagPlanNodeInput {
@@ -120,6 +121,7 @@ export function assertValidGoalDag(nodes: GoalDagNode[]): void {
 export function getGoalDagReadyQueue(state: GoalOrchestrationState, policy: GoalDagSchedulingPolicy = {}): GoalDagReadyQueue {
   assertValidGoalDag(state.nodes);
   const nodeById = new Map(state.nodes.map((node) => [node.nodeId, node]));
+  const subagentsByNode = groupSubagentsByNode(state.subagents);
   const runningNodeIds = new Set(state.subagents.filter(isActiveSubagent).map((subagent) => subagent.nodeId));
   for (const node of state.nodes) {
     if (RUNNING_NODE_STATUSES.has(node.status)) runningNodeIds.add(node.nodeId);
@@ -142,7 +144,7 @@ export function getGoalDagReadyQueue(state: GoalOrchestrationState, policy: Goal
       continue;
     }
 
-    const reasons = dependencyBlockers(node, nodeById);
+    const reasons = dependencyBlockers(node, nodeById, subagentsByNode);
     const conflict = firstConflict(node, blockers, policy);
     if (conflict) reasons.push(conflict);
 
@@ -163,7 +165,11 @@ export function getGoalDagReadyQueue(state: GoalOrchestrationState, policy: Goal
   return { ready, blocked, running, capacity: Number.isFinite(capacity) ? capacity : ready.length };
 }
 
-function dependencyBlockers(node: GoalDagNode, nodeById: Map<string, GoalDagNode>): string[] {
+function dependencyBlockers(
+  node: GoalDagNode,
+  nodeById: Map<string, GoalDagNode>,
+  subagentsByNode: Map<string, GoalSubagentRecord[]>,
+): string[] {
   const reasons: string[] = [];
   for (const dependencyId of node.dependencyNodeIds) {
     const dependency = nodeById.get(dependencyId);
@@ -171,6 +177,8 @@ function dependencyBlockers(node: GoalDagNode, nodeById: Map<string, GoalDagNode
       reasons.push(`dependency ${dependencyId} is missing`);
     } else if (dependency.status !== "complete") {
       reasons.push(`dependency ${dependencyId} is ${dependency.status}`);
+    } else if (!nodeRequiredIntegrationsSatisfied(dependency, subagentsByNode.get(dependencyId) ?? [])) {
+      reasons.push(`dependency ${dependencyId} has required subagent integration pending or failed`);
     }
   }
   return reasons;
@@ -208,6 +216,16 @@ function intersects(left: string[] | undefined, right: string[] | undefined): bo
 
 function isActiveSubagent(subagent: GoalSubagentRecord): boolean {
   return ["workspaceCreated", "sessionStarted", "running", "idle", "selfReportedComplete", "controllerValidating"].includes(subagent.status);
+}
+
+function groupSubagentsByNode(subagents: GoalSubagentRecord[]): Map<string, GoalSubagentRecord[]> {
+  const grouped = new Map<string, GoalSubagentRecord[]>();
+  for (const subagent of subagents) {
+    const list = grouped.get(subagent.nodeId) ?? [];
+    list.push(subagent);
+    grouped.set(subagent.nodeId, list);
+  }
+  return grouped;
 }
 
 function topologicalSort(nodes: GoalDagNode[]): GoalDagNode[] {

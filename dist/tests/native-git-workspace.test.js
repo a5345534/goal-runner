@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cleanupTerminalSubagentWorkspaces, createNativeGitSubagentWorkspaceAllocator, findGitRepositoryRoot, GoalRuntime, MemoryGoalStore, NativeGitWorkspaceManager, slugForGoal, slugForGoalSubagent, } from "../core/index.js";
+import { cleanupTerminalSubagentWorkspaces, createNativeGitSubagentBranchIntegrator, createNativeGitSubagentWorkspaceAllocator, findGitRepositoryRoot, GoalRuntime, MemoryGoalStore, NativeGitWorkspaceManager, slugForGoal, slugForGoalSubagent, } from "../core/index.js";
 function git(cwd, args) {
     return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
@@ -223,6 +223,200 @@ test("native git cleanup policy can remove blocked worktrees when explicitly req
     finally {
         rmSync(repo, { recursive: true, force: true });
     }
+});
+test("native git integrator merges committed subagent branch into controller workspace", () => {
+    const repo = createRepo();
+    try {
+        const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+        const controller = manager.allocateControllerWorkspace({ invocationCwd: repo, goalId: "goal-abcdef12", objective: "Controller" });
+        const allocation = manager.allocateSubagentWorkspace({ invocationCwd: repo, controllerWorkspacePath: controller.worktreePath, goalId: "goal-abcdef12", nodeId: "build" });
+        writeFileSync(join(allocation.worktreePath, "feature.txt"), "implemented\n");
+        git(allocation.worktreePath, ["add", "feature.txt"]);
+        git(allocation.worktreePath, ["commit", "-m", "implement feature"]);
+        const sourceHead = git(allocation.worktreePath, ["rev-parse", "--verify", "HEAD"]);
+        const result = manager.integrateSubagentBranch({
+            controllerWorkspacePath: controller.worktreePath,
+            subagent: {
+                goalId: "goal-abcdef12",
+                nodeId: "build",
+                subagentId: allocation.subagentId,
+                harnessAdapterId: "fake",
+                workspacePath: allocation.worktreePath,
+                branch: allocation.branch,
+                status: "controllerValidating",
+                prompts: [],
+                createdAt: "2026-06-02T00:00:00.000Z",
+                updatedAt: "2026-06-02T00:00:00.000Z",
+            },
+        });
+        assert.equal(result.status, "complete");
+        assert.equal(result.sourceHead, sourceHead);
+        assert.equal(git(controller.worktreePath, ["rev-parse", "--verify", "HEAD"]), result.integrationCommitSha);
+        assert.equal(git(controller.worktreePath, ["show", "HEAD:feature.txt"]), "implemented");
+        manager.cleanupWorkspace({ repoRoot: repo, worktreePath: allocation.worktreePath, branch: allocation.branch, force: true });
+        manager.cleanupWorkspace({ repoRoot: repo, worktreePath: controller.worktreePath, branch: controller.branch, force: true });
+    }
+    finally {
+        rmSync(repo, { recursive: true, force: true });
+    }
+});
+test("native git integrator rejects dirty subagent worktrees with follow-up prompt", () => {
+    const repo = createRepo();
+    try {
+        const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+        const controller = manager.allocateControllerWorkspace({ invocationCwd: repo, goalId: "goal-abcdef12", objective: "Controller" });
+        const allocation = manager.allocateSubagentWorkspace({ invocationCwd: repo, controllerWorkspacePath: controller.worktreePath, goalId: "goal-abcdef12", nodeId: "dirty" });
+        writeFileSync(join(allocation.worktreePath, "dirty.txt"), "not committed\n");
+        const result = manager.integrateSubagentBranch({
+            controllerWorkspacePath: controller.worktreePath,
+            subagent: {
+                goalId: "goal-abcdef12",
+                nodeId: "dirty",
+                subagentId: allocation.subagentId,
+                harnessAdapterId: "fake",
+                workspacePath: allocation.worktreePath,
+                branch: allocation.branch,
+                status: "controllerValidating",
+                prompts: [],
+                createdAt: "2026-06-02T00:00:00.000Z",
+                updatedAt: "2026-06-02T00:00:00.000Z",
+            },
+        });
+        assert.equal(result.status, "failed");
+        assert.match(result.summary, /uncommitted changes/);
+        assert.match(result.followupPrompt ?? "", /commit/i);
+        assert.equal(existsSync(join(controller.worktreePath, "dirty.txt")), false);
+        manager.cleanupWorkspace({ repoRoot: repo, worktreePath: allocation.worktreePath, branch: allocation.branch, force: true });
+        manager.cleanupWorkspace({ repoRoot: repo, worktreePath: controller.worktreePath, branch: controller.branch, force: true });
+    }
+    finally {
+        rmSync(repo, { recursive: true, force: true });
+    }
+});
+test("native git integrator aborts merge conflicts and reports follow-up", () => {
+    const repo = createRepo();
+    try {
+        const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+        const controller = manager.allocateControllerWorkspace({ invocationCwd: repo, goalId: "goal-abcdef12", objective: "Controller" });
+        const allocation = manager.allocateSubagentWorkspace({ invocationCwd: repo, controllerWorkspacePath: controller.worktreePath, goalId: "goal-abcdef12", nodeId: "conflict" });
+        writeFileSync(join(allocation.worktreePath, "README.md"), "# fixture\nsubagent\n");
+        git(allocation.worktreePath, ["add", "README.md"]);
+        git(allocation.worktreePath, ["commit", "-m", "subagent readme"]);
+        writeFileSync(join(controller.worktreePath, "README.md"), "# fixture\ncontroller\n");
+        git(controller.worktreePath, ["add", "README.md"]);
+        git(controller.worktreePath, ["commit", "-m", "controller readme"]);
+        const controllerHead = git(controller.worktreePath, ["rev-parse", "--verify", "HEAD"]);
+        const result = manager.integrateSubagentBranch({
+            controllerWorkspacePath: controller.worktreePath,
+            subagent: {
+                goalId: "goal-abcdef12",
+                nodeId: "conflict",
+                subagentId: allocation.subagentId,
+                harnessAdapterId: "fake",
+                workspacePath: allocation.worktreePath,
+                branch: allocation.branch,
+                status: "controllerValidating",
+                prompts: [],
+                createdAt: "2026-06-02T00:00:00.000Z",
+                updatedAt: "2026-06-02T00:00:00.000Z",
+            },
+        });
+        assert.equal(result.status, "failed");
+        assert.match(result.summary, /merge failed/i);
+        assert.match(result.followupPrompt ?? "", /resolve conflicts/i);
+        assert.equal(git(controller.worktreePath, ["rev-parse", "--verify", "HEAD"]), controllerHead);
+        assert.equal(git(controller.worktreePath, ["status", "--porcelain=v1"]), "");
+        manager.cleanupWorkspace({ repoRoot: repo, worktreePath: allocation.worktreePath, branch: allocation.branch, force: true });
+        manager.cleanupWorkspace({ repoRoot: repo, worktreePath: controller.worktreePath, branch: controller.branch, force: true });
+    }
+    finally {
+        rmSync(repo, { recursive: true, force: true });
+    }
+});
+test("native git branch integrator plugs into controller completion gate", async () => {
+    const repo = createRepo();
+    try {
+        const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+        const controller = manager.allocateControllerWorkspace({ invocationCwd: repo, goalId: "goal-abcdef12", objective: "Controller" });
+        const allocation = manager.allocateSubagentWorkspace({ invocationCwd: repo, controllerWorkspacePath: controller.worktreePath, goalId: "goal-abcdef12", nodeId: "build" });
+        writeFileSync(join(allocation.worktreePath, "integrated.txt"), "yes\n");
+        git(allocation.worktreePath, ["add", "integrated.txt"]);
+        git(allocation.worktreePath, ["commit", "-m", "integrated"]);
+        const runtime = new GoalRuntime({ store: new MemoryGoalStore(), config: { now: () => new Date("2026-06-02T00:00:00.000Z") } });
+        await runtime.planGoalDag("goal-abcdef12", [{ nodeId: "build", objective: "Build", workspaceStrategy: "native-git-worktree" }], { now: "2026-06-02T00:00:00.000Z" });
+        await runtime.saveGoalDagNode({ ...await runtime.getGoalDagNode("goal-abcdef12", "build"), status: "running", updatedAt: "2026-06-02T00:00:00.000Z" });
+        await runtime.saveGoalSubagent({
+            goalId: "goal-abcdef12",
+            nodeId: "build",
+            subagentId: allocation.subagentId,
+            harnessAdapterId: "fake",
+            workspacePath: allocation.worktreePath,
+            branch: allocation.branch,
+            status: "selfReportedComplete",
+            prompts: [],
+            selfReportedResult: "done",
+            createdAt: "2026-06-02T00:00:00.000Z",
+            updatedAt: "2026-06-02T00:01:00.000Z",
+        });
+        const adapter = {
+            adapterId: "fake",
+            startSession() { throw new Error("not expected"); },
+            sendPrompt() { },
+            getSessionState() { return { status: "selfReportedComplete", selfReportedResult: "done" }; },
+            abortSession() { },
+        };
+        const tick = await runtime.runGoalControllerTick("goal-abcdef12", {
+            adapter,
+            validator: () => ({ status: "passed", summary: "validation passed" }),
+            integrator: createNativeGitSubagentBranchIntegrator(manager, { controllerWorkspacePath: controller.worktreePath }),
+        });
+        assert.equal(tick.completed.length, 1);
+        const stored = await runtime.getGoalSubagent("goal-abcdef12", allocation.subagentId);
+        assert.equal(stored?.integrationState, "complete");
+        assert.ok(stored?.integrationCommitSha);
+        assert.equal(git(controller.worktreePath, ["show", "HEAD:integrated.txt"]), "yes");
+        manager.cleanupWorkspace({ repoRoot: repo, worktreePath: allocation.worktreePath, branch: allocation.branch, force: true });
+        manager.cleanupWorkspace({ repoRoot: repo, worktreePath: controller.worktreePath, branch: controller.branch, force: true });
+    }
+    finally {
+        rmSync(repo, { recursive: true, force: true });
+    }
+});
+test("native git integration gate blocks false completion when no integrator is configured", async () => {
+    const { runtime } = await (async () => {
+        const runtime = new GoalRuntime({ store: new MemoryGoalStore(), config: { now: () => new Date("2026-06-02T00:00:00.000Z") } });
+        await runtime.planGoalDag("goal-abcdef12", [{ nodeId: "build", objective: "Build", workspaceStrategy: "native-git-worktree" }], { now: "2026-06-02T00:00:00.000Z" });
+        return { runtime };
+    })();
+    await runtime.saveGoalDagNode({ ...await runtime.getGoalDagNode("goal-abcdef12", "build"), status: "running", updatedAt: "2026-06-02T00:00:00.000Z" });
+    await runtime.saveGoalSubagent({
+        goalId: "goal-abcdef12",
+        nodeId: "build",
+        subagentId: "subagent-1",
+        harnessAdapterId: "fake",
+        workspacePath: "/repo/.worktrees/build",
+        branch: "goal/build",
+        status: "selfReportedComplete",
+        prompts: [],
+        selfReportedResult: "done",
+        createdAt: "2026-06-02T00:00:00.000Z",
+        updatedAt: "2026-06-02T00:01:00.000Z",
+    });
+    const adapter = {
+        adapterId: "fake",
+        startSession() { throw new Error("not expected"); },
+        sendPrompt() { },
+        getSessionState() { return { status: "selfReportedComplete", selfReportedResult: "done" }; },
+        abortSession() { },
+    };
+    const tick = await runtime.runGoalControllerTick("goal-abcdef12", {
+        adapter,
+        validator: () => ({ status: "passed", summary: "validation passed" }),
+    });
+    assert.equal(tick.completed.length, 0);
+    assert.equal(tick.blocked.length, 1);
+    assert.equal((await runtime.getGoalDagNode("goal-abcdef12", "build"))?.status, "blocked");
+    assert.equal((await runtime.getGoalSubagent("goal-abcdef12", "subagent-1"))?.integrationState, "failed");
 });
 test("native git manager reports explicit setup errors outside git", () => {
     const dir = mkdtempSync(join(tmpdir(), "goal-no-git-"));

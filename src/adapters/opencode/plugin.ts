@@ -37,6 +37,7 @@ import {
   SQLiteGoalStore,
   cleanupTerminalSubagentWorkspaces,
   createControllerValidationRunner,
+  createNativeGitSubagentBranchIntegrator,
   createNativeGitSubagentWorkspaceAllocator,
   parseGoalCommand,
   parseGoalDagFileContent,
@@ -604,6 +605,7 @@ async function startOpencodeOrchestratedGoal(
       },
     }),
     validator: createControllerValidationRunner(),
+    integrator: createNativeGitSubagentBranchIntegrator(workspaceManager, { controllerWorkspacePath: binding.workspace }),
     metadata: {
       controllerGoalId: created.goal.goalId,
       controllerModel: controllerModel.model,
@@ -687,6 +689,7 @@ async function runOpencodeControllerPoll(
       };
     },
     validator: createControllerValidationRunner(),
+    integrator: createNativeGitSubagentBranchIntegrator(workspaceManager, { controllerWorkspacePath: binding.workspace }),
     metadata: { controllerGoalId: goal.goalId },
   });
   if (await shouldStopOpencodeControllerPolling(ctx, goal.goalId)) {
