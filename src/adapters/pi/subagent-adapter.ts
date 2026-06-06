@@ -219,6 +219,7 @@ function parsePiSessionFile(content: string): ParsedPiSessionState {
       continue;
     }
     parsed.entryCount += 1;
+    if (isRuntimeStateMirrorEntry(entry)) continue;
     if (typeof entry.timestamp === "string") parsed.lastActivityAt = entry.timestamp;
     if (entry.type === "compaction") {
       // Pi writes compaction entries after context-overflow assistant errors and then
@@ -240,6 +241,10 @@ function parsePiSessionFile(content: string): ParsedPiSessionState {
     }
   }
   return parsed;
+}
+
+function isRuntimeStateMirrorEntry(entry: Record<string, unknown>): boolean {
+  return (entry.type === "custom" || entry.type === "custom_message") && entry.customType === "agent-goal-runtime-state";
 }
 
 function withInspectionMetadata(state: HarnessSubagentSessionState, parsed: ParsedPiSessionState): HarnessSubagentSessionState {

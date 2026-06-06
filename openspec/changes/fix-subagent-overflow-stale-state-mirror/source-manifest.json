@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "1.0",
+  "changeName": "fix-subagent-overflow-stale-state-mirror",
+  "generatedAt": "2026-06-06T13:24:16.309074+00:00",
+  "sources": [
+    {
+      "path": "proposal.md",
+      "kind": "proposal",
+      "sha256": "b260a3e9b08714de8993c8afe7d1bd8826f3f58d064d6d8e17f7ef4169f5d780"
+    },
+    {
+      "path": "design.md",
+      "kind": "design",
+      "sha256": "596dd58c12523bcf010ff5ca1b05fd9e12e226d2e38399a9247a1c8be16bc842"
+    },
+    {
+      "path": "tasks.md",
+      "kind": "tasks",
+      "sha256": "e3147aa6a46a25dc04d6ff5de175026dff4b2d20ac16167345faaf90506479f6"
+    }
+  ]
+}

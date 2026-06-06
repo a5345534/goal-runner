@@ -170,6 +170,8 @@ function parsePiSessionFile(content) {
             continue;
         }
         parsed.entryCount += 1;
+        if (isRuntimeStateMirrorEntry(entry))
+            continue;
         if (typeof entry.timestamp === "string")
             parsed.lastActivityAt = entry.timestamp;
         if (entry.type === "compaction") {
@@ -197,6 +199,9 @@ function parsePiSessionFile(content) {
         }
     }
     return parsed;
+}
+function isRuntimeStateMirrorEntry(entry) {
+    return (entry.type === "custom" || entry.type === "custom_message") && entry.customType === "agent-goal-runtime-state";
 }
 function withInspectionMetadata(state, parsed) {
     return { ...state, metadata: { ...(state.metadata ?? {}), entryCount: parsed.entryCount, messageCount: parsed.messageCount } };

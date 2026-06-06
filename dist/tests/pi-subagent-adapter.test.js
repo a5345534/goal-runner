@@ -251,6 +251,32 @@ test("Pi subagent session inspection eventually fails stale context-overflow rec
     assert.equal(state.status, "failed");
     assert.match(state.error ?? "", /context_length_exceeded/);
 });
+test("Pi subagent session inspection ignores runtime state mirror timestamps for stale context-overflow recovery", () => {
+    const state = readPiSubagentSessionState(subagent({ sessionFile: "/session" }), {
+        exists: () => true,
+        live: true,
+        now: () => new Date("2026-06-02T00:20:00.000Z"),
+        staleAfterMs: 10 * 60_000,
+        readFile: () => [
+            JSON.stringify({ type: "message", message: { role: "user", content: "start" }, timestamp: "2026-06-02T00:00:00.000Z" }),
+            JSON.stringify({
+                type: "message",
+                message: {
+                    role: "assistant",
+                    stopReason: "error",
+                    errorMessage: "Codex error: context_length_exceeded: Your input exceeds the context window of this model.",
+                    content: [],
+                },
+                timestamp: "2026-06-02T00:00:01.000Z",
+            }),
+            JSON.stringify({ type: "custom", customType: "agent-goal-runtime-state", data: { kind: "goal_subagent" }, timestamp: "2026-06-02T00:19:58.000Z" }),
+            JSON.stringify({ type: "custom_message", customType: "agent-goal-runtime-state", data: { kind: "goal_subagent" }, timestamp: "2026-06-02T00:19:59.000Z" }),
+        ].join("\n"),
+    });
+    assert.equal(state.status, "failed");
+    assert.match(state.error ?? "", /context_length_exceeded/);
+    assert.equal(state.lastActivityAt, "2026-06-02T00:00:01.000Z");
+});
 test("Pi subagent session inspection asks for follow-up when a live session is stale after a tool result", () => {
     const state = readPiSubagentSessionState(subagent({ sessionFile: "/stale" }), {
         exists: () => true,
