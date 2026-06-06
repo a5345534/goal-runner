@@ -44,7 +44,7 @@ export function subagentIntegrationTerminalSuccess(subagent: GoalSubagentRecord)
 }
 
 export function nodeRequiredIntegrationsSatisfied(node: GoalDagNode, subagents: GoalSubagentRecord[]): boolean {
-  const required = subagents.filter((subagent) => subagent.nodeId === node.nodeId && nodeRequiresSubagentIntegration(node, subagent));
+  const required = subagents.filter((subagent) => subagent.nodeId === node.nodeId && isIntegrationCandidateSubagent(subagent) && nodeRequiresSubagentIntegration(node, subagent));
   return required.length === 0 || required.every(subagentIntegrationTerminalSuccess);
 }
 
@@ -53,6 +53,7 @@ export function findRequiredSubagentIntegrationIssues(state: GoalOrchestrationSt
   const issues: RequiredSubagentIntegrationIssue[] = [];
   for (const subagent of state.subagents) {
     const node = nodesById.get(subagent.nodeId);
+    if (!isIntegrationCandidateSubagent(subagent)) continue;
     if (!node || !nodeRequiresSubagentIntegration(node, subagent)) continue;
     if (subagentIntegrationTerminalSuccess(subagent)) continue;
     issues.push({
@@ -75,6 +76,11 @@ function requiredIntegrationIssueReason(subagent: GoalSubagentRecord): string {
 
 function hasSubagentBranchOrWorkspaceEvidence(subagent: GoalSubagentRecord): boolean {
   return Boolean(subagent.workspacePath || subagent.branch || subagent.ref || subagent.commitSha || subagent.integrationSourceHead);
+}
+
+function isIntegrationCandidateSubagent(subagent: GoalSubagentRecord): boolean {
+  if (subagent.integrationState) return true;
+  return ["selfReportedComplete", "controllerValidating", "complete"].includes(subagent.status);
 }
 
 function normalizeGateName(value: string): string {
