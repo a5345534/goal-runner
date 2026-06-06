@@ -230,10 +230,24 @@ test("goal monitor enters runner list and binds live output to selected runner",
       subagent({ subagentId: "subagent-build-node-1", sessionFile: firstSession, branch: "goal/build-node-1", workspacePath: "/repo/.worktrees/build-node-1" }),
       subagent({ subagentId: "subagent-build-node-2", sessionFile: secondSession, branch: "goal/build-node-2", workspacePath: "/repo/.worktrees/build-node-2", integrationStatus: "working second" }),
     ];
+    const runners = [
+      {
+        runnerDir: "/tmp/agent-goal-runtime-bg-one",
+        configPath: "/tmp/agent-goal-runtime-bg-one/config.json",
+        subagentId: "subagent-build-node-1",
+        nodeId: "build-node",
+        goalId: "abcdef123456",
+        runnerPid: 123,
+        childPid: 124,
+        runnerAlive: true,
+        childAlive: true,
+        sessionFile: firstSession,
+      },
+    ];
     const controller = new GoalMonitorController(
       summary("active"),
       () => ({ lines: ["controller-tail"], entryCount: 1, messageCount: 1 }),
-      () => ({ nodes, subagents, refreshedAt: now.toISOString() }),
+      () => ({ nodes, subagents, runners, refreshedAt: now.toISOString() }),
       () => now,
     );
 
@@ -248,7 +262,7 @@ test("goal monitor enters runner list and binds live output to selected runner",
     assert.match(first, /first runner transcript/);
     assert.doesNotMatch(first, /second runner transcript/);
     assert.match(first, /LIST: Runners for build-node 1\/2/);
-    assert.match(first, /> 1\. \[running\] subagent-build-node-1.*ops: \[view\].*back/);
+    assert.match(first, /> 1\. \[running\] subagent-build-node-1.*proc=1\/1 pid=123.*ops: \[view\].*openSession.*stop.*kill.*archive.*back/);
 
     controller.handleInput("\x1b[B"); // select second runner row; live follows selected runner.
     const second = controller.render(140, theme).join("\n");
@@ -257,6 +271,51 @@ test("goal monitor enters runner list and binds live output to selected runner",
     assert.match(second, /second runner transcript/);
     assert.match(second, /note: working second/);
     assert.match(second, /> 2\. \[running\] subagent-build-node-2/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("goal monitor confirms selected runner row operations", () => {
+  const dir = mkdtempSync(join(tmpdir(), "goal-monitor-runner-ops-"));
+  const sessionFile = join(dir, "runner.jsonl");
+  const now = new Date("2026-05-31T00:05:00.000Z");
+  try {
+    writeFileSync(sessionFile, JSON.stringify({ type: "message", message: { role: "assistant", content: "runner transcript" }, timestamp: "2026-05-31T00:04:30.000Z" }));
+    const nodes = [dagNode()];
+    const subagents = [subagent({ sessionFile })];
+    const runners = [{
+      runnerDir: "/tmp/agent-goal-runtime-bg-one",
+      configPath: "/tmp/agent-goal-runtime-bg-one/config.json",
+      subagentId: "subagent-build-node-1",
+      nodeId: "build-node",
+      goalId: "abcdef123456",
+      runnerPid: 123,
+      runnerAlive: true,
+      childAlive: false,
+      sessionFile,
+    }];
+    const controller = new GoalMonitorController(
+      summary("active"),
+      () => ({ lines: ["controller-tail"], entryCount: 1, messageCount: 1 }),
+      () => ({ nodes, subagents, runners, refreshedAt: now.toISOString() }),
+      () => now,
+    );
+
+    controller.render(140, theme);
+    controller.handleInput("\r"); // nodeList
+    controller.render(140, theme);
+    controller.handleInput("\r"); // runnerList
+    controller.render(140, theme);
+
+    controller.handleInput("\x1b[C"); // openSession
+    assert.deepEqual(controller.handleInput("\r"), { kind: "runnerOperation", operation: "openSession", subagentId: "subagent-build-node-1" });
+    controller.handleInput("\x1b[C"); // stop
+    assert.deepEqual(controller.handleInput("\r"), { kind: "runnerOperation", operation: "stop", subagentId: "subagent-build-node-1" });
+    controller.handleInput("\x1b[C"); // kill
+    assert.deepEqual(controller.handleInput("\r"), { kind: "runnerOperation", operation: "kill", subagentId: "subagent-build-node-1" });
+    controller.handleInput("\x1b[C"); // archive
+    assert.deepEqual(controller.handleInput("\r"), { kind: "runnerOperation", operation: "archive", subagentId: "subagent-build-node-1" });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

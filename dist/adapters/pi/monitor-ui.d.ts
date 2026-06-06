@@ -1,10 +1,18 @@
 import type { GoalDagNode, GoalSubagentRecord, GoalSummary } from "../../core/index.js";
+import type { PiBackgroundRunnerRecord } from "./runner-ops.js";
 import type { GoalListThemeLike } from "./goal-list-ui.js";
 export type GoalMonitorAction = "close" | "pause" | "resume" | "clear" | "openSession";
-export interface GoalMonitorSelection {
-    kind: "action" | "close";
-    action?: GoalMonitorAction;
-}
+export type GoalMonitorRunnerOperation = "openSession" | "stop" | "kill" | "archive";
+export type GoalMonitorSelection = {
+    kind: "action";
+    action: GoalMonitorAction;
+} | {
+    kind: "runnerOperation";
+    operation: GoalMonitorRunnerOperation;
+    subagentId: string;
+} | {
+    kind: "close";
+};
 export interface GoalTranscriptSnapshot {
     lines: string[];
     diagnostic?: string;
@@ -14,6 +22,7 @@ export interface GoalTranscriptSnapshot {
 export interface GoalMonitorDagSnapshot {
     nodes: GoalDagNode[];
     subagents: GoalSubagentRecord[];
+    runners?: PiBackgroundRunnerRecord[];
     refreshedAt?: string;
 }
 export declare class GoalMonitorController {

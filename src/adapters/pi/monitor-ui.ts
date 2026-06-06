@@ -1,14 +1,16 @@
 import { existsSync, readFileSync } from "node:fs";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import type { GoalDagNode, GoalSubagentRecord, GoalSummary } from "../../core/index.js";
+import type { PiBackgroundRunnerRecord } from "./runner-ops.js";
 import type { GoalListThemeLike } from "./goal-list-ui.js";
 
 export type GoalMonitorAction = "close" | "pause" | "resume" | "clear" | "openSession";
+export type GoalMonitorRunnerOperation = "openSession" | "stop" | "kill" | "archive";
 
-export interface GoalMonitorSelection {
-  kind: "action" | "close";
-  action?: GoalMonitorAction;
-}
+export type GoalMonitorSelection =
+  | { kind: "action"; action: GoalMonitorAction }
+  | { kind: "runnerOperation"; operation: GoalMonitorRunnerOperation; subagentId: string }
+  | { kind: "close" };
 
 export interface GoalTranscriptSnapshot {
   lines: string[];
@@ -20,6 +22,7 @@ export interface GoalTranscriptSnapshot {
 export interface GoalMonitorDagSnapshot {
   nodes: GoalDagNode[];
   subagents: GoalSubagentRecord[];
+  runners?: PiBackgroundRunnerRecord[];
   refreshedAt?: string;
 }
 
@@ -38,7 +41,8 @@ type GoalMonitorListItem =
 type GoalMonitorInternalOperation = "nodeList" | "runnerList" | "view" | "back";
 type GoalMonitorRowOperation =
   | { kind: "internal"; operation: GoalMonitorInternalOperation; label: string }
-  | { kind: "action"; action: GoalMonitorAction; label: string };
+  | { kind: "action"; action: GoalMonitorAction; label: string }
+  | { kind: "runner"; operation: GoalMonitorRunnerOperation; subagentId: string; label: string };
 
 interface GoalMonitorViewModel {
   scopeLabel: string;
@@ -188,6 +192,9 @@ export class GoalMonitorController {
     if (!operation) return undefined;
     if (operation.kind === "action") {
       return operation.action === "close" ? { kind: "close" } : { kind: "action", action: operation.action };
+    }
+    if (operation.kind === "runner") {
+      return { kind: "runnerOperation", operation: operation.operation, subagentId: operation.subagentId };
     }
     switch (operation.operation) {
       case "nodeList":
@@ -342,7 +349,7 @@ export class GoalMonitorController {
       liveDiagnostic: transcript.diagnostic,
       liveFollowsTail: Boolean(runner.sessionFile),
       listTitle: `Runners for ${shortenMiddle(node.slug || node.nodeId, 48)} ${nodeSubagents.length ? `${Math.min(this.listIndex + 1, nodeSubagents.length)}/${nodeSubagents.length}` : "0"}`,
-      listRows: nodeSubagents.map((subagent, index) => renderRunnerListRow(subagent, index, now)),
+      listRows: nodeSubagents.map((subagent, index) => renderRunnerListRow(subagent, index, now, dag.runners)),
       listItems: nodeSubagents.map((subagent) => ({ kind: "runner", nodeId: node.nodeId, subagentId: subagent.subagentId })),
     };
   }
@@ -387,10 +394,16 @@ function operationsForListItem(item: GoalMonitorListItem | undefined, goal: Goal
       { kind: "internal", operation: "back", label: "back" },
     ];
   }
-  return [
-    { kind: "internal", operation: "view", label: "view" },
-    { kind: "internal", operation: "back", label: "back" },
-  ];
+  const subagent = dag.subagents.find((record) => record.subagentId === item.subagentId);
+  const runnerRecords = (dag.runners ?? []).filter((runner) => runner.subagentId === item.subagentId);
+  const hasLiveRunner = runnerRecords.some((runner) => runner.runnerAlive || runner.childAlive);
+  const operations: GoalMonitorRowOperation[] = [{ kind: "internal", operation: "view", label: "view" }];
+  if (subagent?.sessionFile) operations.push({ kind: "runner", operation: "openSession", subagentId: item.subagentId, label: "openSession" });
+  if (hasLiveRunner) operations.push({ kind: "runner", operation: "stop", subagentId: item.subagentId, label: "stop" });
+  if (hasLiveRunner) operations.push({ kind: "runner", operation: "kill", subagentId: item.subagentId, label: "kill" });
+  if (runnerRecords.length > 0) operations.push({ kind: "runner", operation: "archive", subagentId: item.subagentId, label: "archive" });
+  operations.push({ kind: "internal", operation: "back", label: "back" });
+  return operations;
 }
 
 function formatPlainOperation(operation: GoalMonitorRowOperation | undefined): string {
@@ -435,10 +448,15 @@ function renderNodeListRow(node: GoalDagNode, subagents: GoalSubagentRecord[], i
   return `${index + 1}. [${node.status}] ${shortenMiddle(node.slug || node.nodeId, 58)} runners=${subagents.length}${latestLabel} updated=${formatAgo(node.updatedAt, now)}${model}`;
 }
 
-function renderRunnerListRow(subagent: GoalSubagentRecord, index: number, now: Date): string {
+function renderRunnerListRow(subagent: GoalSubagentRecord, index: number, now: Date, runners: PiBackgroundRunnerRecord[] = []): string {
   const activity = formatAgo(subagent.lastActivityAt ?? subagent.updatedAt, now);
   const integration = subagent.integrationState ? ` integration=${subagent.integrationState}` : "";
-  return `${index + 1}. [${subagent.status}] ${shortenMiddle(subagent.subagentId, 62)} last=${activity}${integration}`;
+  const matchingRunners = runners.filter((runner) => runner.subagentId === subagent.subagentId);
+  const liveCount = matchingRunners.filter((runner) => runner.runnerAlive || runner.childAlive).length;
+  const processSummary = matchingRunners.length > 0
+    ? ` proc=${liveCount}/${matchingRunners.length}${matchingRunners[0]?.runnerPid ? ` pid=${matchingRunners[0].runnerPid}` : ""}`
+    : " proc=-";
+  return `${index + 1}. [${subagent.status}] ${shortenMiddle(subagent.subagentId, 62)} last=${activity}${integration}${processSummary}`;
 }
 
 function renderRunnerLiveLines(node: GoalDagNode, subagent: GoalSubagentRecord, transcript: GoalTranscriptSnapshot, now: Date): string[] {

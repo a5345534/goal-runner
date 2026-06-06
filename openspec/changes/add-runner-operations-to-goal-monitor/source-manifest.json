@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "1.0",
+  "changeName": "add-runner-operations-to-goal-monitor",
+  "generatedAt": "2026-06-06T11:14:22.751357+00:00",
+  "sources": [
+    {
+      "path": "proposal.md",
+      "kind": "proposal",
+      "sha256": "90ad9b9c17ed44f96aa5a3a3496383fca0280824aa071dc15805b5bd3f7be089"
+    },
+    {
+      "path": "design.md",
+      "kind": "design",
+      "sha256": "bc5e1a2cb81176eedd5876ad9331a6779e800bc806e0f3014bb22f9628c699ab"
+    },
+    {
+      "path": "tasks.md",
+      "kind": "tasks",
+      "sha256": "a247458ede923f57c47a8460c15a27bd9a9a7df0c5d20aef0de46fdd4d34d316"
+    }
+  ]
+}

@@ -37,8 +37,14 @@ import {
   type BackgroundGoalSessionLauncher,
 } from "./background-session.js";
 import { GoalListController } from "./goal-list-ui.js";
-import { GoalMonitorController, type GoalMonitorAction, type GoalMonitorDagSnapshot } from "./monitor-ui.js";
+import { GoalMonitorController, type GoalMonitorDagSnapshot, type GoalMonitorRunnerOperation, type GoalMonitorSelection } from "./monitor-ui.js";
 import { PI_GOAL_SESSION_ENTRY_TYPE, PiSessionGoalMirrorStore } from "./session-store.js";
+import {
+  archivePiBackgroundRunnerDirs,
+  filterPiBackgroundRunnersForSubagent,
+  readPiBackgroundRunnerInventory,
+  signalPiBackgroundRunners,
+} from "./runner-ops.js";
 import { PiHarnessSubagentAdapter } from "./subagent-adapter.js";
 import {
   parseGoalWorkspaceFlags,
@@ -1092,15 +1098,20 @@ async function editGoalBudgetFromCommand(runtime: GoalRuntime, ctx: ExtensionCom
 }
 
 async function monitorGoalSummary(runtime: GoalRuntime, ctx: ExtensionCommandContext, goal: GoalSummary): Promise<void> {
-  const action = await pickGoalMonitorAction(runtime, ctx, goal);
-  if (!action || action === "close") return;
+  const selection = await pickGoalMonitorAction(runtime, ctx, goal);
+  if (!selection || selection.kind === "close") return;
+  if (selection.kind === "runnerOperation") {
+    await runGoalMonitorRunnerOperation(runtime, ctx, goal, selection.operation, selection.subagentId);
+    return;
+  }
+  const action = selection.action;
   if (action === "pause") await runTargetGoalLifecycleCommand(runtime, ctx, "pause", goal.goalId);
   else if (action === "resume") await runTargetGoalLifecycleCommand(runtime, ctx, "resume", goal.goalId);
   else if (action === "clear") await runTargetGoalLifecycleCommand(runtime, ctx, "clear", goal.goalId);
   else if (action === "openSession" && goal.sessionFile) await ctx.switchSession(goal.sessionFile);
 }
 
-async function pickGoalMonitorAction(runtime: GoalRuntime, ctx: ExtensionCommandContext, goal: GoalSummary): Promise<GoalMonitorAction | undefined> {
+async function pickGoalMonitorAction(runtime: GoalRuntime, ctx: ExtensionCommandContext, goal: GoalSummary): Promise<GoalMonitorSelection | undefined> {
   if (!ctx.hasUI) {
     const options = [
       "Close",
@@ -1110,15 +1121,15 @@ async function pickGoalMonitorAction(runtime: GoalRuntime, ctx: ExtensionCommand
       ...(goal.sessionFile ? ["Open execution session"] : []),
     ];
     const action = await ctx.ui.select(`Goal ${goal.shortGoalId}`, options);
-    if (action === "Pause") return "pause";
-    if (action === "Resume") return "resume";
-    if (action === "Clear") return "clear";
-    if (action === "Open execution session") return "openSession";
+    if (action === "Pause") return { kind: "action", action: "pause" };
+    if (action === "Resume") return { kind: "action", action: "resume" };
+    if (action === "Clear") return { kind: "action", action: "clear" };
+    if (action === "Open execution session") return { kind: "action", action: "openSession" };
     return undefined;
   }
 
   let dagSnapshot = await readGoalMonitorDagSnapshot(runtime, goal.goalId);
-  return ctx.ui.custom((tui: { requestRender(): void }, theme: { fg(color: string, text: string): string; bold?(text: string): string }, _keybindings: unknown, done: (result: GoalMonitorAction | undefined) => void) => {
+  return ctx.ui.custom((tui: { requestRender(): void }, theme: { fg(color: string, text: string): string; bold?(text: string): string }, _keybindings: unknown, done: (result: GoalMonitorSelection | undefined) => void) => {
     const controller = new GoalMonitorController(goal, undefined, () => dagSnapshot);
     const refresh = setInterval(() => {
       void readGoalMonitorDagSnapshot(runtime, goal.goalId)
@@ -1139,9 +1150,9 @@ async function pickGoalMonitorAction(runtime: GoalRuntime, ctx: ExtensionCommand
           done(undefined);
           return;
         }
-        if (selection?.kind === "action") {
+        if (selection?.kind === "action" || selection?.kind === "runnerOperation") {
           clearInterval(refresh);
-          done(selection.action);
+          done(selection);
           return;
         }
         tui.requestRender();
@@ -1150,9 +1161,63 @@ async function pickGoalMonitorAction(runtime: GoalRuntime, ctx: ExtensionCommand
   });
 }
 
+async function runGoalMonitorRunnerOperation(
+  runtime: GoalRuntime,
+  ctx: ExtensionCommandContext,
+  goal: GoalSummary,
+  operation: GoalMonitorRunnerOperation,
+  subagentId: string,
+): Promise<void> {
+  const state = await runtime.getGoalOrchestrationState(goal.goalId);
+  const subagent = state.subagents.find((record) => record.subagentId === subagentId);
+  if (!subagent) {
+    ctx.ui.notify(`Runner ${subagentId} is no longer recorded for goal ${goal.shortGoalId}.`, "warning");
+    return;
+  }
+  if (operation === "openSession") {
+    if (!subagent.sessionFile) {
+      ctx.ui.notify(`Runner ${subagentId} has no session file.`, "warning");
+      return;
+    }
+    await ctx.switchSession(subagent.sessionFile);
+    return;
+  }
+
+  const inventory = readPiBackgroundRunnerInventory(goal.goalId, state.subagents);
+  const matches = filterPiBackgroundRunnersForSubagent(inventory, subagentId);
+  if (matches.length === 0) {
+    ctx.ui.notify(`No background runner process/temp dir matched ${subagentId}.`, "warning");
+    return;
+  }
+
+  if (operation === "stop") {
+    const result = signalPiBackgroundRunners(matches, "stop");
+    ctx.ui.notify(`Runner stop requested for ${subagentId}: signaled ${result.signaled}/${result.matched} record(s).`, "info");
+    return;
+  }
+
+  if (operation === "kill") {
+    const ok = await ctx.ui.confirm("Force kill runner?", `${subagentId}\n\nThis sends SIGKILL to matching background runner/child PIDs. Session transcripts and worktrees are not deleted.`);
+    if (!ok) return;
+    const result = signalPiBackgroundRunners(matches, "kill");
+    ctx.ui.notify(`Runner kill requested for ${subagentId}: signaled ${result.signaled}/${result.matched} record(s).`, "warning");
+    return;
+  }
+
+  const liveCount = matches.filter((record) => record.runnerAlive || record.childAlive).length;
+  const ok = await ctx.ui.confirm(
+    "Archive runner temp dirs?",
+    `${subagentId}\n\nThis moves stopped /tmp/agent-goal-runtime-bg-* dirs into the runtime archive. Live dirs are skipped. Session transcripts and worktrees are not deleted.\n\nMatched dirs: ${matches.length}; live dirs: ${liveCount}`,
+  );
+  if (!ok) return;
+  const result = archivePiBackgroundRunnerDirs(matches);
+  ctx.ui.notify(`Runner archive complete for ${subagentId}: archived ${result.archived}/${result.matched}, skipped live ${result.skippedLive}.`, "info");
+}
+
 async function readGoalMonitorDagSnapshot(runtime: GoalRuntime, goalId: string): Promise<GoalMonitorDagSnapshot> {
   const state = await runtime.getGoalOrchestrationState(goalId);
-  return { ...state, refreshedAt: new Date().toISOString() };
+  const runners = readPiBackgroundRunnerInventory(goalId, state.subagents);
+  return { ...state, runners, refreshedAt: new Date().toISOString() };
 }
 
 async function runTargetGoalLifecycleCommand(
