@@ -28,12 +28,17 @@ const DEFAULT_VISIBLE_LIST_LINES = 14;
 
 type GoalMonitorPane = "live" | "list";
 type GoalMonitorScope =
-  | { kind: "goal" }
-  | { kind: "node"; nodeId: string }
-  | { kind: "runner"; nodeId: string; subagentId: string };
+  | { kind: "controller" }
+  | { kind: "nodes" }
+  | { kind: "runners"; nodeId: string };
 type GoalMonitorListItem =
+  | { kind: "controller" }
   | { kind: "node"; nodeId: string }
   | { kind: "runner"; nodeId: string; subagentId: string };
+type GoalMonitorInternalOperation = "nodeList" | "runnerList" | "view" | "back";
+type GoalMonitorRowOperation =
+  | { kind: "internal"; operation: GoalMonitorInternalOperation; label: string }
+  | { kind: "action"; action: GoalMonitorAction; label: string };
 
 interface GoalMonitorViewModel {
   scopeLabel: string;
@@ -47,16 +52,17 @@ interface GoalMonitorViewModel {
 }
 
 export class GoalMonitorController {
-  private buttonIndex = 0;
   private activePane: GoalMonitorPane = "list";
-  private scope: GoalMonitorScope = { kind: "goal" };
+  private scope: GoalMonitorScope = { kind: "controller" };
   private listIndex = 0;
   private listScroll = 0;
   private liveScroll = 0;
   private followLiveTail = true;
+  private rowOperationIndex = 0;
   private lastLiveLineCount = 0;
   private lastListLineCount = 0;
   private lastListItems: GoalMonitorListItem[] = [];
+  private lastSelectedOperations: GoalMonitorRowOperation[] = [];
 
   constructor(
     private readonly goal: GoalSummary,
@@ -66,23 +72,17 @@ export class GoalMonitorController {
   ) {}
 
   get actions(): GoalMonitorAction[] {
-    const actions: GoalMonitorAction[] = [];
-    if (this.goal.status === "active") actions.push("pause");
-    if (["active", "paused", "blocked", "budgetLimited", "usageLimited"].includes(this.goal.status)) actions.push("resume");
-    actions.push("clear");
-    if (this.goal.sessionFile) actions.push("openSession");
-    actions.push("close");
-    return actions;
+    return controllerActions(this.goal);
   }
 
   handleInput(data: string): GoalMonitorSelection | undefined {
     if (matchesKey(data, Key.escape)) return { kind: "close" };
     if (matchesKey(data, Key.left)) {
-      this.buttonIndex = (this.buttonIndex + this.actions.length - 1) % this.actions.length;
+      this.moveRowOperation(-1);
       return undefined;
     }
     if (matchesKey(data, Key.right)) {
-      this.buttonIndex = (this.buttonIndex + 1) % this.actions.length;
+      this.moveRowOperation(1);
       return undefined;
     }
     if (matchesKey(data, Key.tab)) {
@@ -126,12 +126,7 @@ export class GoalMonitorController {
       return undefined;
     }
     if (matchesKey(data, Key.enter)) {
-      if (this.activePane === "list" && this.lastListItems.length > 0) {
-        this.drillInto(this.lastListItems[Math.min(this.listIndex, this.lastListItems.length - 1)]!);
-        return undefined;
-      }
-      const action = this.actions[this.buttonIndex] ?? "close";
-      return action === "close" ? { kind: "close" } : { kind: "action", action };
+      return this.confirmSelectedOperation();
     }
     return undefined;
   }
@@ -173,6 +168,7 @@ export class GoalMonitorController {
   private moveListSelection(delta: number): void {
     if (this.lastListLineCount <= 0) return;
     this.listIndex = Math.min(Math.max(0, this.listIndex + delta), this.lastListLineCount - 1);
+    this.rowOperationIndex = 0;
     this.keepSelectedListRowVisible();
   }
 
@@ -181,32 +177,62 @@ export class GoalMonitorController {
     if (this.listIndex >= this.listScroll + DEFAULT_VISIBLE_LIST_LINES) this.listScroll = this.listIndex - DEFAULT_VISIBLE_LIST_LINES + 1;
   }
 
-  private drillInto(item: GoalMonitorListItem): void {
-    this.scope = item.kind === "node"
-      ? { kind: "node", nodeId: item.nodeId }
-      : { kind: "runner", nodeId: item.nodeId, subagentId: item.subagentId };
-    this.activePane = "list";
-    this.listIndex = 0;
-    this.listScroll = 0;
-    this.liveScroll = 0;
-    this.followLiveTail = true;
+  private moveRowOperation(delta: number): void {
+    const count = this.lastSelectedOperations.length;
+    if (count <= 0) return;
+    this.rowOperationIndex = (this.rowOperationIndex + delta + count) % count;
+  }
+
+  private confirmSelectedOperation(): GoalMonitorSelection | undefined {
+    const operation = this.lastSelectedOperations[this.rowOperationIndex];
+    if (!operation) return undefined;
+    if (operation.kind === "action") {
+      return operation.action === "close" ? { kind: "close" } : { kind: "action", action: operation.action };
+    }
+    switch (operation.operation) {
+      case "nodeList":
+        this.enterNodeList();
+        return undefined;
+      case "runnerList": {
+        const selected = this.lastListItems[Math.min(this.listIndex, this.lastListItems.length - 1)];
+        if (selected?.kind === "node") this.enterRunnerList(selected.nodeId);
+        return undefined;
+      }
+      case "back":
+        this.goBack();
+        return undefined;
+      case "view":
+        return undefined;
+    }
+  }
+
+  private enterNodeList(): void {
+    this.scope = { kind: "nodes" };
+    this.resetListAndLive({ followLiveTail: false });
+  }
+
+  private enterRunnerList(nodeId: string): void {
+    this.scope = { kind: "runners", nodeId };
+    this.resetListAndLive({ followLiveTail: true });
   }
 
   private goBack(): void {
-    if (this.scope.kind === "goal") return;
-    this.scope = this.scope.kind === "runner" ? { kind: "node", nodeId: this.scope.nodeId } : { kind: "goal" };
+    if (this.scope.kind === "controller") return;
+    this.scope = this.scope.kind === "runners" ? { kind: "nodes" } : { kind: "controller" };
+    this.resetListAndLive({ followLiveTail: this.scope.kind !== "nodes" });
+  }
+
+  private resetListAndLive(options: { followLiveTail: boolean }): void {
     this.activePane = "list";
     this.listIndex = 0;
     this.listScroll = 0;
     this.liveScroll = 0;
-    this.followLiveTail = true;
+    this.rowOperationIndex = 0;
+    this.followLiveTail = options.followLiveTail;
   }
 
   render(width: number, theme: GoalListThemeLike): string[] {
     const title = theme.bold ? theme.bold(`Goal ${this.goal.shortGoalId}`) : `Goal ${this.goal.shortGoalId}`;
-    const actions = this.actions
-      .map((action, index) => (index === this.buttonIndex ? theme.fg("accent", `[${action}]`) : theme.fg("dim", ` ${action} `)))
-      .join(" ");
     const controllerTranscript = this.readTranscript();
     const dag = this.readDagSnapshot();
     const view = this.buildView(dag, controllerTranscript);
@@ -219,15 +245,17 @@ export class GoalMonitorController {
     this.listIndex = Math.min(Math.max(0, this.listIndex), Math.max(0, view.listRows.length - 1));
     this.keepSelectedListRowVisible();
     this.listScroll = clampScroll(this.listScroll, view.listRows.length, visibleListCount);
+    this.lastSelectedOperations = operationsForListItem(this.lastListItems[this.listIndex], this.goal, dag);
+    this.rowOperationIndex = Math.min(Math.max(0, this.rowOperationIndex), Math.max(0, this.lastSelectedOperations.length - 1));
     if (view.liveFollowsTail && this.followLiveTail) this.liveScroll = Math.max(0, view.liveLines.length - visibleLiveCount);
     else this.liveScroll = clampScroll(this.liveScroll, view.liveLines.length, visibleLiveCount);
 
     const lines = [
-      truncateToWidth(`${theme.fg("accent", title)}  ${actions}`, width),
-      truncateToWidth(`scope=${view.scopeLabel} focus=${this.activePane} status=${derivedMonitorStatus(this.goal, dag)} tokens=${formatMonitorTokens(this.goal)} elapsed=${formatElapsedSeconds(this.goal.timeUsedSeconds)} controllerModel=${formatMonitorModel(this.goal.controllerModelScenario, this.goal.controllerModelArg)}`, width),
+      truncateToWidth(theme.fg("accent", title), width),
+      truncateToWidth(`scope=${view.scopeLabel} focus=${this.activePane} rowOp=${formatPlainOperation(this.lastSelectedOperations[this.rowOperationIndex])} status=${derivedMonitorStatus(this.goal, dag)} tokens=${formatMonitorTokens(this.goal)} elapsed=${formatElapsedSeconds(this.goal.timeUsedSeconds)} controllerModel=${formatMonitorModel(this.goal.controllerModelScenario, this.goal.controllerModelArg)}`, width),
       truncateToWidth(`workspace=${shortenPath(this.goal.executionWorkspace ?? "legacy")} branch=${shortenMiddle(this.goal.branch ?? this.goal.ref ?? "-", 72)}`, width),
       truncateToWidth(`DAG nodes=${formatStatusCounts(dag.nodes.map((node) => node.status))} subagents=${formatStatusCounts(dag.subagents.map((subagent) => subagent.status))} refreshed=${compactTimestamp(dag.refreshedAt ?? new Date(0).toISOString())}`, width),
-      truncateToWidth(theme.fg("dim", `live/list monitor • Enter drill list item • b/Backspace back • l/v focus • Tab switch • ↑↓ move/scroll • PgUp/PgDn • ←→ action • Esc close`), width),
+      truncateToWidth(theme.fg("dim", `row-action monitor • ←→ select row op • Enter confirm row op • b/Backspace back • l/v focus • Tab switch • ↑↓ move/scroll • PgUp/PgDn • Esc close`), width),
       truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width),
       truncateToWidth(theme.fg(this.activePane === "live" ? "accent" : "muted", `${this.activePane === "live" ? "▶ " : "  "}LIVE: ${view.liveTitle}`), width),
     ];
@@ -250,7 +278,8 @@ export class GoalMonitorController {
     for (let index = listStart; index < listEnd; index += 1) {
       const row = view.listRows[index] ?? "";
       const selected = index === this.listIndex;
-      lines.push(truncateToWidth(selected ? theme.fg("accent", `> ${row}`) : `  ${row}`, width));
+      const ops = selected ? formatRowOperations(this.lastSelectedOperations, this.rowOperationIndex, theme) : "";
+      lines.push(truncateToWidth(selected ? theme.fg("accent", `> ${row}${ops ? `  ops: ${ops}` : ""}`) : `  ${row}`, width));
     }
     lines.push(truncateToWidth(theme.fg("dim", formatListRange(listStart, listEnd, view.listRows.length, this.listIndex, this.activePane === "list")), width));
     return lines;
@@ -261,22 +290,28 @@ export class GoalMonitorController {
     const nodesById = new Map(dag.nodes.map((node) => [node.nodeId, node]));
     const subagentsByNode = groupSubagentsByNode(dag.subagents);
     let scope = this.scope;
-    if (scope.kind !== "goal" && !nodesById.has(scope.nodeId)) scope = { kind: "goal" };
-    if (scope.kind === "runner") {
-      const subagentId = scope.subagentId;
-      if (!dag.subagents.some((subagent) => subagent.subagentId === subagentId)) {
-        scope = { kind: "node", nodeId: scope.nodeId };
-      }
-    }
+    if (scope.kind === "runners" && !nodesById.has(scope.nodeId)) scope = { kind: "nodes" };
     this.scope = scope;
 
-    if (scope.kind === "goal") {
+    if (scope.kind === "controller") {
       return {
-        scopeLabel: "goal",
+        scopeLabel: "controller",
         liveTitle: `Controller execution (${controllerTranscript.entryCount} entries / ${controllerTranscript.messageCount} messages)`,
         liveLines: controllerTranscript.lines,
         liveDiagnostic: controllerTranscript.diagnostic,
         liveFollowsTail: true,
+        listTitle: "Controller",
+        listRows: [renderControllerListRow(this.goal, dag)],
+        listItems: [{ kind: "controller" }],
+      };
+    }
+
+    if (scope.kind === "nodes") {
+      return {
+        scopeLabel: "nodes",
+        liveTitle: "Node list mode",
+        liveLines: [],
+        liveFollowsTail: false,
         listTitle: `Nodes ${dag.nodes.length ? `${Math.min(this.listIndex + 1, dag.nodes.length)}/${dag.nodes.length}` : "0"}`,
         listRows: dag.nodes.map((node, index) => renderNodeListRow(node, subagentsByNode.get(node.nodeId) ?? [], index, now)),
         listItems: dag.nodes.map((node) => ({ kind: "node", nodeId: node.nodeId })),
@@ -285,44 +320,28 @@ export class GoalMonitorController {
 
     const node = nodesById.get(scope.nodeId)!;
     const nodeSubagents = subagentsByNode.get(node.nodeId) ?? [];
-    if (scope.kind === "node") {
-      const latest = latestSubagent(nodeSubagents);
-      const transcript = readGoalTranscript(latest?.sessionFile);
-      return {
-        scopeLabel: `node/${shortenMiddle(node.slug || node.nodeId, 40)}`,
-        liveTitle: `Node ${node.nodeId}${latest ? ` • latest ${latest.subagentId}` : ""}`,
-        liveLines: renderNodeLiveLines(node, nodeSubagents, transcript, now),
-        liveDiagnostic: transcript.diagnostic,
-        liveFollowsTail: Boolean(latest?.sessionFile),
-        listTitle: `Runners for ${shortenMiddle(node.slug || node.nodeId, 48)} ${nodeSubagents.length ? `${Math.min(this.listIndex + 1, nodeSubagents.length)}/${nodeSubagents.length}` : "0"}`,
-        listRows: nodeSubagents.map((subagent, index) => renderRunnerListRow(subagent, index, now)),
-        listItems: nodeSubagents.map((subagent) => ({ kind: "runner", nodeId: node.nodeId, subagentId: subagent.subagentId })),
-      };
-    }
-
-    const runner = dag.subagents.find((subagent) => subagent.subagentId === scope.subagentId) ?? nodeSubagents[0];
+    const selectedIndex = Math.min(Math.max(0, this.listIndex), Math.max(0, nodeSubagents.length - 1));
+    const runner = nodeSubagents[selectedIndex];
     if (!runner) {
       return {
-        scopeLabel: `node/${shortenMiddle(node.slug || node.nodeId, 40)}`,
-        liveTitle: `Node ${node.nodeId}`,
-        liveLines: renderNodeLiveLines(node, nodeSubagents, { lines: [], entryCount: 0, messageCount: 0, diagnostic: "No runner selected" }, now),
-        liveDiagnostic: "No runner selected",
+        scopeLabel: `runners/${shortenMiddle(node.slug || node.nodeId, 40)}`,
+        liveTitle: `Runner live for ${node.nodeId}`,
+        liveLines: [],
+        liveDiagnostic: "No runners recorded for selected node",
         liveFollowsTail: false,
         listTitle: `Runners for ${shortenMiddle(node.slug || node.nodeId, 48)} 0`,
         listRows: [],
         listItems: [],
       };
     }
-    const selectedIndex = Math.max(0, nodeSubagents.findIndex((subagent) => subagent.subagentId === runner.subagentId));
-    if (this.listIndex === 0 || this.listIndex >= nodeSubagents.length) this.listIndex = selectedIndex;
     const transcript = readGoalTranscript(runner.sessionFile);
     return {
-      scopeLabel: `runner/${shortenMiddle(runner.subagentId, 42)}`,
+      scopeLabel: `runners/${shortenMiddle(node.slug || node.nodeId, 40)}`,
       liveTitle: `Runner ${runner.subagentId}`,
       liveLines: renderRunnerLiveLines(node, runner, transcript, now),
       liveDiagnostic: transcript.diagnostic,
       liveFollowsTail: Boolean(runner.sessionFile),
-      listTitle: `Sibling runners for ${shortenMiddle(node.slug || node.nodeId, 48)} ${nodeSubagents.length ? `${Math.min(this.listIndex + 1, nodeSubagents.length)}/${nodeSubagents.length}` : "0"}`,
+      listTitle: `Runners for ${shortenMiddle(node.slug || node.nodeId, 48)} ${nodeSubagents.length ? `${Math.min(this.listIndex + 1, nodeSubagents.length)}/${nodeSubagents.length}` : "0"}`,
       listRows: nodeSubagents.map((subagent, index) => renderRunnerListRow(subagent, index, now)),
       listItems: nodeSubagents.map((subagent) => ({ kind: "runner", nodeId: node.nodeId, subagentId: subagent.subagentId })),
     };
@@ -341,6 +360,47 @@ function formatLiveRange(start: number, end: number, total: number, active: bool
 function formatListRange(start: number, end: number, total: number, selected: number, active: boolean): string {
   const details = [active ? "active" : undefined, start > 0 ? `${start} previous rows` : undefined, total > end ? `${total - end} more rows` : undefined].filter(Boolean);
   return `Rows: ${start + 1}-${end}/${total} selected=${Math.min(selected + 1, total)}${details.length ? ` • ${details.join(" • ")}` : ""}`;
+}
+
+function controllerActions(goal: GoalSummary): GoalMonitorAction[] {
+  const actions: GoalMonitorAction[] = [];
+  if (goal.status === "active") actions.push("pause");
+  if (["active", "paused", "blocked", "budgetLimited", "usageLimited"].includes(goal.status)) actions.push("resume");
+  actions.push("clear");
+  if (goal.sessionFile) actions.push("openSession");
+  actions.push("close");
+  return actions;
+}
+
+function operationsForListItem(item: GoalMonitorListItem | undefined, goal: GoalSummary, dag: GoalMonitorDagSnapshot): GoalMonitorRowOperation[] {
+  if (!item) return [];
+  if (item.kind === "controller") {
+    return [
+      { kind: "internal", operation: "nodeList", label: "nodeList" },
+      ...controllerActions(goal).map((action): GoalMonitorRowOperation => ({ kind: "action", action, label: action })),
+    ];
+  }
+  if (item.kind === "node") {
+    const runnerCount = dag.subagents.filter((subagent) => subagent.nodeId === item.nodeId).length;
+    return [
+      { kind: "internal", operation: "runnerList", label: `runnerList(${runnerCount})` },
+      { kind: "internal", operation: "back", label: "back" },
+    ];
+  }
+  return [
+    { kind: "internal", operation: "view", label: "view" },
+    { kind: "internal", operation: "back", label: "back" },
+  ];
+}
+
+function formatPlainOperation(operation: GoalMonitorRowOperation | undefined): string {
+  return operation?.label ?? "-";
+}
+
+function formatRowOperations(operations: GoalMonitorRowOperation[], selectedIndex: number, theme: GoalListThemeLike): string {
+  return operations
+    .map((operation, index) => index === selectedIndex ? theme.fg("accent", `[${operation.label}]`) : theme.fg("dim", ` ${operation.label} `))
+    .join(" ");
 }
 
 function groupSubagentsByNode(subagents: GoalSubagentRecord[]): Map<string, GoalSubagentRecord[]> {
@@ -364,6 +424,10 @@ function compareIso(left: string | undefined, right: string | undefined): number
   return Date.parse(left ?? "") - Date.parse(right ?? "");
 }
 
+function renderControllerListRow(goal: GoalSummary, dag: GoalMonitorDagSnapshot): string {
+  return `[controller] status=${goal.status}/${goal.activityState ?? "-"} nodes=${formatStatusCounts(dag.nodes.map((node) => node.status))} runners=${formatStatusCounts(dag.subagents.map((subagent) => subagent.status))}`;
+}
+
 function renderNodeListRow(node: GoalDagNode, subagents: GoalSubagentRecord[], index: number, now: Date): string {
   const latest = latestSubagent(subagents);
   const latestLabel = latest ? ` latest=${latest.status}` : " latest=-";
@@ -375,24 +439,6 @@ function renderRunnerListRow(subagent: GoalSubagentRecord, index: number, now: D
   const activity = formatAgo(subagent.lastActivityAt ?? subagent.updatedAt, now);
   const integration = subagent.integrationState ? ` integration=${subagent.integrationState}` : "";
   return `${index + 1}. [${subagent.status}] ${shortenMiddle(subagent.subagentId, 62)} last=${activity}${integration}`;
-}
-
-function renderNodeLiveLines(node: GoalDagNode, subagents: GoalSubagentRecord[], transcript: GoalTranscriptSnapshot, now: Date): string[] {
-  const latest = latestSubagent(subagents);
-  const lines = [
-    `node: [${node.status}] ${node.nodeId}`,
-    `objective: ${node.objective}`,
-    `runtime=${formatRuntime(node.createdAt, now)} updated=${formatAgo(node.updatedAt, now)} model=${formatMonitorModel(node.modelScenario, node.modelArg, node.thinkingLevel)}`,
-    node.kind || node.validation?.profile || node.validation?.requiredEvidence?.length ? `validation contract: ${formatMonitorValidationContract(node)}` : undefined,
-    node.expectedOutputs.length ? `expected outputs: ${node.expectedOutputs.join(", ")}` : undefined,
-    node.validators.length ? `validators: ${node.validators.join(" | ")}` : undefined,
-    node.lastValidationSummary ? `validation: ${node.lastValidationSummary}` : undefined,
-    `runners: ${formatStatusCounts(subagents.map((subagent) => subagent.status))}`,
-    latest ? `latest runner: [${latest.status}] ${latest.subagentId} last=${formatAgo(latest.lastActivityAt ?? latest.updatedAt, now)}` : "latest runner: none",
-    "transcript:",
-    ...transcript.lines,
-  ].filter((line): line is string => Boolean(line));
-  return lines;
 }
 
 function renderRunnerLiveLines(node: GoalDagNode, subagent: GoalSubagentRecord, transcript: GoalTranscriptSnapshot, now: Date): string[] {

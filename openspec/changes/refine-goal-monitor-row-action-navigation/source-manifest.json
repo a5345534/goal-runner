@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "1.0",
+  "changeName": "refine-goal-monitor-row-action-navigation",
+  "generatedAt": "2026-06-06T10:33:03.866782+00:00",
+  "sources": [
+    {
+      "path": "proposal.md",
+      "kind": "proposal",
+      "sha256": "d3998dea47e067b0cd6ba2fe75989a88afe1e5550b006542a37dc3fca2536359"
+    },
+    {
+      "path": "design.md",
+      "kind": "design",
+      "sha256": "fcc9bd8363b83730fe73e0946d6a839a1fa6e26dd3b32f4505a998828278a13f"
+    },
+    {
+      "path": "tasks.md",
+      "kind": "tasks",
+      "sha256": "b110d146259c3e95f648d7d61b9199ef6f79f12b71193deaef0605a9dc2a7c38"
+    }
+  ]
+}

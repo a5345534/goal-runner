@@ -21,16 +21,17 @@ export declare class GoalMonitorController {
     private readonly readTranscript;
     private readonly readDagSnapshot;
     private readonly now;
-    private buttonIndex;
     private activePane;
     private scope;
     private listIndex;
     private listScroll;
     private liveScroll;
     private followLiveTail;
+    private rowOperationIndex;
     private lastLiveLineCount;
     private lastListLineCount;
     private lastListItems;
+    private lastSelectedOperations;
     constructor(goal: GoalSummary, readTranscript?: () => GoalTranscriptSnapshot, readDagSnapshot?: () => GoalMonitorDagSnapshot, now?: () => Date);
     get actions(): GoalMonitorAction[];
     handleInput(data: string): GoalMonitorSelection | undefined;
@@ -40,8 +41,12 @@ export declare class GoalMonitorController {
     private moveActivePaneToEnd;
     private moveListSelection;
     private keepSelectedListRowVisible;
-    private drillInto;
+    private moveRowOperation;
+    private confirmSelectedOperation;
+    private enterNodeList;
+    private enterRunnerList;
     private goBack;
+    private resetListAndLive;
     render(width: number, theme: GoalListThemeLike): string[];
     private buildView;
 }

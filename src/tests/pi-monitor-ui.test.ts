@@ -30,24 +30,8 @@ function summary(status: GoalSummary["status"] = "active", sessionFile?: string)
   };
 }
 
-test("goal monitor escape closes without lifecycle action", () => {
-  const controller = new GoalMonitorController(summary());
-
-  assert.deepEqual(controller.handleInput("\x1b"), { kind: "close" });
-});
-
-test("goal monitor exposes state-appropriate lifecycle actions", () => {
-  const active = new GoalMonitorController(summary("active"));
-  const paused = new GoalMonitorController(summary("paused"));
-
-  assert.deepEqual(active.actions, ["pause", "resume", "clear", "close"]);
-  assert.deepEqual(paused.actions, ["resume", "clear", "close"]);
-  assert.deepEqual(active.handleInput("\r"), { kind: "action", action: "pause" });
-});
-
-test("goal monitor lifecycle actions remain available from live focus", () => {
-  const now = new Date("2026-05-31T00:05:00.000Z");
-  const nodes: GoalDagNode[] = [{
+function dagNode(overrides: Partial<GoalDagNode> = {}): GoalDagNode {
+  return {
     goalId: "abcdef123456",
     nodeId: "build-node",
     slug: "build-node",
@@ -56,18 +40,64 @@ test("goal monitor lifecycle actions remain available from live focus", () => {
     expectedOutputs: [],
     validators: [],
     completionGates: ["controller-validation"],
-    status: "planned",
+    status: "running",
     createdAt: "2026-05-31T00:00:00.000Z",
-    updatedAt: "2026-05-31T00:00:00.000Z",
-  }];
+    updatedAt: "2026-05-31T00:04:00.000Z",
+    ...overrides,
+  };
+}
+
+function subagent(overrides: Partial<GoalSubagentRecord> = {}): GoalSubagentRecord {
+  return {
+    goalId: "abcdef123456",
+    nodeId: "build-node",
+    subagentId: "subagent-build-node-1",
+    harnessAdapterId: "pi",
+    status: "running",
+    prompts: ["initial"],
+    createdAt: "2026-05-31T00:01:00.000Z",
+    updatedAt: "2026-05-31T00:04:30.000Z",
+    lastActivityAt: "2026-05-31T00:04:30.000Z",
+    ...overrides,
+  };
+}
+
+const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+
+test("goal monitor escape closes without lifecycle action", () => {
+  const controller = new GoalMonitorController(summary());
+
+  assert.deepEqual(controller.handleInput("\x1b"), { kind: "close" });
+});
+
+test("goal monitor exposes lifecycle actions as controller row operations", () => {
+  const active = new GoalMonitorController(
+    summary("active"),
+    () => ({ lines: ["tail"], entryCount: 1, messageCount: 1 }),
+    () => ({ nodes: [dagNode()], subagents: [], refreshedAt: "2026-05-31T00:05:00.000Z" }),
+  );
+  const paused = new GoalMonitorController(summary("paused"));
+
+  assert.deepEqual(active.actions, ["pause", "resume", "clear", "close"]);
+  assert.deepEqual(paused.actions, ["resume", "clear", "close"]);
+
+  const rendered = active.render(140, theme).join("\n");
+  assert.match(rendered, /scope=controller focus=list rowOp=nodeList/);
+  assert.match(rendered, /> \[controller\].*ops: \[nodeList\].*pause.*resume.*clear.*close/);
+
+  active.handleInput("\x1b[C"); // select pause operation on the controller row.
+  assert.deepEqual(active.handleInput("\r"), { kind: "action", action: "pause" });
+});
+
+test("goal monitor row operations remain confirmable from live focus", () => {
   const controller = new GoalMonitorController(
     summary("active"),
     () => ({ lines: ["tail"], entryCount: 1, messageCount: 1 }),
-    () => ({ nodes, subagents: [], refreshedAt: now.toISOString() }),
-    () => now,
+    () => ({ nodes: [dagNode()], subagents: [], refreshedAt: "2026-05-31T00:05:00.000Z" }),
   );
 
-  controller.render(120, { fg: (_color: string, text: string) => text, bold: (text: string) => text });
+  controller.render(120, theme);
+  controller.handleInput("\x1b[C"); // pause
   controller.handleInput("v");
 
   assert.deepEqual(controller.handleInput("\r"), { kind: "action", action: "pause" });
@@ -125,241 +155,144 @@ test("goal monitor transcript includes custom messages, tool calls, and session 
   }
 });
 
-test("goal monitor renders controller live output plus a selectable node list", () => {
+test("goal monitor starts at controller row with explicit nodeList operation", () => {
   const now = new Date("2026-05-31T00:05:00.000Z");
-  const nodes: GoalDagNode[] = [
-    {
-      goalId: "abcdef123456",
-      nodeId: "people-frappe-attendance-doctypes-long-node-id",
-      slug: "people-frappe-attendance-doctypes",
-      objective: "Implement attendance DocTypes",
-      dependencyNodeIds: [],
-      expectedOutputs: [],
-      validators: [],
-      completionGates: ["controller-validation"],
-      status: "running",
-      modelScenario: "implementation-heavy",
-      modelArg: "local-aeon/aeon",
-      createdAt: "2026-05-31T00:00:00.000Z",
-      updatedAt: "2026-05-31T00:04:00.000Z",
-    },
-  ];
-  const subagents: GoalSubagentRecord[] = [
-    {
-      goalId: "abcdef123456",
-      nodeId: nodes[0]!.nodeId,
-      subagentId: "subagent-abcdef12-attendance",
-      harnessAdapterId: "pi",
-      sessionFile: "/sessions/subagent.jsonl",
-      workspacePath: "/home/shawn/projects/repo/.worktrees/attendance",
-      branch: "goal/attendance",
-      status: "running",
-      prompts: ["initial"],
-      integrationStatus: "working",
-      createdAt: "2026-05-31T00:01:00.000Z",
-      updatedAt: "2026-05-31T00:04:30.000Z",
-      lastActivityAt: "2026-05-31T00:04:30.000Z",
-    },
-  ];
+  const nodes = [dagNode({
+    nodeId: "people-frappe-attendance-doctypes-long-node-id",
+    slug: "people-frappe-attendance-doctypes",
+    objective: "Implement attendance DocTypes",
+    modelScenario: "implementation-heavy",
+    modelArg: "local-aeon/aeon",
+  })];
+  const subagents = [subagent({
+    nodeId: nodes[0]!.nodeId,
+    subagentId: "subagent-abcdef12-attendance",
+    sessionFile: "/sessions/subagent.jsonl",
+    workspacePath: "/home/shawn/projects/repo/.worktrees/attendance",
+    branch: "goal/attendance",
+    integrationStatus: "working",
+  })];
   const controller = new GoalMonitorController(
     summary("active"),
     () => ({ lines: ["controller-tail"], entryCount: 1, messageCount: 1 }),
     () => ({ nodes, subagents, refreshedAt: now.toISOString() }),
     () => now,
   );
-  const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 
   const rendered = controller.render(140, theme).join("\n");
 
-  assert.match(rendered, /scope=goal focus=list/);
+  assert.match(rendered, /scope=controller focus=list rowOp=nodeList/);
   assert.match(rendered, /DAG nodes=1 \(running=1\) subagents=1 \(running=1\)/);
-  assert.match(rendered, /controllerModel=controller -> openai-codex\/gpt-5\.5/);
   assert.match(rendered, /LIVE: Controller execution \(1 entries \/ 1 messages\)/);
   assert.match(rendered, /controller-tail/);
-  assert.match(rendered, /LIST: Nodes 1\/1/);
-  assert.match(rendered, /> 1\. \[running\] people-frappe-attendance-doctypes runners=1 latest=running updated=1m ago model=implementation-heavy -> local-aeon\/aeon/);
+  assert.match(rendered, /LIST: Controller/);
+  assert.match(rendered, /> \[controller\] status=active\/idle-eligible nodes=1 \(running=1\) runners=1 \(running=1\).*ops: \[nodeList\]/);
 });
 
-test("goal monitor drills from a node row into node live and runner list", () => {
-  const dir = mkdtempSync(join(tmpdir(), "goal-monitor-node-drill-"));
-  const sessionFile = join(dir, "runner.jsonl");
+test("goal monitor enters node list with empty live pane and node row runnerList operation", () => {
   const now = new Date("2026-05-31T00:05:00.000Z");
-  try {
-    writeFileSync(sessionFile, JSON.stringify({ type: "message", message: { role: "assistant", content: "runner live tail" }, timestamp: "2026-05-31T00:04:30.000Z" }));
-    const nodes: GoalDagNode[] = [{
-      goalId: "abcdef123456",
-      nodeId: "build-node",
-      slug: "build-node",
-      objective: "Build node",
-      dependencyNodeIds: [],
-      expectedOutputs: ["src/output.ts"],
-      validators: ["npm test"],
-      completionGates: ["controller-validation"],
-      status: "controllerValidating",
-      lastValidationSummary: "validating output",
-      createdAt: "2026-05-31T00:00:00.000Z",
-      updatedAt: "2026-05-31T00:04:00.000Z",
-    }];
-    const subagents: GoalSubagentRecord[] = [{
-      goalId: "abcdef123456",
-      nodeId: "build-node",
-      subagentId: "subagent-build-node-1",
-      harnessAdapterId: "pi",
-      sessionFile,
-      workspacePath: "/repo/.worktrees/build-node",
-      branch: "goal/build-node",
-      status: "controllerValidating",
-      prompts: ["initial"],
-      createdAt: "2026-05-31T00:01:00.000Z",
-      updatedAt: "2026-05-31T00:04:30.000Z",
-      lastActivityAt: "2026-05-31T00:04:30.000Z",
-    }];
-    const controller = new GoalMonitorController(
-      summary("active"),
-      () => ({ lines: ["controller-tail"], entryCount: 1, messageCount: 1 }),
-      () => ({ nodes, subagents, refreshedAt: now.toISOString() }),
-      () => now,
-    );
-    const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
-
-    controller.render(140, theme);
-    controller.handleInput("\r");
-    const rendered = controller.render(140, theme).join("\n");
-
-    assert.match(rendered, /scope=node\/build-node focus=list/);
-    assert.match(rendered, /LIVE: Node build-node • latest subagent-build-node-1/);
-    assert.match(rendered, /node: \[controllerValidating\] build-node/);
-    assert.match(rendered, /expected outputs: src\/output\.ts/);
-    assert.match(rendered, /validators: npm test/);
-    assert.match(rendered, /runner live tail/);
-    assert.match(rendered, /LIST: Runners for build-node 1\/1/);
-    assert.match(rendered, /> 1\. \[controllerValidating\] subagent-build-node-1/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("goal monitor drills from a runner row into runner live while keeping sibling runner list", () => {
-  const dir = mkdtempSync(join(tmpdir(), "goal-monitor-runner-drill-"));
-  const sessionFile = join(dir, "runner.jsonl");
-  const now = new Date("2026-05-31T00:05:00.000Z");
-  try {
-    writeFileSync(sessionFile, JSON.stringify({ type: "message", message: { role: "assistant", content: "runner detail transcript" }, timestamp: "2026-05-31T00:04:30.000Z" }));
-    const nodes: GoalDagNode[] = [{
-      goalId: "abcdef123456",
-      nodeId: "build-node",
-      slug: "build-node",
-      objective: "Build node",
-      dependencyNodeIds: [],
-      expectedOutputs: [],
-      validators: [],
-      completionGates: ["controller-validation"],
-      status: "running",
-      createdAt: "2026-05-31T00:00:00.000Z",
-      updatedAt: "2026-05-31T00:04:00.000Z",
-    }];
-    const subagents: GoalSubagentRecord[] = [{
-      goalId: "abcdef123456",
-      nodeId: "build-node",
-      subagentId: "subagent-build-node-1",
-      harnessAdapterId: "pi",
-      sessionFile,
-      workspacePath: "/repo/.worktrees/build-node",
-      branch: "goal/build-node",
-      status: "running",
-      prompts: ["initial"],
-      integrationStatus: "working",
-      createdAt: "2026-05-31T00:01:00.000Z",
-      updatedAt: "2026-05-31T00:04:30.000Z",
-      lastActivityAt: "2026-05-31T00:04:30.000Z",
-    }];
-    const controller = new GoalMonitorController(
-      summary("active"),
-      () => ({ lines: ["controller-tail"], entryCount: 1, messageCount: 1 }),
-      () => ({ nodes, subagents, refreshedAt: now.toISOString() }),
-      () => now,
-    );
-    const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
-
-    controller.render(140, theme);
-    controller.handleInput("\r"); // node
-    controller.render(140, theme);
-    controller.handleInput("\r"); // runner
-    const rendered = controller.render(140, theme).join("\n");
-
-    assert.match(rendered, /scope=runner\/subagent-build-node-1 focus=list/);
-    assert.match(rendered, /LIVE: Runner subagent-build-node-1/);
-    assert.match(rendered, /runner: \[running\] subagent-build-node-1/);
-    assert.match(rendered, /branch: goal\/build-node/);
-    assert.match(rendered, /workspace: \/repo\/\.worktrees\/build-node/);
-    assert.match(rendered, /note: working/);
-    assert.match(rendered, /runner detail transcript/);
-    assert.match(rendered, /LIST: Sibling runners for build-node 1\/1/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("goal monitor back navigation returns runner to node to goal scopes", () => {
-  const now = new Date("2026-05-31T00:05:00.000Z");
-  const nodes: GoalDagNode[] = [{
-    goalId: "abcdef123456",
-    nodeId: "build-node",
-    slug: "build-node",
-    objective: "Build node",
-    dependencyNodeIds: [],
-    expectedOutputs: [],
-    validators: [],
-    completionGates: ["controller-validation"],
-    status: "running",
-    createdAt: "2026-05-31T00:00:00.000Z",
-    updatedAt: "2026-05-31T00:04:00.000Z",
-  }];
-  const subagents: GoalSubagentRecord[] = [{
-    goalId: "abcdef123456",
-    nodeId: "build-node",
-    subagentId: "subagent-build-node-1",
-    harnessAdapterId: "pi",
-    status: "running",
-    prompts: ["initial"],
-    createdAt: "2026-05-31T00:01:00.000Z",
-    updatedAt: "2026-05-31T00:04:30.000Z",
-    lastActivityAt: "2026-05-31T00:04:30.000Z",
-  }];
+  const nodes = [dagNode({
+    status: "controllerValidating",
+    expectedOutputs: ["src/output.ts"],
+    validators: ["npm test"],
+    lastValidationSummary: "validating output",
+  })];
+  const subagents = [subagent({ status: "controllerValidating" })];
   const controller = new GoalMonitorController(
     summary("active"),
     () => ({ lines: ["controller-tail"], entryCount: 1, messageCount: 1 }),
     () => ({ nodes, subagents, refreshedAt: now.toISOString() }),
     () => now,
   );
-  const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 
   controller.render(140, theme);
-  controller.handleInput("\r");
-  controller.render(140, theme);
-  controller.handleInput("\r");
-  assert.match(controller.render(140, theme).join("\n"), /scope=runner\/subagent-build-node-1/);
+  controller.handleInput("\r"); // confirm controller nodeList operation.
+  const rendered = controller.render(140, theme).join("\n");
 
-  controller.handleInput("b");
-  assert.match(controller.render(140, theme).join("\n"), /scope=node\/build-node/);
-
-  controller.handleInput("\x7f");
-  assert.match(controller.render(140, theme).join("\n"), /scope=goal/);
+  assert.match(rendered, /scope=nodes focus=list rowOp=runnerList\(1\)/);
+  assert.match(rendered, /LIVE: Node list mode/);
+  assert.match(rendered, /No live entries available/);
+  assert.doesNotMatch(rendered, /controller-tail/);
+  assert.match(rendered, /LIST: Nodes 1\/1/);
+  assert.match(rendered, /> 1\. \[controllerValidating\] build-node runners=1 latest=controllerValidating updated=1m ago.*ops: \[runnerList\(1\)\].*back/);
 });
 
-test("goal monitor scrolls overflowing node list", () => {
+test("goal monitor enters runner list and binds live output to selected runner", () => {
+  const dir = mkdtempSync(join(tmpdir(), "goal-monitor-runner-list-"));
+  const firstSession = join(dir, "runner-1.jsonl");
+  const secondSession = join(dir, "runner-2.jsonl");
   const now = new Date("2026-05-31T00:05:00.000Z");
-  const nodes: GoalDagNode[] = Array.from({ length: 20 }, (_, index) => ({
-    goalId: "abcdef123456",
+  try {
+    writeFileSync(firstSession, JSON.stringify({ type: "message", message: { role: "assistant", content: "first runner transcript" }, timestamp: "2026-05-31T00:04:10.000Z" }));
+    writeFileSync(secondSession, JSON.stringify({ type: "message", message: { role: "assistant", content: "second runner transcript" }, timestamp: "2026-05-31T00:04:30.000Z" }));
+    const nodes = [dagNode()];
+    const subagents = [
+      subagent({ subagentId: "subagent-build-node-1", sessionFile: firstSession, branch: "goal/build-node-1", workspacePath: "/repo/.worktrees/build-node-1" }),
+      subagent({ subagentId: "subagent-build-node-2", sessionFile: secondSession, branch: "goal/build-node-2", workspacePath: "/repo/.worktrees/build-node-2", integrationStatus: "working second" }),
+    ];
+    const controller = new GoalMonitorController(
+      summary("active"),
+      () => ({ lines: ["controller-tail"], entryCount: 1, messageCount: 1 }),
+      () => ({ nodes, subagents, refreshedAt: now.toISOString() }),
+      () => now,
+    );
+
+    controller.render(140, theme);
+    controller.handleInput("\r"); // nodeList
+    controller.render(140, theme);
+    controller.handleInput("\r"); // runnerList for selected node
+    const first = controller.render(140, theme).join("\n");
+
+    assert.match(first, /scope=runners\/build-node focus=list rowOp=view/);
+    assert.match(first, /LIVE: Runner subagent-build-node-1/);
+    assert.match(first, /first runner transcript/);
+    assert.doesNotMatch(first, /second runner transcript/);
+    assert.match(first, /LIST: Runners for build-node 1\/2/);
+    assert.match(first, /> 1\. \[running\] subagent-build-node-1.*ops: \[view\].*back/);
+
+    controller.handleInput("\x1b[B"); // select second runner row; live follows selected runner.
+    const second = controller.render(140, theme).join("\n");
+
+    assert.match(second, /LIVE: Runner subagent-build-node-2/);
+    assert.match(second, /second runner transcript/);
+    assert.match(second, /note: working second/);
+    assert.match(second, /> 2\. \[running\] subagent-build-node-2/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("goal monitor back navigation returns runner list to nodes to controller scopes", () => {
+  const now = new Date("2026-05-31T00:05:00.000Z");
+  const nodes = [dagNode()];
+  const subagents = [subagent()];
+  const controller = new GoalMonitorController(
+    summary("active"),
+    () => ({ lines: ["controller-tail"], entryCount: 1, messageCount: 1 }),
+    () => ({ nodes, subagents, refreshedAt: now.toISOString() }),
+    () => now,
+  );
+
+  controller.render(140, theme);
+  controller.handleInput("\r"); // controller -> nodes
+  controller.render(140, theme);
+  controller.handleInput("\r"); // nodes -> runners
+  assert.match(controller.render(140, theme).join("\n"), /scope=runners\/build-node/);
+
+  controller.handleInput("b");
+  assert.match(controller.render(140, theme).join("\n"), /scope=nodes/);
+
+  controller.handleInput("\x7f");
+  assert.match(controller.render(140, theme).join("\n"), /scope=controller/);
+});
+
+test("goal monitor scrolls overflowing node list after entering node scope", () => {
+  const now = new Date("2026-05-31T00:05:00.000Z");
+  const nodes: GoalDagNode[] = Array.from({ length: 20 }, (_, index) => dagNode({
     nodeId: `dag-node-${String(index + 1).padStart(2, "0")}`,
     slug: `dag-node-${String(index + 1).padStart(2, "0")}`,
     objective: `Do DAG node ${index + 1}`,
-    dependencyNodeIds: [],
-    expectedOutputs: [],
-    validators: [],
-    completionGates: ["controller-validation"],
     status: "planned",
-    createdAt: "2026-05-31T00:00:00.000Z",
     updatedAt: "2026-05-31T00:00:00.000Z",
   }));
   const controller = new GoalMonitorController(
@@ -368,10 +301,11 @@ test("goal monitor scrolls overflowing node list", () => {
     () => ({ nodes, subagents: [], refreshedAt: now.toISOString() }),
     () => now,
   );
-  const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 
+  controller.render(140, theme);
+  controller.handleInput("\r"); // nodeList
   const firstPage = controller.render(140, theme).join("\n");
-  assert.match(firstPage, /focus=list/);
+  assert.match(firstPage, /scope=nodes/);
   assert.match(firstPage, /Rows: 1-14\/20 selected=1 • active • 6 more rows/);
   assert.doesNotMatch(firstPage, /dag-node-20/);
 
@@ -382,13 +316,12 @@ test("goal monitor scrolls overflowing node list", () => {
   assert.match(secondPage, /Rows: 1-14\/20 selected=14 • active • 6 more rows/);
 });
 
-test("goal monitor live scroll remains available after switching panes", () => {
+test("goal monitor live scroll remains available from controller scope", () => {
   const lines = Array.from({ length: 25 }, (_, index) => `transcript-${String(index + 1).padStart(2, "0")}`);
   const controller = new GoalMonitorController(summary("active"), () => ({ lines, entryCount: lines.length, messageCount: lines.length }));
-  const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 
   const initial = controller.render(120, theme).join("\n");
-  assert.match(initial, /focus=list/);
+  assert.match(initial, /scope=controller focus=list/);
   assert.match(initial, /transcript-25/);
 
   controller.handleInput("v");
@@ -407,10 +340,9 @@ test("goal monitor live scroll remains available after switching panes", () => {
   assert.match(tail, /Live lines: 8-25\/25 • active • live • 7 previous live lines/);
 });
 
-test("goal monitor render auto-follows live transcript tail", () => {
+test("goal monitor render auto-follows controller live transcript tail", () => {
   let lines = ["one"];
   const controller = new GoalMonitorController(summary("active"), () => ({ lines, entryCount: lines.length, messageCount: lines.length }));
-  const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 
   assert.ok(controller.render(120, theme).some((line) => line.includes("one")));
   lines = ["one", "two"];
