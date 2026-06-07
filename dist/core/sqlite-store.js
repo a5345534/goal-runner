@@ -94,9 +94,9 @@ export class SQLiteGoalStore {
         this.db
             .prepare(`INSERT INTO goal_session_metadata (
           session_key, goal_id, origin_session_key, execution_workspace, workspace_status,
-          branch, ref, branch_verification_status, session_file, session_name,
+          branch, ref, promotion_target_ref, branch_verification_status, session_file, session_name,
           controller_model_scenario, controller_model_arg, legacy_session_bound, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(session_key) DO UPDATE SET
           goal_id = excluded.goal_id,
           origin_session_key = excluded.origin_session_key,
@@ -104,6 +104,7 @@ export class SQLiteGoalStore {
           workspace_status = excluded.workspace_status,
           branch = excluded.branch,
           ref = excluded.ref,
+          promotion_target_ref = excluded.promotion_target_ref,
           branch_verification_status = excluded.branch_verification_status,
           session_file = excluded.session_file,
           session_name = excluded.session_name,
@@ -112,7 +113,7 @@ export class SQLiteGoalStore {
           legacy_session_bound = excluded.legacy_session_bound,
           created_at = excluded.created_at,
           updated_at = excluded.updated_at`)
-            .run(metadata.sessionKey, metadata.goalId, metadata.originSessionKey ?? null, metadata.executionWorkspace ?? null, metadata.workspaceStatus ?? null, metadata.branch ?? null, metadata.ref ?? null, metadata.branchVerificationStatus ?? null, metadata.sessionFile ?? null, metadata.sessionName ?? null, metadata.controllerModelScenario ?? null, metadata.controllerModelArg ?? null, metadata.legacySessionBound ? 1 : 0, metadata.createdAt, metadata.updatedAt);
+            .run(metadata.sessionKey, metadata.goalId, metadata.originSessionKey ?? null, metadata.executionWorkspace ?? null, metadata.workspaceStatus ?? null, metadata.branch ?? null, metadata.ref ?? null, metadata.promotionTargetRef ?? null, metadata.branchVerificationStatus ?? null, metadata.sessionFile ?? null, metadata.sessionName ?? null, metadata.controllerModelScenario ?? null, metadata.controllerModelArg ?? null, metadata.legacySessionBound ? 1 : 0, metadata.createdAt, metadata.updatedAt);
     }
     async getGoalSessionMetadata(sessionKey) {
         const row = this.db.prepare("SELECT * FROM goal_session_metadata WHERE session_key = ?").get(sessionKey);
@@ -126,6 +127,7 @@ export class SQLiteGoalStore {
           m.workspace_status,
           m.branch,
           m.ref,
+          m.promotion_target_ref,
           m.branch_verification_status,
           m.session_file,
           m.session_name,
@@ -318,6 +320,7 @@ export class SQLiteGoalStore {
         workspace_status TEXT,
         branch TEXT,
         ref TEXT,
+        promotion_target_ref TEXT,
         branch_verification_status TEXT,
         session_file TEXT,
         session_name TEXT,
@@ -399,6 +402,7 @@ export class SQLiteGoalStore {
         addColumnIfMissing(this.db, "goal_dag_nodes", "thinking_level", "TEXT");
         addColumnIfMissing(this.db, "goal_dag_nodes", "kind", "TEXT");
         addColumnIfMissing(this.db, "goal_dag_nodes", "validation_json", "TEXT");
+        addColumnIfMissing(this.db, "goal_session_metadata", "promotion_target_ref", "TEXT");
         addColumnIfMissing(this.db, "goal_session_metadata", "controller_model_scenario", "TEXT");
         addColumnIfMissing(this.db, "goal_session_metadata", "controller_model_arg", "TEXT");
         addColumnIfMissing(this.db, "goal_subagents", "retry_count", "INTEGER");
@@ -464,6 +468,7 @@ function rowToMetadata(row) {
         workspaceStatus: row.workspace_status ?? undefined,
         branch: row.branch ?? undefined,
         ref: row.ref ?? undefined,
+        promotionTargetRef: row.promotion_target_ref ?? undefined,
         branchVerificationStatus: row.branch_verification_status ?? undefined,
         sessionFile: row.session_file ?? undefined,
         sessionName: row.session_name ?? undefined,
@@ -494,6 +499,7 @@ function rowToGoalSummary(row) {
         workspaceStatus: row.workspace_status ?? (row.origin_session_key ? undefined : "legacy"),
         branch: row.branch ?? undefined,
         ref: row.ref ?? undefined,
+        promotionTargetRef: row.promotion_target_ref ?? undefined,
         branchVerificationStatus: row.branch_verification_status ?? undefined,
         sessionFile: row.session_file ?? undefined,
         sessionName: row.session_name ?? undefined,

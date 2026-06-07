@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "1.0",
+  "changeName": "require-goal-promotion-before-complete",
+  "generatedAt": "2026-06-07T06:14:59.862511+00:00",
+  "sources": [
+    {
+      "path": "proposal.md",
+      "kind": "proposal",
+      "sha256": "b89338e739fe4ea57c0073abfcae798b35d5a01e205321cfbda276a08955ec4f"
+    },
+    {
+      "path": "design.md",
+      "kind": "design",
+      "sha256": "d9a42f1019ec722d36a35f6376743f8829773ac6bfaeaf2c7248ab576158a6db"
+    },
+    {
+      "path": "tasks.md",
+      "kind": "tasks",
+      "sha256": "cee8d3e914152b613903ec7ce97f5cf1e2f0ae35bd5c1998eff2750b90e78f63"
+    }
+  ]
+}

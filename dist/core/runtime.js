@@ -131,6 +131,23 @@ export class GoalRuntime {
             goal: updated,
         };
     }
+    async blockGoalFromControllerCloseout(goalId, reason, details = {}) {
+        const goal = await this.getGoalById(goalId);
+        if (!goal)
+            return { goalId, terminal: true, changed: false, reason: "goal record not found" };
+        if (goal.status !== "active") {
+            return { goalId, terminal: true, changed: false, reason: `goal already ${goal.status}`, status: goal.status, goal };
+        }
+        const updated = await this.setGoalStatus(goal, "blocked");
+        await this.store.clearReservation(goal.sessionKey);
+        await this.appendLedger("goal_blocked", goal.sessionKey, updated.goalId, {
+            source: "controller_closeout",
+            reason,
+            ...details,
+        });
+        this.activeTurns.delete(goal.sessionKey);
+        return { goalId, terminal: true, changed: true, reason, status: updated.status, goal: updated };
+    }
     async saveGoalDagNode(node) {
         await this.store.saveGoalDagNode(node);
     }

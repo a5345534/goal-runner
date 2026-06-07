@@ -18,6 +18,8 @@ export interface ResolvedWorkspaceBinding {
   workspace: string;
   branch?: string;
   ref?: string;
+  /** Target/base branch or ref for promoting an auto-allocated controller branch before completion. */
+  promotionTargetRef?: string;
   profileName?: string;
 }
 

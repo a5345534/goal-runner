@@ -154,6 +154,77 @@ export class NativeGitWorkspaceManager {
             return nativeGitIntegrationFailure(request, message, { sourceBranch, sourceRef, sourceHead }, buildMergeConflictFollowupPrompt(request, message));
         }
     }
+    promoteControllerBranch(request) {
+        const controllerWorkspacePath = resolve(request.controllerWorkspacePath);
+        const controllerRepo = findGitRepositoryRoot(controllerWorkspacePath);
+        if (!controllerRepo) {
+            return nativeGitPromotionBlocked(request, `controller workspace is not inside a Git repository: ${controllerWorkspacePath}`);
+        }
+        const controllerBranch = request.controllerBranch ?? (safeGit(controllerWorkspacePath, ["branch", "--show-current"]) || undefined);
+        const controllerHead = safeGit(controllerWorkspacePath, ["rev-parse", "--verify", "HEAD"]);
+        if (!controllerHead)
+            return nativeGitPromotionBlocked(request, "controller workspace has no HEAD", { controllerBranch });
+        const controllerDirty = gitStatusPorcelain(controllerWorkspacePath, { ignoreWorktreeRoot: true });
+        if (controllerDirty) {
+            return nativeGitPromotionBlocked(request, `controller workspace has uncommitted changes; cannot promote safely:\n${controllerDirty}`, {
+                controllerBranch,
+                controllerHead,
+            });
+        }
+        const target = resolveControllerPromotionTarget(controllerWorkspacePath, request.targetRef, controllerBranch, this.options.branchPrefix);
+        if (!target.ok)
+            return nativeGitPromotionBlocked(request, target.error, { controllerBranch, controllerHead, targetRef: target.targetRef, targetBranch: target.targetBranch });
+        const targetDirty = gitStatusPorcelain(target.workspacePath, { ignoreWorktreeRoot: true });
+        if (targetDirty) {
+            return nativeGitPromotionBlocked(request, `target workspace has uncommitted changes; cannot promote safely:\n${targetDirty}`, {
+                controllerBranch,
+                controllerHead,
+                targetRef: target.targetRef,
+                targetBranch: target.targetBranch,
+                targetWorkspacePath: target.workspacePath,
+                targetHead: target.head,
+            });
+        }
+        if (controllerHead === target.head || gitIsAncestor(target.workspacePath, controllerHead, target.head)) {
+            return {
+                status: "notRequired",
+                summary: `controller ${shortSha(controllerHead)} is already contained in target ${target.targetBranch}`,
+                controllerBranch,
+                controllerHead,
+                targetRef: target.targetRef,
+                targetBranch: target.targetBranch,
+                targetWorkspacePath: target.workspacePath,
+                targetHead: target.head,
+                promotionCommitSha: target.head,
+            };
+        }
+        try {
+            git(target.workspacePath, ["merge", "--no-ff", "--no-edit", controllerHead]);
+            const promotionCommitSha = git(target.workspacePath, ["rev-parse", "--verify", "HEAD"]);
+            return {
+                status: "complete",
+                summary: `merged controller ${controllerBranch ?? shortSha(controllerHead)} ${shortSha(controllerHead)} into target ${target.targetBranch} ${shortSha(promotionCommitSha)}`,
+                controllerBranch,
+                controllerHead,
+                targetRef: target.targetRef,
+                targetBranch: target.targetBranch,
+                targetWorkspacePath: target.workspacePath,
+                targetHead: target.head,
+                promotionCommitSha,
+            };
+        }
+        catch (error) {
+            safeGit(target.workspacePath, ["merge", "--abort"]);
+            return nativeGitPromotionBlocked(request, `git merge failed while promoting controller branch: ${gitErrorMessage(error)}`, {
+                controllerBranch,
+                controllerHead,
+                targetRef: target.targetRef,
+                targetBranch: target.targetBranch,
+                targetWorkspacePath: target.workspacePath,
+                targetHead: target.head,
+            });
+        }
+    }
     resolveBaseRef(repoRoot, overrideBaseRef) {
         if (overrideBaseRef?.trim())
             return overrideBaseRef.trim();
@@ -306,6 +377,116 @@ function nativeGitIntegrationFailure(request, error, source = {}, followupPrompt
         sourceBranch: source.sourceBranch,
         sourceRef: source.sourceRef,
         sourceHead: source.sourceHead,
+    };
+}
+function resolveControllerPromotionTarget(controllerWorkspacePath, requestedTargetRef, controllerBranch, branchPrefix) {
+    const worktrees = listGitWorktrees(controllerWorkspacePath);
+    const controllerResolvedPath = resolve(controllerWorkspacePath);
+    const targetCandidates = promotionTargetBranchCandidates(controllerWorkspacePath, requestedTargetRef, worktrees, controllerBranch, branchPrefix);
+    if (targetCandidates.length === 0) {
+        return { ok: false, error: "cannot resolve promotion target branch for controller workspace" };
+    }
+    for (const targetBranch of targetCandidates) {
+        if (targetBranch === controllerBranch)
+            continue;
+        const target = worktrees.find((item) => item.branch === targetBranch && resolve(item.worktreePath) !== controllerResolvedPath);
+        if (!target)
+            continue;
+        const head = target.head ?? safeGit(target.worktreePath, ["rev-parse", "--verify", "HEAD"]);
+        if (!head)
+            return { ok: false, error: `target branch ${targetBranch} worktree has no HEAD`, targetRef: requestedTargetRef, targetBranch };
+        return { ok: true, targetRef: requestedTargetRef ?? targetBranch, targetBranch, workspacePath: target.worktreePath, head };
+    }
+    const firstCandidate = targetCandidates[0];
+    return {
+        ok: false,
+        error: `promotion target branch ${firstCandidate} does not have a checked-out worktree; cannot merge fail-closed`,
+        targetRef: requestedTargetRef,
+        targetBranch: firstCandidate,
+    };
+}
+function promotionTargetBranchCandidates(cwd, requestedTargetRef, worktrees, controllerBranch, branchPrefix) {
+    const candidates = [];
+    const add = (value) => {
+        const branch = normalizeLocalBranchRef(cwd, value);
+        if (branch && branch !== controllerBranch && !candidates.includes(branch))
+            candidates.push(branch);
+    };
+    add(requestedTargetRef);
+    if (!requestedTargetRef) {
+        for (const worktree of worktrees) {
+            if (!worktree.branch || worktree.branch === controllerBranch)
+                continue;
+            if (worktree.branch.startsWith(`${branchPrefix}/`))
+                continue;
+            add(worktree.branch);
+        }
+    }
+    return candidates;
+}
+function normalizeLocalBranchRef(cwd, value) {
+    const ref = value?.trim();
+    if (!ref)
+        return undefined;
+    if (ref.startsWith("refs/heads/"))
+        return ref.slice("refs/heads/".length);
+    if (gitRefExists(cwd, ref))
+        return ref;
+    if (ref.startsWith("refs/remotes/")) {
+        const parts = ref.split("/");
+        const local = parts.slice(3).join("/");
+        return local && gitRefExists(cwd, local) ? local : undefined;
+    }
+    const slash = ref.indexOf("/");
+    if (slash > 0) {
+        const local = ref.slice(slash + 1);
+        return local && gitRefExists(cwd, local) ? local : undefined;
+    }
+    return undefined;
+}
+function listGitWorktrees(cwd) {
+    const output = safeGit(cwd, ["worktree", "list", "--porcelain"]);
+    const worktrees = [];
+    let current;
+    const push = () => {
+        if (current?.worktreePath)
+            worktrees.push(current);
+        current = undefined;
+    };
+    for (const line of output.split(/\r?\n/)) {
+        if (!line.trim()) {
+            push();
+            continue;
+        }
+        if (line.startsWith("worktree ")) {
+            push();
+            current = { worktreePath: line.slice("worktree ".length) };
+            continue;
+        }
+        if (!current)
+            continue;
+        if (line.startsWith("HEAD "))
+            current.head = line.slice("HEAD ".length);
+        if (line.startsWith("branch ")) {
+            const ref = line.slice("branch ".length);
+            current.branch = ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : ref;
+        }
+    }
+    push();
+    return worktrees;
+}
+function nativeGitPromotionBlocked(request, error, context = {}) {
+    return {
+        status: "blocked",
+        summary: error,
+        error,
+        controllerBranch: context.controllerBranch ?? request.controllerBranch,
+        controllerHead: context.controllerHead,
+        targetRef: context.targetRef ?? request.targetRef,
+        targetBranch: context.targetBranch,
+        targetWorkspacePath: context.targetWorkspacePath,
+        targetHead: context.targetHead,
+        promotionCommitSha: context.promotionCommitSha,
     };
 }
 function gitStatusPorcelain(cwd, options = {}) {

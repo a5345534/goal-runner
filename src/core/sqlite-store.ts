@@ -60,6 +60,7 @@ interface SqliteMetadataRow {
   workspace_status: WorkspaceStatus | null;
   branch: string | null;
   ref: string | null;
+  promotion_target_ref: string | null;
   branch_verification_status: BranchVerificationStatus | null;
   session_file: string | null;
   session_name: string | null;
@@ -76,6 +77,7 @@ interface SqliteGoalSummaryRow extends SqliteGoalRow {
   workspace_status: WorkspaceStatus | null;
   branch: string | null;
   ref: string | null;
+  promotion_target_ref: string | null;
   branch_verification_status: BranchVerificationStatus | null;
   session_file: string | null;
   session_name: string | null;
@@ -289,9 +291,9 @@ export class SQLiteGoalStore implements GoalStore {
       .prepare(
         `INSERT INTO goal_session_metadata (
           session_key, goal_id, origin_session_key, execution_workspace, workspace_status,
-          branch, ref, branch_verification_status, session_file, session_name,
+          branch, ref, promotion_target_ref, branch_verification_status, session_file, session_name,
           controller_model_scenario, controller_model_arg, legacy_session_bound, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(session_key) DO UPDATE SET
           goal_id = excluded.goal_id,
           origin_session_key = excluded.origin_session_key,
@@ -299,6 +301,7 @@ export class SQLiteGoalStore implements GoalStore {
           workspace_status = excluded.workspace_status,
           branch = excluded.branch,
           ref = excluded.ref,
+          promotion_target_ref = excluded.promotion_target_ref,
           branch_verification_status = excluded.branch_verification_status,
           session_file = excluded.session_file,
           session_name = excluded.session_name,
@@ -316,6 +319,7 @@ export class SQLiteGoalStore implements GoalStore {
         metadata.workspaceStatus ?? null,
         metadata.branch ?? null,
         metadata.ref ?? null,
+        metadata.promotionTargetRef ?? null,
         metadata.branchVerificationStatus ?? null,
         metadata.sessionFile ?? null,
         metadata.sessionName ?? null,
@@ -341,6 +345,7 @@ export class SQLiteGoalStore implements GoalStore {
           m.workspace_status,
           m.branch,
           m.ref,
+          m.promotion_target_ref,
           m.branch_verification_status,
           m.session_file,
           m.session_name,
@@ -603,6 +608,7 @@ export class SQLiteGoalStore implements GoalStore {
         workspace_status TEXT,
         branch TEXT,
         ref TEXT,
+        promotion_target_ref TEXT,
         branch_verification_status TEXT,
         session_file TEXT,
         session_name TEXT,
@@ -684,6 +690,7 @@ export class SQLiteGoalStore implements GoalStore {
     addColumnIfMissing(this.db, "goal_dag_nodes", "thinking_level", "TEXT");
     addColumnIfMissing(this.db, "goal_dag_nodes", "kind", "TEXT");
     addColumnIfMissing(this.db, "goal_dag_nodes", "validation_json", "TEXT");
+    addColumnIfMissing(this.db, "goal_session_metadata", "promotion_target_ref", "TEXT");
     addColumnIfMissing(this.db, "goal_session_metadata", "controller_model_scenario", "TEXT");
     addColumnIfMissing(this.db, "goal_session_metadata", "controller_model_arg", "TEXT");
     addColumnIfMissing(this.db, "goal_subagents", "retry_count", "INTEGER");
@@ -753,6 +760,7 @@ function rowToMetadata(row: SqliteMetadataRow): GoalSessionMetadata {
     workspaceStatus: row.workspace_status ?? undefined,
     branch: row.branch ?? undefined,
     ref: row.ref ?? undefined,
+    promotionTargetRef: row.promotion_target_ref ?? undefined,
     branchVerificationStatus: row.branch_verification_status ?? undefined,
     sessionFile: row.session_file ?? undefined,
     sessionName: row.session_name ?? undefined,
@@ -784,6 +792,7 @@ function rowToGoalSummary(row: SqliteGoalSummaryRow): GoalSummary {
     workspaceStatus: row.workspace_status ?? (row.origin_session_key ? undefined : "legacy"),
     branch: row.branch ?? undefined,
     ref: row.ref ?? undefined,
+    promotionTargetRef: row.promotion_target_ref ?? undefined,
     branchVerificationStatus: row.branch_verification_status ?? undefined,
     sessionFile: row.session_file ?? undefined,
     sessionName: row.session_name ?? undefined,

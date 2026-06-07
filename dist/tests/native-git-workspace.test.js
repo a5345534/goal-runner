@@ -199,6 +199,96 @@ test("native git cleanup policy removes completed subagent worktrees and preserv
         rmSync(repo, { recursive: true, force: true });
     }
 });
+test("native git promotion merges controller branch into target branch before closeout", () => {
+    const repo = createRepo();
+    try {
+        const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+        const controller = manager.allocateControllerWorkspace({
+            invocationCwd: repo,
+            goalId: "goal-promote1",
+            objective: "Promote controller branch",
+        });
+        writeFileSync(join(controller.worktreePath, "feature.txt"), "done\n");
+        git(controller.worktreePath, ["add", "feature.txt"]);
+        git(controller.worktreePath, ["commit", "-m", "feat: controller work"]);
+        const controllerHead = git(controller.worktreePath, ["rev-parse", "HEAD"]);
+        const result = manager.promoteControllerBranch({
+            controllerWorkspacePath: controller.worktreePath,
+            controllerBranch: controller.branch,
+            targetRef: controller.baseRef,
+        });
+        assert.equal(result.status, "complete");
+        assert.equal(result.targetBranch, "main");
+        assert.equal(git(repo, ["branch", "--show-current"]), "main");
+        assert.equal(git(repo, ["show", "HEAD:feature.txt"]), "done");
+        assert.doesNotThrow(() => git(repo, ["merge-base", "--is-ancestor", controllerHead, "HEAD"]));
+        manager.cleanupWorkspace({ repoRoot: repo, worktreePath: controller.worktreePath, branch: controller.branch, force: true });
+    }
+    finally {
+        rmSync(repo, { recursive: true, force: true });
+    }
+});
+test("native git promotion blocks dirty target worktrees", () => {
+    const repo = createRepo();
+    try {
+        const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+        const controller = manager.allocateControllerWorkspace({
+            invocationCwd: repo,
+            goalId: "goal-promote2",
+            objective: "Promote dirty target",
+        });
+        writeFileSync(join(controller.worktreePath, "feature.txt"), "done\n");
+        git(controller.worktreePath, ["add", "feature.txt"]);
+        git(controller.worktreePath, ["commit", "-m", "feat: controller work"]);
+        writeFileSync(join(repo, "dirty.txt"), "uncommitted\n");
+        const result = manager.promoteControllerBranch({
+            controllerWorkspacePath: controller.worktreePath,
+            controllerBranch: controller.branch,
+            targetRef: controller.baseRef,
+        });
+        assert.equal(result.status, "blocked");
+        assert.match(result.summary, /target workspace has uncommitted changes/);
+        assert.throws(() => git(repo, ["show", "HEAD:feature.txt"]));
+        assert.equal(existsSync(controller.worktreePath), true);
+        rmSync(join(repo, "dirty.txt"), { force: true });
+        manager.cleanupWorkspace({ repoRoot: repo, worktreePath: controller.worktreePath, branch: controller.branch, force: true });
+    }
+    finally {
+        rmSync(repo, { recursive: true, force: true });
+    }
+});
+test("native git promotion aborts merge conflicts and blocks completion", () => {
+    const repo = createRepo();
+    try {
+        const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+        const controller = manager.allocateControllerWorkspace({
+            invocationCwd: repo,
+            goalId: "goal-promote3",
+            objective: "Promote conflicting target",
+        });
+        writeFileSync(join(repo, "conflict.txt"), "target\n");
+        git(repo, ["add", "conflict.txt"]);
+        git(repo, ["commit", "-m", "feat: target change"]);
+        writeFileSync(join(controller.worktreePath, "conflict.txt"), "controller\n");
+        git(controller.worktreePath, ["add", "conflict.txt"]);
+        git(controller.worktreePath, ["commit", "-m", "feat: controller change"]);
+        const result = manager.promoteControllerBranch({
+            controllerWorkspacePath: controller.worktreePath,
+            controllerBranch: controller.branch,
+            targetRef: controller.baseRef,
+        });
+        assert.equal(result.status, "blocked");
+        assert.match(result.summary, /git merge failed while promoting controller branch/);
+        assert.equal(git(repo, ["diff", "--name-only", "--diff-filter=U"]), "");
+        assert.equal(git(repo, ["status", "--porcelain", "--untracked-files=no"]), "");
+        assert.equal(git(repo, ["show", "HEAD:conflict.txt"]), "target");
+        assert.equal(existsSync(controller.worktreePath), true);
+        manager.cleanupWorkspace({ repoRoot: repo, worktreePath: controller.worktreePath, branch: controller.branch, force: true });
+    }
+    finally {
+        rmSync(repo, { recursive: true, force: true });
+    }
+});
 test("native git cleanup policy can remove blocked worktrees when explicitly requested", () => {
     const repo = createRepo();
     try {

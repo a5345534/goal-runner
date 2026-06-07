@@ -12,6 +12,7 @@ import {
   createControllerValidationRunner,
   createNativeGitSubagentBranchIntegrator,
   createNativeGitSubagentWorkspaceAllocator,
+  findRequiredSubagentIntegrationIssues,
   parseGoalCommand,
   parseGoalDagFileContent,
   parseGoalModelRoutingConfigJson,
@@ -27,7 +28,9 @@ import {
   type GoalDagFileDocument,
   type GoalDagNode,
   type GoalModelRoutingConfig,
+  type GoalOrchestrationState,
   type GoalRecord,
+  type GoalSubagentRecord,
   type GoalSummary,
   type HiddenGoalTurnRequest,
 } from "../../core/index.js";
@@ -433,7 +436,7 @@ function allocatePiControllerWorkspace(
     objective,
     baseRef,
   });
-  return { workspace: allocation.worktreePath, branch: allocation.branch };
+  return { workspace: allocation.worktreePath, branch: allocation.branch, promotionTargetRef: allocation.baseRef };
 }
 
 async function startGoalOwnedPiSession(
@@ -471,6 +474,7 @@ async function startGoalOwnedPiSession(
       workspaceStatus: validation.workspaceStatus,
       branch: binding.branch,
       ref: binding.ref,
+      promotionTargetRef: binding.promotionTargetRef,
       branchVerificationStatus: validation.branchVerificationStatus,
       sessionFile: background.sessionFile,
       sessionName,
@@ -742,32 +746,84 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
   goalId: string,
   binding: ResolvedWorkspaceBinding,
 ): Promise<boolean> {
+  const state = await runtime.getGoalOrchestrationState(goalId);
+  const terminal = assessPiDagTerminalState(state);
+  if (!terminal.terminal) return false;
+
+  const manager = new NativeGitWorkspaceManager({ fetch: false });
+  if (terminal.allComplete && terminal.integrationIssues.length === 0) {
+    const promotion = promotePiControllerBranchIfRequired(manager, binding);
+    if (!promotion.ok) {
+      await runtime.blockGoalFromControllerCloseout(goalId, promotion.summary, {
+        promotion: promotion.result,
+        targetRef: binding.promotionTargetRef,
+        controllerBranch: binding.branch,
+      });
+      safeNotify(ctx, `Goal ${goalId.slice(0, 8)} blocked during final promotion: ${promotion.summary}`, "warning");
+      stopPiGoalBackgroundResources(goalId);
+      return true;
+    }
+  }
+
   const finalization = await runtime.finalizeGoalFromDagTerminalState(goalId);
   if (!finalization.terminal) return false;
 
   if (finalization.changed) {
-    const state = await runtime.getGoalOrchestrationState(goalId);
-    const manager = new NativeGitWorkspaceManager({ fetch: false });
-    const cleanup = cleanupTerminalSubagentWorkspaces(manager, state);
-    const cleanupErrors = cleanup.filter((result) => result.action === "error");
-    if (cleanupErrors.length > 0) {
-      safeNotify(
-        ctx,
-        `Goal ${goalId.slice(0, 8)} completed but ${cleanupErrors.length} subagent workspace cleanup(s) failed: ${cleanupErrors.map((item) => item.error ?? item.subagentId).join("; ")}`,
-        "warning",
-      );
-    }
-    cleanupPiGoalControllerAdapter(goalId);
-    const handle = backgroundGoalSessions.get(goalId);
-    handle?.stop();
-    backgroundGoalSessions.delete(goalId);
-    const controllerCleanupError = cleanupPiControllerWorkspaceIfSafe(manager, binding);
-    if (controllerCleanupError) {
-      safeNotify(ctx, `Goal ${goalId.slice(0, 8)} completed but controller workspace cleanup failed: ${controllerCleanupError}`, "warning");
+    stopPiGoalBackgroundResources(goalId);
+    if (finalization.status === "complete") {
+      const cleanup = cleanupTerminalSubagentWorkspaces(manager, state);
+      const cleanupErrors = cleanup.filter((result) => result.action === "error");
+      if (cleanupErrors.length > 0) {
+        safeNotify(
+          ctx,
+          `Goal ${goalId.slice(0, 8)} completed but ${cleanupErrors.length} subagent workspace cleanup(s) failed: ${cleanupErrors.map((item) => item.error ?? item.subagentId).join("; ")}`,
+          "warning",
+        );
+      }
+      const controllerCleanupError = cleanupPiControllerWorkspaceIfSafe(manager, binding);
+      if (controllerCleanupError) {
+        safeNotify(ctx, `Goal ${goalId.slice(0, 8)} completed but controller workspace cleanup failed: ${controllerCleanupError}`, "warning");
+      }
     }
   }
 
   return true;
+}
+
+const TERMINAL_PI_DAG_NODE_STATUSES = new Set<GoalDagNode["status"]>(["complete", "blocked", "failed", "superseded"]);
+
+function assessPiDagTerminalState(state: GoalOrchestrationState): {
+  terminal: boolean;
+  allComplete: boolean;
+  integrationIssues: ReturnType<typeof findRequiredSubagentIntegrationIssues>;
+} {
+  if (state.nodes.length === 0) return { terminal: false, allComplete: false, integrationIssues: [] };
+  const terminal = state.nodes.every((node) => TERMINAL_PI_DAG_NODE_STATUSES.has(node.status));
+  const allComplete = state.nodes.every((node) => node.status === "complete" || node.status === "superseded");
+  return { terminal, allComplete, integrationIssues: terminal ? findRequiredSubagentIntegrationIssues(state) : [] };
+}
+
+function promotePiControllerBranchIfRequired(
+  manager: NativeGitWorkspaceManager,
+  binding: ResolvedWorkspaceBinding,
+): { ok: true; summary: string; result?: ReturnType<NativeGitWorkspaceManager["promoteControllerBranch"]> } | { ok: false; summary: string; result: ReturnType<NativeGitWorkspaceManager["promoteControllerBranch"]> } {
+  if (!isAutoAllocatedPiControllerWorkspace(binding)) {
+    return { ok: true, summary: "promotion not required for explicit controller workspace" };
+  }
+  const result = manager.promoteControllerBranch({
+    controllerWorkspacePath: binding.workspace,
+    controllerBranch: binding.branch,
+    targetRef: binding.promotionTargetRef,
+  });
+  if (result.status === "blocked") return { ok: false, summary: result.summary, result };
+  return { ok: true, summary: result.summary, result };
+}
+
+function stopPiGoalBackgroundResources(goalId: string): void {
+  cleanupPiGoalControllerAdapter(goalId);
+  const handle = backgroundGoalSessions.get(goalId);
+  handle?.stop();
+  backgroundGoalSessions.delete(goalId);
 }
 
 function cleanupPiControllerWorkspaceIfSafe(manager: NativeGitWorkspaceManager, binding: ResolvedWorkspaceBinding): string | undefined {
@@ -819,6 +875,7 @@ async function resumePiGoalControllerPollingLoops(runtime: GoalRuntime, ctx: Ext
       workspace: summary.executionWorkspace,
       branch: summary.branch,
       ref: summary.ref,
+      promotionTargetRef: summary.promotionTargetRef,
     };
     startPiGoalControllerPollingLoop(runtime, ctx, summary, binding);
     void runPiGoalControllerPoll(runtime, ctx, summary, binding).catch((error: unknown) => {
@@ -1253,6 +1310,7 @@ async function resumeTargetGoal(runtime: GoalRuntime, ctx: ExtensionCommandConte
       workspace: goal.executionWorkspace,
       branch: goal.branch,
       ref: goal.ref,
+      promotionTargetRef: goal.promotionTargetRef,
     };
     const loop = await runtime.runGoalControllerLoop(goal.goalId, buildPiGoalControllerLoopOptions(ctx, goal, binding));
     startPiGoalControllerPollingLoop(runtime, ctx, goal, binding);
@@ -1363,6 +1421,7 @@ async function formatGoalSummaryDetails(runtime: GoalRuntime, goal: GoalSummary)
     "Workspace:",
     `  path: ${shortenPath(goal.executionWorkspace ?? "legacy session-bound goal")}`,
     `  branch/ref: ${shortenMiddle(goal.branch ?? goal.ref ?? "not configured", 96)}`,
+    goal.promotionTargetRef ? `  promotion target: ${shortenMiddle(goal.promotionTargetRef, 96)}` : undefined,
     `  verification: ${goal.branchVerificationStatus ?? "unknown"}`,
     "",
     "Session:",

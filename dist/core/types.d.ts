@@ -152,6 +152,8 @@ export interface GoalSessionMetadata {
     workspaceStatus?: WorkspaceStatus;
     branch?: string;
     ref?: string;
+    /** Target/base branch or ref that an auto-allocated controller branch must promote into before complete. */
+    promotionTargetRef?: string;
     branchVerificationStatus?: BranchVerificationStatus;
     sessionFile?: string;
     sessionName?: string;
@@ -182,6 +184,8 @@ export interface GoalSummary {
     workspaceStatus?: WorkspaceStatus;
     branch?: string;
     ref?: string;
+    /** Target/base branch or ref that an auto-allocated controller branch must promote into before complete. */
+    promotionTargetRef?: string;
     branchVerificationStatus?: BranchVerificationStatus;
     sessionFile?: string;
     sessionName?: string;

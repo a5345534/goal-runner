@@ -102,6 +102,26 @@ export interface NativeGitSubagentBranchIntegratorOptions {
     controllerWorkspacePath: string;
     strategy?: "merge";
 }
+export interface NativeGitControllerBranchPromotionRequest {
+    controllerWorkspacePath: string;
+    controllerBranch?: string;
+    /** Target/base branch or ref that should receive the controller branch before goal completion. */
+    targetRef?: string;
+    strategy?: "merge";
+}
+export type NativeGitControllerBranchPromotionStatus = "complete" | "notRequired" | "blocked";
+export interface NativeGitControllerBranchPromotionResult {
+    status: NativeGitControllerBranchPromotionStatus;
+    summary: string;
+    controllerBranch?: string;
+    controllerHead?: string;
+    targetRef?: string;
+    targetBranch?: string;
+    targetWorkspacePath?: string;
+    targetHead?: string;
+    promotionCommitSha?: string;
+    error?: string;
+}
 export interface NativeGitSubagentCleanupResult {
     subagentId: string;
     nodeId: string;
@@ -119,6 +139,7 @@ export declare class NativeGitWorkspaceManager {
     allocateSubagentWorkspace(request: NativeGitSubagentWorkspaceAllocationRequest): NativeGitSubagentWorkspaceAllocation;
     cleanupWorkspace(request: NativeGitWorkspaceCleanupRequest): void;
     integrateSubagentBranch(request: NativeGitSubagentBranchIntegrationRequest): NativeGitSubagentBranchIntegrationResult;
+    promoteControllerBranch(request: NativeGitControllerBranchPromotionRequest): NativeGitControllerBranchPromotionResult;
     resolveBaseRef(repoRoot: string, overrideBaseRef?: string): string;
     private resolveSubagentBaseRef;
     private resolveWorktreeRoot;

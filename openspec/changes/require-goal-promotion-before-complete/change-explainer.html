@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="openspec-change-explainer" content="1" />
+  <title>require-goal-promotion-before-complete — 變更說明</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #121933;
+      --panel-2: #182244;
+      --text: #edf2ff;
+      --muted: #a9b6d3;
+      --line: #2a396b;
+      --ok: #35d07f;
+      --warn: #ffb020;
+      --info: #63a4ff;
+      --danger: #ff6b81;
+      --accent: #8b7cff;
+      --cyan: #38d9ff;
+      --shadow: 0 22px 54px rgba(0,0,0,.26);
+    }
+    *, *::before, *::after { box-sizing: border-box; min-width: 0; }
+    html, body { margin: 0; max-width: 100%; }
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans TC", sans-serif;
+      background:
+        radial-gradient(circle at top right, rgba(99,164,255,.18), transparent 25%),
+        radial-gradient(circle at top left, rgba(139,124,255,.16), transparent 22%),
+        var(--bg);
+      color: var(--text);
+      line-height: 1.62;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    img, svg, video, canvas, iframe, table, pre { max-width: 100%; }
+    pre { overflow: auto; white-space: pre-wrap; word-break: break-word; }
+    code { background: rgba(255,255,255,.06); padding: 2px 6px; border-radius: 8px; font-size: .95em; }
+    .wrap { width: min(1180px, 100%); margin: 0 auto; padding: 28px 16px 64px; }
+    .hero {
+      background: linear-gradient(135deg, rgba(139,124,255,.18), rgba(56,217,255,.10));
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: clamp(20px, 4vw, 30px);
+      box-shadow: var(--shadow);
+    }
+    .eyebrow, .badge, .kpi-label { letter-spacing: .06em; text-transform: uppercase; font-weight: 800; }
+    .eyebrow {
+      display: inline-flex; align-items: center; gap: 8px; color: #dce7ff; font-size: 12px;
+      border: 1px solid var(--line); background: rgba(255,255,255,.05); border-radius: 999px; padding: 8px 12px;
+    }
+    .title { margin: 16px 0 10px; font-size: clamp(28px, 4vw, 38px); line-height: 1.12; }
+    .subtitle { margin: 0; color: var(--muted); font-size: 16px; max-width: 72ch; }
+    .badge-row, .flow { display: flex; flex-wrap: wrap; gap: 10px; }
+    .badge { border: 1px solid var(--line); background: rgba(255,255,255,.04); color: #dce7ff; padding: 8px 12px; border-radius: 999px; font-size: 12px; }
+    .section { margin-top: 26px; }
+    .section h2 { margin: 0 0 14px; font-size: clamp(22px, 3vw, 28px); line-height: 1.18; }
+    .grid { display: grid; gap: 16px; }
+    .g-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .g-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .card, .box, .node, .step-body, details {
+      background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.02));
+      border: 1px solid var(--line); border-radius: 20px;
+    }
+    .card { padding: 18px; }
+    .card h3 { margin: 0 0 10px; font-size: 18px; line-height: 1.28; }
+    .muted { color: var(--muted); }
+    .compare, .kpi-grid { display: grid; gap: 16px; }
+    .compare { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .stack { display: grid; gap: 10px; }
+    .item { border: 1px solid var(--line); border-radius: 16px; padding: 12px 14px; background: rgba(255,255,255,.03); }
+    .item b { display: block; margin-bottom: 4px; }
+    .flow { align-items: stretch; }
+    .node { flex: 1 1 180px; padding: 16px; text-align: left; }
+    .node strong { display: block; margin-bottom: 6px; }
+    .arrow { display: inline-flex; align-items: center; justify-content: center; color: var(--cyan); font-size: 22px; padding: 0 4px; }
+    .timeline { display: grid; gap: 12px; }
+    .step { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 14px; align-items: start; }
+    .num {
+      width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; font-weight: 900;
+      background: linear-gradient(180deg, var(--accent), var(--info)); box-shadow: 0 14px 26px rgba(99,164,255,.22);
+    }
+    .step-body { padding: 14px 16px; }
+    .step-body h3 { margin: 0 0 8px; }
+    .kpi-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 18px; }
+    .box { padding: 16px; }
+    .kpi-value { font-size: clamp(22px, 3vw, 28px); font-weight: 900; line-height: 1.08; margin-bottom: 6px; }
+    .kpi-label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    ul { margin: 0; padding-left: 20px; }
+    li + li { margin-top: 8px; }
+    details { padding: 12px 14px; }
+    details summary { cursor: pointer; font-weight: 800; }
+    .footer-note { margin-top: 10px; font-size: 13px; color: var(--muted); }
+    @media (max-width: 960px) {
+      .g-2, .g-3, .compare, .kpi-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 720px) {
+      .wrap { padding-left: 14px; padding-right: 14px; }
+      .flow { flex-direction: column; }
+      .arrow { transform: rotate(90deg); }
+      .step { grid-template-columns: 40px minmax(0, 1fr); }
+      .num { width: 40px; height: 40px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <div class="eyebrow">OpenSpec 變更說明</div>
+      <h1 class="title">require-goal-promotion-before-complete</h1>
+      <p class="subtitle">- Redefine native-git DAG completion so `complete` requires promotion of the controller goal branch into the configured target/base branch.</p>
+      <div class="badge-row" style="margin-top:16px">
+        <span class="badge">markdown / spec = SSOT</span>
+        <span class="badge">HTML = companion view</span>
+        <span class="badge">單檔自含</span>
+        <span class="badge">離線可讀</span>
+      </div>
+      <div class="kpi-grid">
+        <div class="box"><div class="kpi-value">1</div><div class="kpi-label">核心問題</div><div class="muted">Current DAG goal completion means all DAG nodes…</div></div>
+        <div class="box"><div class="kpi-value">3</div><div class="kpi-label">受影響面</div><div class="muted">source files + spec deltas</div></div>
+        <div class="box"><div class="kpi-value">draft</div><div class="kpi-label">目前階段</div><div class="muted">derived from current tasks state</div></div>
+        <div class="box"><div class="kpi-value">planned</div><div class="kpi-label">狀態</div><div class="muted">generated from tracked markdown artifacts</div></div>
+      </div>
+    </section>
+
+    <section class="section" id="why">
+      <h2>為什麼要做這個變更</h2>
+      <div class="card">
+        <p>Current DAG goal completion means all DAG nodes completed and subagent branches were integrated into the controller goal branch. It does not guarantee that the controller goal branch was merged back into the target/base branch, nor that controller worktrees/branches were cleaned up.</p>
+      </div>
+    </section>
+
+    <section class="section" id="what-changes">
+      <h2>這次會改什麼</h2>
+      <div class="grid g-3">
+        <div class="card"><h3>Proposal</h3><p class="muted">Redefine native-git DAG completion so `complete` requires promotion of the controller goal branch into the configured target/base branch.</p></div>
+        <div class="card"><h3>Design</h3><p class="muted">Fail closed when the target worktree is dirty or when merge conflicts occur.</p></div>
+        <div class="card"><h3>Tasks / Delivery</h3><p class="muted">Clean completed controller/subagent worktrees and temporary goal branches only after successful promotion.</p></div>
+      </div>
+    </section>
+
+    <section class="section" id="before-after">
+      <h2>變更前 / 變更後</h2>
+      <div class="compare">
+        <div class="card">
+          <h3>變更前</h3>
+          <div class="stack">
+            <div class="item"><b>Current pressure</b><span class="muted">Current DAG goal completion means all DAG nodes completed and subagent branches were integrated into the controller goal branch.</span></div>
+            <div class="item"><b>Current constraint</b><span class="muted">尚未假設任何超出 source files 的隱含需求。</span></div>
+            <div class="item"><b>Current authority boundary</b><span class="muted">HTML explainer 只作為閱讀入口，不是新的 SSOT。</span></div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>變更後</h3>
+          <div class="stack">
+            <div class="item"><b>Planned change</b><span class="muted">Redefine native-git DAG completion so `complete` requires promotion of the controller goal branch into the configured target/base branch.</span></div>
+            <div class="item"><b>Planned impact</b><span class="muted">Fail closed when the target worktree is dirty or when merge conflicts occur.</span></div>
+            <div class="item"><b>Authority retained</b><span class="muted">Clean completed controller/subagent worktrees and temporary goal branches only after successful promotion.</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="flow">
+      <h2>端到端流程</h2>
+      <div class="card">
+        <div class="flow">
+          <div class="node"><strong>Source files</strong><div class="muted">proposal.md / design.md / tasks.md / specs</div></div>
+          <div class="arrow">→</div>
+          <div class="node"><strong>Manifest</strong><div class="muted">source-manifest.json pins the explainer input set</div></div>
+          <div class="arrow">→</div>
+          <div class="node"><strong>Explainer generation</strong><div class="muted">backend=template</div></div>
+          <div class="arrow">→</div>
+          <div class="node"><strong>Validation + archive gate</strong><div class="muted">presentation, manifest freshness, and task readiness checks</div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="affected-surfaces">
+      <h2>受影響模組 / 技術面</h2>
+      <div class="grid g-2">
+        <div class="card">
+          <h3>直接變更</h3>
+          <ul>
+            <li>proposal.md</li>
+            <li>design.md</li>
+            <li>tasks.md</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>相關但不直接修改</h3>
+          <ul>
+            <li>source-manifest.json</li>
+            <li>.openspec.yaml</li>
+            <li>project policy overlay (.openspec-workflow.yaml)</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="scope-boundaries">
+      <h2>範圍邊界</h2>
+      <div class="compare">
+        <div class="card">
+          <h3>納入本次範圍</h3>
+          <ul>
+            <li>Promote controller branch into target branch before marking native-git DAG goals `complete`.</li>
+            <li>Block rather than complete when promotion cannot be performed safely.</li>
+            <li>Remove completed goal worktrees/branches after successful promotion.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>不在本次範圍</h3>
+          <ul>
+            <li>Force-merging dirty target worktrees.</li>
+            <li>Automatically resolving semantic conflicts across divergent submodule contracts.</li>
+            <li>Rerunning a full post-promotion validation suite on the target branch; this remains follow-up work.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="rollout">
+      <h2>上線 / 遷移方式</h2>
+      <div class="timeline">
+        <div class="step"><div class="num">1</div><div class="step-body"><h3>Prepare sources</h3><div class="muted">Add promotion/cleanup primitives to native git workspace utilities.</div></div></div>
+        <div class="step"><div class="num">2</div><div class="step-body"><h3>Generate artifacts</h3><div class="muted">Persist the promotion target ref for auto-allocated Pi controller branches.</div></div></div>
+        <div class="step"><div class="num">3</div><div class="step-body"><h3>Validate before archive</h3><div class="muted">Wire Pi DAG terminal finalization through the promotion gate.</div></div></div>
+      </div>
+    </section>
+
+    <section class="section" id="current-status">
+      <h2>目前狀態</h2>
+      <div class="grid g-2">
+        <div class="card"><h3>Task progress</h3><p class="muted">目前 tasks 狀態：已完成 10、待處理 3、取消 0。</p></div>
+        <div class="card"><h3>Spec coverage</h3><p class="muted">目前尚未偵測到 spec delta；如果這個 change 需要 spec 變更，請補上 specs/ 內容。</p></div>
+      </div>
+      <details style="margin-top:16px">
+        <summary>作者備註 / 後續提醒</summary>
+        <ul>
+          <li>template backend 只會使用目前 change directory 內的 source files；不會自動補寫未聲明需求。</li>
+          <li>若有可用的設計生成引擎，可再切換到 `opendesign` backend。</li>
+          <li>如果這份 HTML 與 markdown/spec 不一致，仍以 markdown/spec 為準。</li>
+        </ul>
+      </details>
+      <div class="footer-note">預設 reader-facing 文案請使用繁體中文，並保持無水平溢出、可直接捲動閱讀的版型。</div>
+    </section>
+  </div>
+</body>
+</html>

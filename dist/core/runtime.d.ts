@@ -40,6 +40,7 @@ export declare class GoalRuntime {
     listGoalSummaries(): Promise<GoalSummary[]>;
     getGoalById(goalId: string): Promise<GoalRecord | undefined>;
     finalizeGoalFromDagTerminalState(goalId: string): Promise<GoalDagTerminalFinalizationResult>;
+    blockGoalFromControllerCloseout(goalId: string, reason: string, details?: Record<string, unknown>): Promise<GoalDagTerminalFinalizationResult>;
     saveGoalDagNode(node: GoalDagNode): Promise<void>;
     getGoalDagNode(goalId: string, nodeId: string): Promise<GoalDagNode | undefined>;
     listGoalDagNodes(goalId: string): Promise<GoalDagNode[]>;

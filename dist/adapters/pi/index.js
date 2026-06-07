@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { GoalRuntime, NativeGitWorkspaceManager, SQLiteGoalStore, cleanupTerminalSubagentWorkspaces, createControllerValidationRunner, createNativeGitSubagentBranchIntegrator, createNativeGitSubagentWorkspaceAllocator, parseGoalCommand, parseGoalDagFileContent, parseGoalModelRoutingConfigJson, parseTokenBudget, renderActiveGoalReminderPrompt, resolveControllerModelArg, resolveDefaultStateRoot, selectModelScenarioForNode, } from "../../core/index.js";
+import { GoalRuntime, NativeGitWorkspaceManager, SQLiteGoalStore, cleanupTerminalSubagentWorkspaces, createControllerValidationRunner, createNativeGitSubagentBranchIntegrator, createNativeGitSubagentWorkspaceAllocator, findRequiredSubagentIntegrationIssues, parseGoalCommand, parseGoalDagFileContent, parseGoalModelRoutingConfigJson, parseTokenBudget, renderActiveGoalReminderPrompt, resolveControllerModelArg, resolveDefaultStateRoot, selectModelScenarioForNode, } from "../../core/index.js";
 import { launchPiRpcBackgroundGoalSession, } from "./background-session.js";
 import { GoalListController } from "./goal-list-ui.js";
 import { GoalMonitorController } from "./monitor-ui.js";
@@ -349,7 +349,7 @@ function allocatePiControllerWorkspace(ctx, objective, baseRef) {
         objective,
         baseRef,
     });
-    return { workspace: allocation.worktreePath, branch: allocation.branch };
+    return { workspace: allocation.worktreePath, branch: allocation.branch, promotionTargetRef: allocation.baseRef };
 }
 async function startGoalOwnedPiSession(runtime, ctx, command, binding, validation, backgroundGoalSessions, options = {}) {
     const originSessionKey = resolveSessionKey(ctx);
@@ -378,6 +378,7 @@ async function startGoalOwnedPiSession(runtime, ctx, command, binding, validatio
             workspaceStatus: validation.workspaceStatus,
             branch: binding.branch,
             ref: binding.ref,
+            promotionTargetRef: binding.promotionTargetRef,
             branchVerificationStatus: validation.branchVerificationStatus,
             sessionFile: background.sessionFile,
             sessionName,
@@ -608,27 +609,69 @@ async function runPiGoalControllerPoll(runtime, ctx, goal, binding) {
     }
 }
 async function finalizeAndCleanupPiGoalIfDagTerminal(runtime, ctx, goalId, binding) {
+    const state = await runtime.getGoalOrchestrationState(goalId);
+    const terminal = assessPiDagTerminalState(state);
+    if (!terminal.terminal)
+        return false;
+    const manager = new NativeGitWorkspaceManager({ fetch: false });
+    if (terminal.allComplete && terminal.integrationIssues.length === 0) {
+        const promotion = promotePiControllerBranchIfRequired(manager, binding);
+        if (!promotion.ok) {
+            await runtime.blockGoalFromControllerCloseout(goalId, promotion.summary, {
+                promotion: promotion.result,
+                targetRef: binding.promotionTargetRef,
+                controllerBranch: binding.branch,
+            });
+            safeNotify(ctx, `Goal ${goalId.slice(0, 8)} blocked during final promotion: ${promotion.summary}`, "warning");
+            stopPiGoalBackgroundResources(goalId);
+            return true;
+        }
+    }
     const finalization = await runtime.finalizeGoalFromDagTerminalState(goalId);
     if (!finalization.terminal)
         return false;
     if (finalization.changed) {
-        const state = await runtime.getGoalOrchestrationState(goalId);
-        const manager = new NativeGitWorkspaceManager({ fetch: false });
-        const cleanup = cleanupTerminalSubagentWorkspaces(manager, state);
-        const cleanupErrors = cleanup.filter((result) => result.action === "error");
-        if (cleanupErrors.length > 0) {
-            safeNotify(ctx, `Goal ${goalId.slice(0, 8)} completed but ${cleanupErrors.length} subagent workspace cleanup(s) failed: ${cleanupErrors.map((item) => item.error ?? item.subagentId).join("; ")}`, "warning");
-        }
-        cleanupPiGoalControllerAdapter(goalId);
-        const handle = backgroundGoalSessions.get(goalId);
-        handle?.stop();
-        backgroundGoalSessions.delete(goalId);
-        const controllerCleanupError = cleanupPiControllerWorkspaceIfSafe(manager, binding);
-        if (controllerCleanupError) {
-            safeNotify(ctx, `Goal ${goalId.slice(0, 8)} completed but controller workspace cleanup failed: ${controllerCleanupError}`, "warning");
+        stopPiGoalBackgroundResources(goalId);
+        if (finalization.status === "complete") {
+            const cleanup = cleanupTerminalSubagentWorkspaces(manager, state);
+            const cleanupErrors = cleanup.filter((result) => result.action === "error");
+            if (cleanupErrors.length > 0) {
+                safeNotify(ctx, `Goal ${goalId.slice(0, 8)} completed but ${cleanupErrors.length} subagent workspace cleanup(s) failed: ${cleanupErrors.map((item) => item.error ?? item.subagentId).join("; ")}`, "warning");
+            }
+            const controllerCleanupError = cleanupPiControllerWorkspaceIfSafe(manager, binding);
+            if (controllerCleanupError) {
+                safeNotify(ctx, `Goal ${goalId.slice(0, 8)} completed but controller workspace cleanup failed: ${controllerCleanupError}`, "warning");
+            }
         }
     }
     return true;
+}
+const TERMINAL_PI_DAG_NODE_STATUSES = new Set(["complete", "blocked", "failed", "superseded"]);
+function assessPiDagTerminalState(state) {
+    if (state.nodes.length === 0)
+        return { terminal: false, allComplete: false, integrationIssues: [] };
+    const terminal = state.nodes.every((node) => TERMINAL_PI_DAG_NODE_STATUSES.has(node.status));
+    const allComplete = state.nodes.every((node) => node.status === "complete" || node.status === "superseded");
+    return { terminal, allComplete, integrationIssues: terminal ? findRequiredSubagentIntegrationIssues(state) : [] };
+}
+function promotePiControllerBranchIfRequired(manager, binding) {
+    if (!isAutoAllocatedPiControllerWorkspace(binding)) {
+        return { ok: true, summary: "promotion not required for explicit controller workspace" };
+    }
+    const result = manager.promoteControllerBranch({
+        controllerWorkspacePath: binding.workspace,
+        controllerBranch: binding.branch,
+        targetRef: binding.promotionTargetRef,
+    });
+    if (result.status === "blocked")
+        return { ok: false, summary: result.summary, result };
+    return { ok: true, summary: result.summary, result };
+}
+function stopPiGoalBackgroundResources(goalId) {
+    cleanupPiGoalControllerAdapter(goalId);
+    const handle = backgroundGoalSessions.get(goalId);
+    handle?.stop();
+    backgroundGoalSessions.delete(goalId);
 }
 function cleanupPiControllerWorkspaceIfSafe(manager, binding) {
     if (!isAutoAllocatedPiControllerWorkspace(binding))
@@ -682,6 +725,7 @@ async function resumePiGoalControllerPollingLoops(runtime, ctx) {
             workspace: summary.executionWorkspace,
             branch: summary.branch,
             ref: summary.ref,
+            promotionTargetRef: summary.promotionTargetRef,
         };
         startPiGoalControllerPollingLoop(runtime, ctx, summary, binding);
         void runPiGoalControllerPoll(runtime, ctx, summary, binding).catch((error) => {
@@ -1083,6 +1127,7 @@ async function resumeTargetGoal(runtime, ctx, goal) {
             workspace: goal.executionWorkspace,
             branch: goal.branch,
             ref: goal.ref,
+            promotionTargetRef: goal.promotionTargetRef,
         };
         const loop = await runtime.runGoalControllerLoop(goal.goalId, buildPiGoalControllerLoopOptions(ctx, goal, binding));
         startPiGoalControllerPollingLoop(runtime, ctx, goal, binding);
@@ -1179,6 +1224,7 @@ async function formatGoalSummaryDetails(runtime, goal) {
         "Workspace:",
         `  path: ${shortenPath(goal.executionWorkspace ?? "legacy session-bound goal")}`,
         `  branch/ref: ${shortenMiddle(goal.branch ?? goal.ref ?? "not configured", 96)}`,
+        goal.promotionTargetRef ? `  promotion target: ${shortenMiddle(goal.promotionTargetRef, 96)}` : undefined,
         `  verification: ${goal.branchVerificationStatus ?? "unknown"}`,
         "",
         "Session:",

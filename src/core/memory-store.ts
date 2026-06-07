@@ -208,6 +208,7 @@ function goalToSummary(goal: GoalRecord, metadata: GoalSessionMetadata | undefin
     workspaceStatus: metadata?.workspaceStatus ?? (metadata ? undefined : "legacy"),
     branch: metadata?.branch,
     ref: metadata?.ref,
+    promotionTargetRef: metadata?.promotionTargetRef,
     branchVerificationStatus: metadata?.branchVerificationStatus,
     sessionFile: metadata?.sessionFile,
     sessionName: metadata?.sessionName,
