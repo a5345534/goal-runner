@@ -1,5 +1,5 @@
 import { nodeRequiresSubagentIntegration, requiredSubagentIntegrationTerminalSuccess } from "./integration.js";
-const SYNCABLE_SUBAGENT_STATUSES = new Set(["sessionStarted", "running", "idle"]);
+const SYNCABLE_SUBAGENT_STATUSES = new Set(["sessionStarted", "running", "idle", "blocked"]);
 const NON_TERMINAL_SUBAGENT_STATUSES = new Set([
     "planned",
     "workspaceCreated",
@@ -103,6 +103,17 @@ function quotaBlockedSummary(errorMessage) {
 }
 function unhandledScenarioBlockedSummary(errorMessage) {
     return `blocked: unhandled subagent error after in-place recovery attempts; add a controller recovery handler or provide developer guidance. Error: ${errorMessage}`;
+}
+function buildBlockedNodeRecoveryPrompt(node, blockedReason, retryCount, maxRetries) {
+    return [
+        `[SYSTEM RECOVERY: BLOCKED_NODE_ACTIVE_GOAL] The parent goal is still active, so the controller is asking you to make one more best-effort attempt to clear this node blocker in the same session.`,
+        `Current blocked reason / validation summary: ${truncateForPrompt(blockedReason, 4000)}`,
+        `Do not discard prior work. Inspect only what is needed to determine whether the blocker is already fixed or can be fixed safely.`,
+        `If the blocker is already resolved or you can resolve it, continue the node objective: "${node.objective}"`,
+        `When done, report exactly: SUBAGENT_RESULT: <summary of changes, verification, and remaining risks>`,
+        `If the blocker truly requires external input or an unavailable state change, report exactly: SUBAGENT_BLOCKED: <specific blocker and needed input/state change>`,
+        `Best-effort blocked-node recovery ${retryCount + 1}/${maxRetries}.`,
+    ].join("\n");
 }
 function buildContextUpgradePrompt(node, oldModel, newModel) {
     return [
@@ -351,6 +362,9 @@ async function reconcileSubagentOutcomes(runtime, goalId, options, result, tickS
         if (!node)
             continue;
         if (subagent.status === "blocked") {
+            const recovered = await tryRecoverBlockedSubagent(runtime, options, state, node, subagent, result, tickStartedAt);
+            if (recovered)
+                continue;
             const blockedNode = withNodePatch(node, { status: "blocked", lastValidationSummary: subagent.selfReportedResult ?? subagent.integrationStatus });
             await runtime.saveGoalDagNode(blockedNode);
             result.blocked.push(blockedNode);
@@ -402,6 +416,49 @@ async function reconcileSubagentOutcomes(runtime, goalId, options, result, tickS
         if (["sessionStarted", "running", "idle"].includes(subagent.status) && node.status !== "running") {
             await runtime.saveGoalDagNode(withNodePatch(node, { status: "running" }));
         }
+    }
+}
+async function tryRecoverBlockedSubagent(runtime, options, state, node, subagent, result, tickStartedAt) {
+    const blockedReason = subagent.selfReportedResult ?? subagent.integrationStatus ?? node.lastValidationSummary ?? "blocked";
+    if (isProviderLimitError(blockedReason))
+        return false;
+    const maxRetries = options.maxAutoRetries ?? MAX_AUTO_RETRIES_DEFAULT;
+    const retryCount = subagent.retryCount ?? 0;
+    if (retryCount >= maxRetries)
+        return false;
+    try {
+        const prompt = buildBlockedNodeRecoveryPrompt(node, blockedReason, retryCount, maxRetries);
+        const followed = await runtime.sendGoalSubagentPrompt(options.adapter, subagent, prompt, {
+            metadata: options.metadata,
+            now: tickStartedAt,
+        });
+        const summary = `active-goal blocked-node recovery ${retryCount + 1}/${maxRetries}: ${blockedReason}`;
+        const runningSubagent = withSubagentPatch(followed, {
+            status: "running",
+            integrationStatus: summary,
+            retryCount: retryCount + 1,
+            lastActivityAt: tickStartedAt,
+            updatedAt: tickStartedAt,
+        });
+        const runningNode = withNodePatch(node, { status: "running", lastValidationSummary: summary, updatedAt: tickStartedAt });
+        await runtime.saveGoalSubagent(runningSubagent);
+        await runtime.saveGoalDagNode(runningNode);
+        result.followups.push(runningSubagent);
+        result.synced.push(runningSubagent);
+        return true;
+    }
+    catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (!isProviderLimitError(errorMessage))
+            throw error;
+        const summary = quotaBlockedSummary(errorMessage);
+        const blockedSubagent = withSubagentPatch(subagent, { status: "blocked", integrationStatus: summary, retryCount, updatedAt: tickStartedAt });
+        const blockedNode = withNodePatch(node, { status: "blocked", lastValidationSummary: summary, updatedAt: tickStartedAt });
+        await runtime.saveGoalSubagent(blockedSubagent);
+        await runtime.saveGoalDagNode(blockedNode);
+        result.blocked.push(blockedNode);
+        result.synced.push(blockedSubagent);
+        return true;
     }
 }
 async function validateOrHold(runtime, options, state, node, subagent, result, tickStartedAt) {

@@ -192,6 +192,87 @@ test("controller blocks repeated identical validator follow-up failures", async 
   assert.deepEqual(saved?.controllerValidationResults, ["tests failed", "tests failed", "tests failed"]);
 });
 
+test("controller re-syncs blocked subagents and accepts late successful results while goal is active", async () => {
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
+  await runtime.saveGoalDagNode({
+    ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode),
+    status: "blocked",
+    updatedAt: now,
+    lastValidationSummary: "missing expected outputs",
+  });
+  await runtime.saveGoalSubagent(subagent({ status: "blocked", selfReportedResult: "missing expected outputs", retryCount: 1 }));
+  const adapter = new FakeSubagentAdapter();
+  adapter.states.set("subagent-1", {
+    status: "selfReportedComplete",
+    selfReportedResult: "fixed expected outputs after the controller follow-up",
+    lastActivityAt: "2026-06-02T00:02:00.000Z",
+  });
+
+  const tick = await runtime.runGoalControllerTick("goal-1", {
+    adapter,
+    validator: () => ({ status: "passed", summary: "controller validation passed" }),
+  });
+
+  assert.equal(adapter.prompts.length, 0);
+  assert.equal(tick.completed.length, 1);
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "complete");
+  const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
+  assert.equal(saved?.status, "complete");
+  assert.equal(saved?.selfReportedResult, "fixed expected outputs after the controller follow-up");
+});
+
+test("controller sends same-session recovery prompts for blocked subagents while the goal remains active", async () => {
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
+  await runtime.saveGoalDagNode({
+    ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode),
+    status: "blocked",
+    updatedAt: now,
+    lastValidationSummary: "missing expected outputs",
+  });
+  await runtime.saveGoalSubagent(subagent({ status: "blocked", selfReportedResult: "missing expected outputs", retryCount: 0 }));
+  const adapter = new FakeSubagentAdapter();
+  adapter.states.set("subagent-1", {
+    status: "blocked",
+    selfReportedResult: "missing expected outputs",
+    lastActivityAt: "2026-06-02T00:01:00.000Z",
+  });
+
+  const tick = await runtime.runGoalControllerTick("goal-1", { adapter, maxAutoRetries: 2 });
+
+  assert.equal(tick.followups.length, 1);
+  assert.equal(adapter.prompts.length, 1);
+  assert.match(adapter.prompts[0]?.prompt ?? "", /BLOCKED_NODE_ACTIVE_GOAL/);
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "running");
+  const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
+  assert.equal(saved?.status, "running");
+  assert.equal(saved?.retryCount, 1);
+  assert.match(saved?.integrationStatus ?? "", /active-goal blocked-node recovery 1\/2/);
+});
+
+test("controller does not prompt blocked subagents for provider quota blockers", async () => {
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
+  await runtime.saveGoalDagNode({
+    ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode),
+    status: "blocked",
+    updatedAt: now,
+    lastValidationSummary: "insufficient_quota: available balance exhausted",
+  });
+  await runtime.saveGoalSubagent(subagent({ status: "blocked", integrationStatus: "insufficient_quota: available balance exhausted", retryCount: 0 }));
+  const adapter = new FakeSubagentAdapter();
+  adapter.states.set("subagent-1", {
+    status: "blocked",
+    error: "insufficient_quota: available balance exhausted",
+    lastActivityAt: "2026-06-02T00:01:00.000Z",
+  });
+
+  const tick = await runtime.runGoalControllerTick("goal-1", { adapter, maxAutoRetries: 2 });
+
+  assert.equal(tick.followups.length, 0);
+  assert.equal(adapter.prompts.length, 0);
+  assert.equal(tick.blocked.length, 1);
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "blocked");
+});
+
 test("controller asks idle subagents with terminal text but missing outcome marker to re-report explicitly", async () => {
   const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
   await runtime.saveGoalDagNode({ ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode), status: "running", updatedAt: now });

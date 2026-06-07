@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "1.0",
+  "changeName": "recover-blocked-subagents-while-goal-active",
+  "generatedAt": "2026-06-07T12:17:29.905553+00:00",
+  "sources": [
+    {
+      "path": "proposal.md",
+      "kind": "proposal",
+      "sha256": "205596a7e40fe7065af615190124f9ecb1d16a6c7b166854f11b34991cea08b7"
+    },
+    {
+      "path": "design.md",
+      "kind": "design",
+      "sha256": "d8e79c4d4e706d18639018f55d25dba7ce388abae7f7484bffd5a783b8f786f5"
+    },
+    {
+      "path": "tasks.md",
+      "kind": "tasks",
+      "sha256": "7a85bb0d5f5210e519e85e972bbb89a5cda6fe408b8bc2b411c074bdb74380cb"
+    }
+  ]
+}
