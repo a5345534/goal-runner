@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "1.0",
+  "changeName": "fix-large-pi-subagent-session-sync",
+  "generatedAt": "2026-06-07T13:09:06.973100+00:00",
+  "sources": [
+    {
+      "path": "proposal.md",
+      "kind": "proposal",
+      "sha256": "1c69cc690dd776a1f69cc792cf74735fbeab8bd785dab25e76d89a9161a4fddf"
+    },
+    {
+      "path": "design.md",
+      "kind": "design",
+      "sha256": "fb25bc986914bc661ff7bc55e929f4ea7cb8eb668484095606397e7265f18e47"
+    },
+    {
+      "path": "tasks.md",
+      "kind": "tasks",
+      "sha256": "f09d77ed430d142deab68c4d6ad02e3f9c1bfae0e4084b47488f09bd65bcfb1c"
+    }
+  ]
+}

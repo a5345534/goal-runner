@@ -176,6 +176,38 @@ test("Pi subagent session inspection maps transcript markers to self-report stat
   }
 });
 
+test("Pi subagent session inspection streams large files and skips runtime state mirrors", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-subagent-large-state-"));
+  const sessionFile = join(dir, "session.jsonl");
+  try {
+    const hugeMirrorPayload = "x".repeat(256 * 1024);
+    const rows = [
+      JSON.stringify({ type: "message", message: { role: "user", content: "start" }, timestamp: "2026-06-02T00:00:00.000Z" }),
+      JSON.stringify({
+        type: "message",
+        message: { role: "assistant", content: [{ type: "text", text: "SUBAGENT_RESULT: large session parsed without loading the whole transcript" }] },
+        timestamp: "2026-06-02T00:00:01.000Z",
+      }),
+      ...Array.from({ length: 24 }, (_, index) => JSON.stringify({
+        type: "custom",
+        customType: "agent-goal-runtime-state",
+        data: { index, payload: hugeMirrorPayload },
+        timestamp: `2026-06-02T00:00:${String(index + 2).padStart(2, "0")}.000Z`,
+      })),
+    ];
+    writeFileSync(sessionFile, rows.join("\n"));
+
+    const state = readPiSubagentSessionState(subagent({ sessionFile }));
+
+    assert.equal(state.status, "selfReportedComplete");
+    assert.equal(state.selfReportedResult, "large session parsed without loading the whole transcript");
+    assert.equal(state.lastActivityAt, "2026-06-02T00:00:01.000Z");
+    assert.deepEqual(state.metadata, { entryCount: 26, messageCount: 2 });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("Pi subagent session inspection asks for follow-up when pre-compaction error is followed by terminal text without marker", () => {
   const state = readPiSubagentSessionState(subagent({ sessionFile: "/session" }), {
     exists: () => true,

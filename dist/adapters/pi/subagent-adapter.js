@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 import { launchPiRpcBackgroundGoalSession, } from "./background-session.js";
 const RESULT_MARKER = /(?:^|\n)\s*SUBAGENT_RESULT\s*:\s*([\s\S]*?)(?=\n\s*SUBAGENT_[A-Z_]+\s*:|$)/i;
 const BLOCKED_MARKER = /(?:^|\n)\s*SUBAGENT_BLOCKED\s*:\s*([\s\S]*?)(?=\n\s*SUBAGENT_[A-Z_]+\s*:|$)/i;
@@ -123,14 +124,13 @@ export function renderPiSubagentInitialPrompt(request) {
 export function readPiSubagentSessionState(subagent, options = {}) {
     const sessionFile = subagent.sessionFile;
     const exists = options.exists ?? existsSync;
-    const readFile = options.readFile ?? ((path) => readFileSync(path, "utf8"));
     if (!sessionFile) {
         return { status: "failed", error: `Pi subagent ${subagent.subagentId} has no sessionFile` };
     }
     if (!exists(sessionFile)) {
         return { status: options.live ? "starting" : "failed", error: `Pi subagent session file not found: ${sessionFile}` };
     }
-    const parsed = parsePiSessionFile(readFile(sessionFile));
+    const parsed = options.readFile ? parsePiSessionFile(options.readFile(sessionFile)) : parsePiSessionFileFromDisk(sessionFile);
     const blocked = extractBlockedMarker(parsed.lastAssistantText);
     if (blocked) {
         return withInspectionMetadata({ status: "blocked", selfReportedResult: blocked, lastActivityAt: parsed.lastActivityAt }, parsed);
@@ -158,47 +158,84 @@ export function readPiSubagentSessionState(subagent, options = {}) {
 }
 function parsePiSessionFile(content) {
     const parsed = { entryCount: 0, messageCount: 0 };
-    for (const rawLine of content.split("\n")) {
-        if (!rawLine.trim())
-            continue;
-        let entry;
-        try {
-            entry = JSON.parse(rawLine);
+    for (const rawLine of content.split("\n"))
+        parsePiSessionLine(rawLine, parsed);
+    return parsed;
+}
+function parsePiSessionFileFromDisk(path) {
+    const parsed = { entryCount: 0, messageCount: 0 };
+    const fd = openSync(path, "r");
+    const decoder = new StringDecoder("utf8");
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    let carry = "";
+    try {
+        while (true) {
+            const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
+            if (bytesRead <= 0)
+                break;
+            carry += decoder.write(buffer.subarray(0, bytesRead));
+            let newlineIndex = carry.indexOf("\n");
+            while (newlineIndex >= 0) {
+                parsePiSessionLine(carry.slice(0, newlineIndex), parsed);
+                carry = carry.slice(newlineIndex + 1);
+                newlineIndex = carry.indexOf("\n");
+            }
         }
-        catch {
-            parsed.lastError = "Malformed Pi session entry";
-            continue;
-        }
-        parsed.entryCount += 1;
-        if (isRuntimeStateMirrorEntry(entry))
-            continue;
-        if (typeof entry.timestamp === "string")
-            parsed.lastActivityAt = entry.timestamp;
-        if (entry.type === "compaction") {
-            // Pi writes compaction entries after context-overflow assistant errors and then
-            // rebuilds/retries the session. Treat a later compaction as recovery evidence
-            // so the pre-compaction error does not remain sticky in runtime polling.
-            parsed.lastError = undefined;
-            parsed.lastMessageRole = "compaction";
-            continue;
-        }
-        if (entry.type !== "message")
-            continue;
-        parsed.messageCount += 1;
-        const message = entry.message;
-        if (!message)
-            continue;
-        if (typeof message.role === "string")
-            parsed.lastMessageRole = message.role;
-        if (message.role === "assistant") {
-            if (message.stopReason === "error" && typeof message.errorMessage === "string")
-                parsed.lastError = message.errorMessage;
-            else
-                parsed.lastError = undefined;
-            parsed.lastAssistantText = textFromContent(message.content) || parsed.lastAssistantText;
-        }
+        carry += decoder.end();
+        if (carry.trim())
+            parsePiSessionLine(carry, parsed);
+    }
+    finally {
+        closeSync(fd);
     }
     return parsed;
+}
+function parsePiSessionLine(rawLine, parsed) {
+    if (!rawLine.trim())
+        return;
+    if (looksLikeRuntimeStateMirrorLine(rawLine)) {
+        parsed.entryCount += 1;
+        return;
+    }
+    let entry;
+    try {
+        entry = JSON.parse(rawLine);
+    }
+    catch {
+        parsed.lastError = "Malformed Pi session entry";
+        return;
+    }
+    parsed.entryCount += 1;
+    if (isRuntimeStateMirrorEntry(entry))
+        return;
+    if (typeof entry.timestamp === "string")
+        parsed.lastActivityAt = entry.timestamp;
+    if (entry.type === "compaction") {
+        // Pi writes compaction entries after context-overflow assistant errors and then
+        // rebuilds/retries the session. Treat a later compaction as recovery evidence
+        // so the pre-compaction error does not remain sticky in runtime polling.
+        parsed.lastError = undefined;
+        parsed.lastMessageRole = "compaction";
+        return;
+    }
+    if (entry.type !== "message")
+        return;
+    parsed.messageCount += 1;
+    const message = entry.message;
+    if (!message)
+        return;
+    if (typeof message.role === "string")
+        parsed.lastMessageRole = message.role;
+    if (message.role === "assistant") {
+        if (message.stopReason === "error" && typeof message.errorMessage === "string")
+            parsed.lastError = message.errorMessage;
+        else
+            parsed.lastError = undefined;
+        parsed.lastAssistantText = textFromContent(message.content) || parsed.lastAssistantText;
+    }
+}
+function looksLikeRuntimeStateMirrorLine(rawLine) {
+    return rawLine.includes('"agent-goal-runtime-state"') && rawLine.includes('"custom"');
 }
 function isRuntimeStateMirrorEntry(entry) {
     return (entry.type === "custom" || entry.type === "custom_message") && entry.customType === "agent-goal-runtime-state";
