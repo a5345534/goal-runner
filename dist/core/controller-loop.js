@@ -12,6 +12,8 @@ const NON_TERMINAL_SUBAGENT_STATUSES = new Set([
 ]);
 const MAX_AUTO_RETRIES_DEFAULT = 2;
 const MAX_VALIDATION_FOLLOWUPS_FOR_SAME_FAILURE = 2;
+const RECOVERY_BLOCKED_LEDGER_COOLDOWN_MS = 5 * 60_000;
+const recoveryBlockedLedgerCooldown = new Map();
 const TRANSIENT_ERROR_PATTERNS = [
     /server_error/i,
     /timeout/i,
@@ -59,6 +61,11 @@ const MISSING_SESSION_ERROR_PATTERNS = [
     /missing .*session/i,
     /session .*missing/i,
 ];
+const TERMINATED_ERROR_PATTERNS = [
+    /^terminated$/i,
+    /assistant error:\s*terminated/i,
+    /\bterminated\b/i,
+];
 const CONTEXT_FALLBACK_MODELS = {
     "openai-codex/gpt-5.3-codex-spark": "deepseek/deepseek-v4-pro",
     "deepseek/deepseek-v4-flash": "deepseek/deepseek-v4-pro",
@@ -69,12 +76,33 @@ const CONTEXT_FALLBACK_MODELS = {
 async function recordControllerEvent(runtime, goalId, event, details = {}, at) {
     if (!runtime.recordControllerEvent)
         return;
+    if (shouldSuppressControllerEvent(goalId, event, details, at))
+        return;
     try {
         await runtime.recordControllerEvent(goalId, { event, ...details }, { at });
     }
     catch {
         // Controller history is diagnostic only; never let ledger writes disrupt orchestration.
     }
+}
+function shouldSuppressControllerEvent(goalId, event, details, at) {
+    if (event !== "recovery.blocked")
+        return false;
+    const key = [goalId, event, details.nodeId, details.subagentId, details.reason].map((item) => String(item ?? "")).join("\u0000");
+    const nowMs = at ? Date.parse(typeof at === "string" ? at : at.toISOString()) : Date.now();
+    const effectiveNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+    const previous = recoveryBlockedLedgerCooldown.get(key);
+    if (previous !== undefined && effectiveNowMs - previous < RECOVERY_BLOCKED_LEDGER_COOLDOWN_MS)
+        return true;
+    recoveryBlockedLedgerCooldown.set(key, effectiveNowMs);
+    if (recoveryBlockedLedgerCooldown.size > 1_000) {
+        const cutoff = effectiveNowMs - RECOVERY_BLOCKED_LEDGER_COOLDOWN_MS;
+        for (const [candidate, timestamp] of recoveryBlockedLedgerCooldown) {
+            if (timestamp < cutoff)
+                recoveryBlockedLedgerCooldown.delete(candidate);
+        }
+    }
+    return false;
 }
 function isTransientError(message) {
     return TRANSIENT_ERROR_PATTERNS.some((pattern) => pattern.test(message));
@@ -87,6 +115,9 @@ function isProviderLimitError(message) {
 }
 function isMissingSessionTerminalError(message) {
     return MISSING_SESSION_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+}
+function isTerminatedSessionError(message) {
+    return TERMINATED_ERROR_PATTERNS.some((pattern) => pattern.test(message));
 }
 function contextFallbackModel(currentModel) {
     if (!currentModel)
@@ -144,10 +175,16 @@ function buildContextUpgradePrompt(node, oldModel, newModel) {
     ].join("\n");
 }
 function buildMissingSessionReplacementPrompt(node, errorMessage, retryCount, maxRetries) {
+    return buildReplacementPrompt(node, errorMessage, retryCount, maxRetries, "STALE_MISSING_SESSION_REPLACEMENT", "The previous background subagent runner stopped before a usable session transcript existed.");
+}
+function buildTerminatedSessionReplacementPrompt(node, errorMessage, retryCount, maxRetries) {
+    return buildReplacementPrompt(node, errorMessage, retryCount, maxRetries, "TERMINATED_SESSION_REPLACEMENT", "The previous background subagent session repeatedly terminated after same-session recovery attempts.");
+}
+function buildReplacementPrompt(node, errorMessage, retryCount, maxRetries, tag, explanation) {
     return [
-        `[SYSTEM RECOVERY: STALE_MISSING_SESSION_REPLACEMENT] The previous background subagent runner stopped before a usable session transcript existed.`,
+        `[SYSTEM RECOVERY: ${tag}] ${explanation}`,
         `Observed condition: ${errorMessage}`,
-        `This is a replacement attempt ${retryCount + 1}/${maxRetries}; there is no prior session transcript to resume.`,
+        `This is a replacement attempt ${retryCount + 1}/${maxRetries}; do not rely on the previous transcript as live context.`,
         `First inspect the current workspace state only as needed (for example git status/diff and relevant files).`,
         `Preserve any useful existing workspace changes, but do not assume unrecorded tool calls completed successfully.`,
         `Then continue the DAG node objective: "${node.objective}"`,
@@ -197,11 +234,32 @@ function truncateForPrompt(value, maxChars) {
     return value.length <= maxChars ? value : `${value.slice(0, maxChars)}\n...[truncated ${value.length - maxChars} chars]`;
 }
 async function startReplacementForMissingSession(runtime, adapter, node, subagent, state, result, options, tickStartedAt, errorMessage) {
+    return startReplacementSubagent(runtime, adapter, node, subagent, state, result, options, tickStartedAt, errorMessage, {
+        mode: "stale-missing-session",
+        prompt: buildMissingSessionReplacementPrompt,
+        blockWhenRetryCountAtMax: true,
+        terminalSummary: (error) => `stale subagent attempt terminalized: ${error}`,
+        replacementSummary: (attempt, maxRetries, previous, error) => `replacement attempt ${attempt}/${maxRetries} for stale missing session ${previous}: ${error}`,
+        blockSummary: (retryCount, maxRetries, error) => `blocked: stale subagent session could not be recovered after ${retryCount}/${maxRetries} replacement attempt(s). Error: ${error}`,
+    });
+}
+async function startReplacementForTerminatedSession(runtime, adapter, node, subagent, state, result, options, tickStartedAt, errorMessage) {
+    return startReplacementSubagent(runtime, adapter, node, subagent, state, result, options, tickStartedAt, errorMessage, {
+        mode: "terminated-session",
+        prompt: buildTerminatedSessionReplacementPrompt,
+        blockWhenRetryCountAtMax: false,
+        terminalSummary: (error) => `terminated subagent attempt replaced after same-session retries were exhausted: ${error}`,
+        replacementSummary: (attempt, maxRetries, previous, error) => `fresh replacement attempt ${attempt}/${maxRetries} after repeated terminated errors in ${previous}: ${error}`,
+        blockSummary: (retryCount, maxRetries, error) => `blocked: terminated subagent session could not be recovered after replacement attempt ${retryCount}/${maxRetries}. Error: ${error}`,
+    });
+}
+async function startReplacementSubagent(runtime, adapter, node, subagent, state, result, options, tickStartedAt, errorMessage, behavior) {
     const maxRetries = options.maxAutoRetries ?? MAX_AUTO_RETRIES_DEFAULT;
+    const maxReplacementAttempts = behavior.blockWhenRetryCountAtMax ? maxRetries : maxRetries + 1;
     const retryCount = subagent.retryCount ?? 0;
     const attempt = retryCount + 1;
-    if (retryCount >= maxRetries) {
-        const summary = `blocked: stale subagent session could not be recovered after ${retryCount}/${maxRetries} replacement attempt(s). Error: ${errorMessage}`;
+    if (retryCount >= maxReplacementAttempts) {
+        const summary = behavior.blockSummary(retryCount, maxReplacementAttempts, errorMessage);
         const blockedSubagent = withSubagentPatch(subagent, { status: "blocked", integrationStatus: summary, retryCount, updatedAt: tickStartedAt });
         const blockedNode = withNodePatch(node, { status: "blocked", lastValidationSummary: summary, updatedAt: tickStartedAt });
         await runtime.saveGoalSubagent(blockedSubagent);
@@ -209,14 +267,14 @@ async function startReplacementForMissingSession(runtime, adapter, node, subagen
         await recordControllerEvent(runtime, subagent.goalId, "recovery.blocked", {
             nodeId: node.nodeId,
             subagentId: subagent.subagentId,
-            mode: "stale-missing-session",
+            mode: behavior.mode,
             reason: summary,
         }, tickStartedAt);
         result.blocked.push(blockedNode);
         result.synced.push(blockedSubagent);
         return true;
     }
-    const terminalSummary = `stale subagent attempt terminalized: ${errorMessage}`;
+    const terminalSummary = behavior.terminalSummary(errorMessage);
     const terminalSubagent = withSubagentPatch(subagent, {
         status: "failed",
         integrationStatus: terminalSummary,
@@ -227,16 +285,17 @@ async function startReplacementForMissingSession(runtime, adapter, node, subagen
     await recordControllerEvent(runtime, subagent.goalId, "recovery.staleSessionTerminalized", {
         nodeId: node.nodeId,
         subagentId: subagent.subagentId,
+        mode: behavior.mode,
         retry: attempt,
-        maxRetries,
+        maxRetries: maxReplacementAttempts,
         reason: errorMessage,
     }, tickStartedAt);
     result.synced.push(terminalSubagent);
     const allocation = subagent.workspacePath || subagent.branch || subagent.ref
         ? undefined
         : await options.workspaceAllocator?.({ goalId: subagent.goalId, node, state, adapterId: adapter.adapterId, tickStartedAt });
-    const replacementPrompt = buildMissingSessionReplacementPrompt(node, errorMessage, retryCount, maxRetries);
-    const replacementSubagentId = `${subagent.subagentId}-retry-${attempt}`;
+    const replacementPrompt = behavior.prompt(node, errorMessage, retryCount, maxReplacementAttempts);
+    const replacementSubagentId = uniqueReplacementSubagentId(state.subagents, subagent.subagentId, attempt);
     const allocatedSubagentId = allocation?.subagentId && allocation.subagentId !== subagent.subagentId ? allocation.subagentId : undefined;
     const startOptions = {
         subagentId: allocatedSubagentId ?? replacementSubagentId,
@@ -249,6 +308,7 @@ async function startReplacementForMissingSession(runtime, adapter, node, subagen
             ...(options.metadata ?? {}),
             ...(allocation?.metadata ?? {}),
             staleReplacementFor: subagent.subagentId,
+            staleReplacementMode: behavior.mode,
             staleReplacementReason: errorMessage,
             staleReplacementAttempt: attempt,
         },
@@ -258,22 +318,23 @@ async function startReplacementForMissingSession(runtime, adapter, node, subagen
     const started = await runtime.startGoalSubagent(adapter, node, startOptions);
     const replacement = withSubagentPatch(started, {
         retryCount: attempt,
-        integrationStatus: `replacement attempt ${attempt}/${maxRetries} for stale missing session ${subagent.subagentId}: ${errorMessage}`,
+        integrationStatus: behavior.replacementSummary(attempt, maxReplacementAttempts, subagent.subagentId, errorMessage),
         lastActivityAt: tickStartedAt,
         updatedAt: tickStartedAt,
     });
     await runtime.saveGoalSubagent(replacement);
     await runtime.saveGoalDagNode(withNodePatch(node, {
         status: "running",
-        lastValidationSummary: `replacement subagent ${replacement.subagentId} started after stale missing session ${subagent.subagentId}`,
+        lastValidationSummary: `replacement subagent ${replacement.subagentId} started after ${behavior.mode} ${subagent.subagentId}`,
         updatedAt: tickStartedAt,
     }));
     await recordControllerEvent(runtime, subagent.goalId, "recovery.replacedStaleSession", {
         nodeId: node.nodeId,
         previousSubagentId: subagent.subagentId,
         subagentId: replacement.subagentId,
+        mode: behavior.mode,
         retry: attempt,
-        maxRetries,
+        maxRetries: maxReplacementAttempts,
         workspacePath: replacement.workspacePath,
         branch: replacement.branch,
         reason: errorMessage,
@@ -281,12 +342,27 @@ async function startReplacementForMissingSession(runtime, adapter, node, subagen
     result.started.push(replacement);
     return true;
 }
+function uniqueReplacementSubagentId(subagents, baseSubagentId, attempt) {
+    const existing = new Set(subagents.map((item) => item.subagentId));
+    const base = `${baseSubagentId}-retry-${attempt}`;
+    if (!existing.has(base))
+        return base;
+    for (let index = 2; index < 100; index += 1) {
+        const candidate = `${base}-${index}`;
+        if (!existing.has(candidate))
+            return candidate;
+    }
+    return `${base}-${Date.now()}`;
+}
 async function tryAutoRecoverFailedNode(runtime, adapter, node, subagent, state, result, options, tickStartedAt, observedError) {
     const errorMessage = observedError ?? subagent.integrationStatus ?? subagent.selfReportedResult ?? "unknown error";
     const maxRetries = options.maxAutoRetries ?? MAX_AUTO_RETRIES_DEFAULT;
     const retryCount = subagent.retryCount ?? 0;
     if (isMissingSessionTerminalError(errorMessage)) {
         return startReplacementForMissingSession(runtime, adapter, node, subagent, state, result, options, tickStartedAt, errorMessage);
+    }
+    if (isTerminatedSessionError(errorMessage) && retryCount >= maxRetries) {
+        return startReplacementForTerminatedSession(runtime, adapter, node, subagent, state, result, options, tickStartedAt, errorMessage);
     }
     if (isProviderLimitError(errorMessage)) {
         const summary = quotaBlockedSummary(errorMessage);

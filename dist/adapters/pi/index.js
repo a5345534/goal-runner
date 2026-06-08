@@ -609,6 +609,7 @@ async function runPiGoalControllerPoll(runtime, ctx, goal, binding) {
             backgroundGoalSessions.delete(goal.goalId);
             return;
         }
+        await reconcilePiBackgroundRunnersBeforePoll(runtime, goal.goalId);
         if (await finalizeAndCleanupPiGoalIfDagTerminal(runtime, ctx, goal.goalId, binding)) {
             stopPiGoalControllerPollingLoop(goal.goalId);
             return;
@@ -625,6 +626,83 @@ async function runPiGoalControllerPoll(runtime, ctx, goal, binding) {
     piGoalControllerPollCount += 1;
     if (piGoalControllerPollCount % LEDGER_PRUNE_INTERVAL_POLLS === 0) {
         void prunePiGoalLedgerIfNeeded(runtime, goal.goalId).catch(() => undefined);
+    }
+}
+async function reconcilePiBackgroundRunnersBeforePoll(runtime, goalId) {
+    const state = await runtime.getGoalOrchestrationState(goalId);
+    const inventory = readPiBackgroundRunnerInventory(goalId, state.subagents);
+    if (inventory.length === 0)
+        return;
+    const subagentsById = new Map(state.subagents.map((subagent) => [subagent.subagentId, subagent]));
+    const terminalRecords = inventory.filter((record) => {
+        const subagent = record.subagentId ? subagentsById.get(record.subagentId) : undefined;
+        return subagent ? isTerminalPiSubagentStatus(subagent.status) : false;
+    });
+    const liveTerminal = terminalRecords.filter((record) => record.runnerAlive || record.childAlive);
+    if (liveTerminal.length > 0) {
+        const stopped = signalPiBackgroundRunners(liveTerminal, "stop");
+        await recordPiControllerEvent(runtime, goalId, "runner.terminalStopped", {
+            matched: stopped.matched,
+            signaled: stopped.signaled,
+            subagents: [...new Set(liveTerminal.map((record) => record.subagentId).filter(Boolean))],
+        });
+    }
+    const duplicateLiveToStop = [];
+    const liveBySubagent = new Map();
+    for (const record of inventory) {
+        if (!record.subagentId || !(record.runnerAlive || record.childAlive))
+            continue;
+        const subagent = subagentsById.get(record.subagentId);
+        if (!subagent || isTerminalPiSubagentStatus(subagent.status))
+            continue;
+        const group = liveBySubagent.get(record.subagentId) ?? [];
+        group.push(record);
+        liveBySubagent.set(record.subagentId, group);
+    }
+    for (const [subagentId, records] of liveBySubagent) {
+        if (records.length <= 1)
+            continue;
+        const newest = newestPiBackgroundRunner(records);
+        duplicateLiveToStop.push(...records.filter((record) => record.runnerDir !== newest.runnerDir));
+        await recordPiControllerEvent(runtime, goalId, "runner.duplicatesDetected", {
+            subagentId,
+            live: records.length,
+            keptRunnerDir: newest.runnerDir,
+        });
+    }
+    if (duplicateLiveToStop.length > 0) {
+        const stopped = signalPiBackgroundRunners(duplicateLiveToStop, "stop");
+        await recordPiControllerEvent(runtime, goalId, "runner.duplicatesStopped", {
+            matched: stopped.matched,
+            signaled: stopped.signaled,
+            subagents: [...new Set(duplicateLiveToStop.map((record) => record.subagentId).filter(Boolean))],
+        });
+    }
+    const archiveCandidates = [...terminalRecords, ...duplicateLiveToStop];
+    if (archiveCandidates.length > 0) {
+        const archived = archivePiBackgroundRunnerDirs(archiveCandidates);
+        if (archived.archived > 0 || archived.skippedLive > 0) {
+            await recordPiControllerEvent(runtime, goalId, "runner.preflightArchived", {
+                matched: archived.matched,
+                archived: archived.archived,
+                skippedLive: archived.skippedLive,
+                archiveDir: archived.archiveDir,
+            });
+        }
+    }
+}
+function isTerminalPiSubagentStatus(status) {
+    return status === "complete" || status === "blocked" || status === "failed";
+}
+function newestPiBackgroundRunner(records) {
+    return records.reduce((newest, record) => runnerDirMtimeMs(record.runnerDir) >= runnerDirMtimeMs(newest.runnerDir) ? record : newest);
+}
+function runnerDirMtimeMs(runnerDir) {
+    try {
+        return fs.statSync(runnerDir).mtimeMs;
+    }
+    catch {
+        return 0;
     }
 }
 async function finalizeAndCleanupPiGoalIfDagTerminal(runtime, ctx, goalId, binding) {

@@ -391,6 +391,66 @@ test("controller blocks stale missing-session replacement after retry budget is 
   assert.match(saved?.integrationStatus ?? "", /stale subagent session could not be recovered/);
 });
 
+test("controller replaces repeated terminated failures after same-session retries are exhausted", async () => {
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", validators: ["npm test"] }]);
+  await runtime.saveGoalDagNode({ ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode), status: "failed", updatedAt: now, lastValidationSummary: "terminated" });
+  await runtime.saveGoalSubagent(subagent({
+    status: "failed",
+    integrationStatus: "terminated",
+    retryCount: 2,
+    workspacePath: "/repo/.worktrees/build",
+    branch: "feat/build",
+  }));
+  const adapter = new FakeSubagentAdapter();
+
+  const tick = await runtime.runGoalControllerTick("goal-1", { adapter, maxAutoRetries: 2 });
+
+  assert.equal(adapter.prompts.length, 0);
+  assert.equal(tick.started.length, 1);
+  assert.equal(adapter.starts.length, 1);
+  assert.equal(adapter.starts[0]?.subagentId, "subagent-1-retry-3");
+  assert.equal(adapter.starts[0]?.cwd, "/repo/.worktrees/build");
+  assert.equal(adapter.starts[0]?.branch, "feat/build");
+  assert.match(adapter.starts[0]?.initialPrompt ?? "", /TERMINATED_SESSION_REPLACEMENT/);
+  assert.match(adapter.starts[0]?.initialPrompt ?? "", /replacement attempt 3\/3/);
+  const stale = await runtime.getGoalSubagent("goal-1", "subagent-1");
+  assert.equal(stale?.status, "failed");
+  assert.equal(stale?.retryCount, 3);
+  assert.match(stale?.integrationStatus ?? "", /terminated subagent attempt replaced/);
+  const replacement = await runtime.getGoalSubagent("goal-1", "subagent-1-retry-3");
+  assert.equal(replacement?.status, "running");
+  assert.equal(replacement?.retryCount, 3);
+  assert.match(replacement?.integrationStatus ?? "", /fresh replacement attempt 3\/3/);
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "running");
+});
+
+test("controller blocks terminated replacement after the extra replacement attempt fails", async () => {
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
+  await runtime.saveGoalDagNode({ ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode), status: "failed", updatedAt: now, lastValidationSummary: "assistant error: terminated" });
+  await runtime.saveGoalSubagent(subagent({
+    status: "failed",
+    subagentId: "subagent-1-retry-3",
+    sessionId: "session-subagent-1-retry-3",
+    integrationStatus: "assistant error: terminated",
+    retryCount: 3,
+    workspacePath: "/repo/.worktrees/build",
+    branch: "feat/build",
+  }));
+  const adapter = new FakeSubagentAdapter();
+
+  const tick = await runtime.runGoalControllerTick("goal-1", { adapter, maxAutoRetries: 2 });
+
+  assert.equal(tick.started.length, 0);
+  assert.equal(adapter.starts.length, 0);
+  assert.equal(adapter.prompts.length, 0);
+  assert.equal(tick.blocked.length, 1);
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "blocked");
+  const saved = await runtime.getGoalSubagent("goal-1", "subagent-1-retry-3");
+  assert.equal(saved?.status, "blocked");
+  assert.equal(saved?.retryCount, 3);
+  assert.match(saved?.integrationStatus ?? "", /terminated subagent session could not be recovered after replacement attempt 3\/3/);
+});
+
 test("controller recovers transient failed subagents in the same session", async () => {
   const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
   await runtime.saveGoalDagNode({ ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode), status: "failed", updatedAt: now, lastValidationSummary: "WebSocket error" });
