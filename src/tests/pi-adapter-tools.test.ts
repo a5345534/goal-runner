@@ -159,6 +159,104 @@ test("Pi orchestrated goal start plans DAG and launches a subagent worktree", as
   }
 });
 
+test("Pi goal clear removes auto-allocated worktrees and branches", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "goal-clear-owned-session-"));
+  const workspace = createGitWorkspace();
+  const previousStateHome = process.env.AGENT_GOAL_STATE_HOME;
+  const previousPollMs = process.env.AGENT_GOAL_PI_CONTROLLER_POLL_MS;
+  process.env.AGENT_GOAL_STATE_HOME = dir;
+  process.env.AGENT_GOAL_PI_CONTROLLER_POLL_MS = "10000";
+  let commandHandler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+  const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
+  const launched: Array<{ cwd: string; sessionId?: string; sessionFile?: string; sessionName: string; modelArg?: string }> = [];
+  setPiBackgroundGoalSessionLauncherForTests(async (request) => {
+    launched.push(request);
+    const index = launched.length;
+    return {
+      sessionFile: request.sessionFile ?? join(dir, `clear-session-${index}.jsonl`),
+      sessionId: request.sessionId ?? `clear-session-${index}`,
+      setSessionName: async () => undefined,
+      sendPrompt: async () => undefined,
+      isAlive: () => true,
+      stop: () => undefined,
+    };
+  });
+  const pi = {
+    registerTool() {},
+    registerCommand(_name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) {
+      commandHandler = options.handler;
+    },
+    on(event: string, handler: (...args: unknown[]) => unknown) {
+      const list = handlers.get(event) ?? [];
+      list.push(handler);
+      handlers.set(event, list);
+    },
+    appendEntry() {},
+    sendMessage() {},
+  };
+  const confirmations: Array<{ title: string; message: string }> = [];
+  const notifications: string[] = [];
+  const controllerCtx = {
+    hasUI: true,
+    cwd: workspace,
+    model: { provider: "test", id: "model" },
+    ui: {
+      notify(message: string) {
+        notifications.push(message);
+      },
+      setStatus() {},
+      setWidget() {},
+      confirm: async (title: string, message: string) => {
+        confirmations.push({ title, message });
+        return true;
+      },
+      editor: async () => undefined,
+      select: async () => undefined,
+      custom: async () => undefined,
+    },
+    sessionManager: {
+      getSessionFile: () => "/controller/session.jsonl",
+      getSessionName: () => "controller",
+    },
+    isIdle: () => true,
+    hasPendingMessages: () => false,
+  };
+
+  try {
+    goalPiExtension(pi as never);
+    assert.ok(commandHandler);
+    await commandHandler?.("Implement auto clear goal", controllerCtx as never);
+
+    assert.ok(launched.length >= 1);
+    const controllerWorktree = launched[0]!.cwd;
+    const controllerBranch = git(controllerWorktree, ["branch", "--show-current"]);
+    const subagentWorktree = launched.find((launch) => launch.cwd !== controllerWorktree)?.cwd;
+    const subagentBranch = subagentWorktree ? git(subagentWorktree, ["branch", "--show-current"]) : undefined;
+    assert.ok(existsSync(controllerWorktree));
+    if (subagentWorktree) assert.ok(existsSync(subagentWorktree));
+
+    await commandHandler?.("clear", controllerCtx as never);
+
+    assert.equal(confirmations.at(-1)?.title, "Clear goal and delete owned resources?");
+    assert.match(confirmations.at(-1)?.message ?? "", /Delete controller worktree:/);
+    assert.equal(existsSync(controllerWorktree), false);
+    if (subagentWorktree) assert.equal(existsSync(subagentWorktree), false);
+    assert.equal(git(workspace, ["branch", "--list", controllerBranch]), "");
+    if (subagentBranch) assert.equal(git(workspace, ["branch", "--list", subagentBranch]), "");
+    assert.match(notifications.at(-1) ?? "", /Goal cleared\. Cleanup complete/);
+
+    for (const handler of handlers.get("session_shutdown") ?? []) await handler({ type: "session_shutdown", reason: "quit" });
+  } finally {
+    setPiBackgroundGoalSessionLauncherForTests();
+    if (previousStateHome === undefined) delete process.env.AGENT_GOAL_STATE_HOME;
+    else process.env.AGENT_GOAL_STATE_HOME = previousStateHome;
+    if (previousPollMs === undefined) delete process.env.AGENT_GOAL_PI_CONTROLLER_POLL_MS;
+    else process.env.AGENT_GOAL_PI_CONTROLLER_POLL_MS = previousPollMs;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("Pi goal start serializes the initial controller tick against recovery polling", async () => {
   const dir = mkdtempSync(join(tmpdir(), "goal-start-race-"));
   const workspace = createGitWorkspace();

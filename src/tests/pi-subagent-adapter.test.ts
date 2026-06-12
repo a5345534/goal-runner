@@ -10,6 +10,7 @@ import {
   type BackgroundGoalSessionHandle,
   type BackgroundGoalSessionLaunchRequest,
 } from "../adapters/pi/index.js";
+import { launchPiRpcBackgroundGoalSession } from "../adapters/pi/background-session.js";
 import type { GoalDagNode, GoalSubagentRecord } from "../core/index.js";
 
 const now = "2026-06-02T00:00:00.000Z";
@@ -69,6 +70,15 @@ function fakeLauncher() {
   };
   return { launcher, launches, prompts, stopped };
 }
+
+test("Pi background session launcher rejects missing workspaces before spawning", async () => {
+  const missing = join(tmpdir(), `agent-goal-runtime-missing-${Date.now()}`);
+
+  await assert.rejects(
+    launchPiRpcBackgroundGoalSession({ cwd: missing, sessionId: "missing-cwd", sessionName: "missing cwd" }),
+    /cwd does not exist/,
+  );
+});
 
 test("Pi harness subagent adapter starts a detached Pi session and sends the initial prompt", async () => {
   const { launcher, launches, prompts } = fakeLauncher();
@@ -139,6 +149,35 @@ test("Pi harness subagent adapter sanitizes truncated session ids for Pi", async
   assert.equal(sessionId.length <= 64, true);
   assert.match(sessionId, /^[a-zA-Z0-9](?:[a-zA-Z0-9_.-]*[a-zA-Z0-9])?$/);
   assert.doesNotMatch(sessionId, /-$/);
+});
+
+test("Pi harness subagent adapter preserves uniqueness for long retry session ids", async () => {
+  const { launcher, launches } = fakeLauncher();
+  const adapter = new PiHarnessSubagentAdapter({ launcher, now: () => new Date(now) });
+  const base = `${"subagent-standardize-attendance-punch-schedule-fallback".repeat(2)}`;
+
+  await adapter.startSession({
+    goalId: "goal-1",
+    node: node(),
+    subagentId: `${base}-retry-1`,
+    cwd: "/repo/.worktrees/attendance",
+    initialPrompt: "initial",
+  });
+  await adapter.startSession({
+    goalId: "goal-1",
+    node: node(),
+    subagentId: `${base}-retry-2`,
+    cwd: "/repo/.worktrees/attendance",
+    initialPrompt: "initial",
+  });
+
+  const first = launches[0]?.sessionId ?? "";
+  const second = launches[1]?.sessionId ?? "";
+  assert.notEqual(first, second);
+  assert.equal(first.length <= 64, true);
+  assert.equal(second.length <= 64, true);
+  assert.match(first, /retry-1$/);
+  assert.match(second, /retry-2$/);
 });
 
 test("Pi harness subagent adapter treats missing session files as starting only while a runner is live", () => {
@@ -412,6 +451,33 @@ test("Pi subagent session inspection asks for follow-up when a live session is s
   assert.equal(state.status, "needsFollowup");
   assert.match(state.error ?? "", /stale-subagent-session/);
   assert.match(state.error ?? "", /role=toolResult/);
+});
+
+test("Pi subagent session inspection leaves recent assistant chatter idle but follows up after 10 minutes", () => {
+  const transcript = [
+    JSON.stringify({ type: "message", message: { role: "user", content: "start" }, timestamp: "2026-06-02T00:00:00.000Z" }),
+    JSON.stringify({ type: "message", message: { role: "assistant", stopReason: "stop", content: [{ type: "thinking", thinking: "Let" }] }, timestamp: "2026-06-02T00:01:00.000Z" }),
+  ].join("\n");
+
+  const recent = readPiSubagentSessionState(subagent({ sessionFile: "/assistant-recent" }), {
+    exists: () => true,
+    now: () => new Date("2026-06-02T00:05:00.000Z"),
+    staleAfterMs: 10 * 60_000,
+    live: true,
+    readFile: () => transcript,
+  });
+  assert.equal(recent.status, "idle");
+
+  const stale = readPiSubagentSessionState(subagent({ sessionFile: "/assistant-stale" }), {
+    exists: () => true,
+    now: () => new Date("2026-06-02T00:12:00.000Z"),
+    staleAfterMs: 10 * 60_000,
+    live: true,
+    readFile: () => transcript,
+  });
+  assert.equal(stale.status, "needsFollowup");
+  assert.match(stale.error ?? "", /unresolved assistant message/);
+  assert.match(stale.error ?? "", /SUBAGENT_RESULT\/SUBAGENT_BLOCKED/);
 });
 
 test("Pi subagent session inspection maps blocked markers and missing sessions", () => {

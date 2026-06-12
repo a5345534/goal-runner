@@ -134,6 +134,29 @@ test("subagent sync clears stale integration errors after a healthy state read",
   assert.equal(synced.integrationStatus, undefined);
 });
 
+test("subagent sync ignores stale blocked-to-failed terminal error replays", async () => {
+  const rawError = "429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Token Plan usage limit reached\"}}";
+  const { adapter } = fakeAdapter({ status: "failed", error: rawError, lastActivityAt: "2026-06-02T00:01:00.000Z" });
+  const blocked: GoalSubagentRecord = {
+    goalId: "goal-1",
+    nodeId: "attendance",
+    subagentId: "subagent-1",
+    harnessAdapterId: "fake-harness",
+    status: "blocked",
+    prompts: ["initial"],
+    integrationStatus: `blocked: provider/model quota or billing limit reached; configure credentials, quota, or a fallback model before continuing. Error: ${rawError}`,
+    lastActivityAt: "2026-06-02T00:01:00.000Z",
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const synced = await syncGoalSubagentState(adapter, blocked, { now: "2026-06-02T00:03:00.000Z" });
+
+  assert.equal(synced, blocked);
+  assert.equal(synced.status, "blocked");
+  assert.equal(synced.integrationStatus, blocked.integrationStatus);
+});
+
 test("runtime persists started and synced subagent records through the adapter contract", async () => {
   const { adapter } = fakeAdapter({ status: "idle", lastActivityAt: "2026-06-02T00:03:00.000Z" });
   const runtime = new GoalRuntime({ store: new MemoryGoalStore(), config: { now: () => new Date(now) } });

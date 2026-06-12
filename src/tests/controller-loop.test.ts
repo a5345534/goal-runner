@@ -84,6 +84,23 @@ test("controller tick starts ready DAG nodes through the subagent adapter", asyn
   assert.equal((await runtime.getGoalSubagent("goal-1", tick.started[0]?.subagentId ?? ""))?.workspacePath, "/repo/.worktrees/build-feature");
 });
 
+test("controller tick blocks ready nodes when workspace allocation fails", async () => {
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
+  const adapter = new FakeSubagentAdapter();
+
+  const tick = await runtime.runGoalControllerTick("goal-1", {
+    adapter,
+    workspaceAllocator: () => {
+      throw new Error("seed workspace is not inside a Git repository");
+    },
+  });
+
+  assert.equal(tick.blocked.length, 1);
+  assert.equal(adapter.starts.length, 0);
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "blocked");
+  assert.match((await runtime.getGoalDagNode("goal-1", "build"))?.lastValidationSummary ?? "", /workspace allocation failed/);
+});
+
 test("controller tick durably records lifecycle phases before adapter start", async () => {
   const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
   const adapter = new FakeSubagentAdapter();
@@ -107,6 +124,117 @@ test("controller tick durably records lifecycle phases before adapter start", as
   ]);
   assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.lifecyclePhase, "runnerActive");
   assert.equal(adapter.starts[0]?.preparedResources?.workspacePath, "/repo/.worktrees/build-feature");
+});
+
+test("controller restarts stale runnerStarting nodes that have prepared resources but no durable subagent", async () => {
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
+  const original = await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode;
+  await runtime.saveGoalDagNode({
+    ...original,
+    status: "running",
+    lifecyclePhase: "runnerStarting",
+    preparedResources: {
+      subagentId: "subagent-1",
+      adapterId: "fake",
+      workspacePath: "/repo/.worktrees/build",
+      branch: "feat/build",
+      createdAt: now,
+      updatedAt: now,
+    },
+    updatedAt: now,
+  });
+  const adapter = new FakeSubagentAdapter();
+
+  const tick = await runtime.runGoalControllerTick("goal-1", {
+    adapter,
+    now: "2026-06-02T00:20:00.000Z",
+  });
+
+  assert.equal(tick.started.length, 1);
+  assert.equal(adapter.starts.length, 1);
+  assert.equal(adapter.starts[0]?.subagentId, "subagent-1");
+  assert.equal(adapter.starts[0]?.cwd, "/repo/.worktrees/build");
+  assert.equal(adapter.starts[0]?.branch, "feat/build");
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.lifecyclePhase, "runnerActive");
+  assert.equal((await runtime.getGoalSubagent("goal-1", "subagent-1"))?.status, "running");
+});
+
+test("controller blocks stale resource-preparation nodes when allocation cannot recover", async () => {
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
+  const original = await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode;
+  await runtime.saveGoalDagNode({
+    ...original,
+    status: "running",
+    lifecyclePhase: "resourcesCreating",
+    updatedAt: now,
+  });
+  const adapter = new FakeSubagentAdapter();
+
+  const tick = await runtime.runGoalControllerTick("goal-1", {
+    adapter,
+    now: "2026-06-02T00:02:00.000Z",
+    workspaceAllocator: () => {
+      throw new Error("controller workspace missing");
+    },
+  });
+
+  assert.equal(tick.blocked.length, 1);
+  assert.equal(adapter.starts.length, 0);
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "blocked");
+  assert.match((await runtime.getGoalDagNode("goal-1", "build"))?.lastValidationSummary ?? "", /recovering stale resourcesCreating state/);
+});
+
+test("controller retries stale resource-preparation allocation blocks after cooldown", async () => {
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
+  const original = await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode;
+  await runtime.saveGoalDagNode({
+    ...original,
+    status: "blocked",
+    lifecyclePhase: "terminal",
+    lastValidationSummary: "workspace allocation failed while recovering stale resourcesCreating state: controller workspace missing",
+    updatedAt: now,
+  });
+  const adapter = new FakeSubagentAdapter();
+
+  const tick = await runtime.runGoalControllerTick("goal-1", {
+    adapter,
+    now: "2026-06-02T00:02:00.000Z",
+    workspaceAllocator: ({ node }) => ({ subagentId: "subagent-1", cwd: `/repo/.worktrees/${node.slug}`, branch: `feat/${node.slug}` }),
+  });
+
+  assert.equal(tick.started.length, 1);
+  assert.equal(adapter.starts[0]?.cwd, "/repo/.worktrees/build-feature");
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.lifecyclePhase, "runnerActive");
+});
+
+test("controller retries stale runnerStarting cwd-missing blocks after cooldown", async () => {
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
+  const original = await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode;
+  await runtime.saveGoalDagNode({
+    ...original,
+    status: "blocked",
+    lifecyclePhase: "terminal",
+    preparedResources: {
+      subagentId: "subagent-1",
+      adapterId: "fake",
+      workspacePath: "/repo/.worktrees/build",
+      branch: "feat/build",
+      createdAt: now,
+      updatedAt: now,
+    },
+    lastValidationSummary: "blocked: unhandled subagent error after in-place recovery attempts; add a controller recovery handler or provide developer guidance. Error: stale runnerStarting restart failed: Background goal session cwd does not exist: /repo/.worktrees/build",
+    updatedAt: now,
+  });
+  const adapter = new FakeSubagentAdapter();
+
+  const tick = await runtime.runGoalControllerTick("goal-1", {
+    adapter,
+    now: "2026-06-02T00:02:00.000Z",
+  });
+
+  assert.equal(tick.started.length, 1);
+  assert.equal(adapter.starts[0]?.subagentId, "subagent-1");
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.lifecyclePhase, "runnerActive");
 });
 
 test("controller tick records durable controller history events when a goal record exists", async () => {
@@ -142,6 +270,56 @@ test("subagent self-report is held for controller validation when no validator i
   assert.equal(tick.completed.length, 0);
   assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "controllerValidating");
   assert.equal((await runtime.getGoalSubagent("goal-1", "subagent-1"))?.status, "controllerValidating");
+});
+
+test("controller revalidates stale controller-validating states and sends validation follow-up", async () => {
+  const staleAt = "2026-06-02T00:00:00.000Z";
+  const tickNow = "2026-06-02T00:16:00.000Z";
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", expectedOutputs: ["dist/app.js"] }]);
+  await runtime.saveGoalDagNode({ ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode), status: "controllerValidating", updatedAt: staleAt });
+  await runtime.saveGoalSubagent(subagent({ status: "controllerValidating", selfReportedResult: "done", updatedAt: staleAt, lastActivityAt: staleAt }));
+  const adapter = new FakeSubagentAdapter();
+
+  const tick = await runtime.runGoalControllerTick("goal-1", {
+    adapter,
+    now: tickNow,
+    staleStateThresholdMs: 15 * 60_000,
+    validator: () => ({ status: "failed", summary: "missing outputs: dist/app.js", followupPrompt: "Create dist/app.js before reporting done." }),
+  });
+
+  assert.equal(tick.validating.length, 1);
+  assert.equal(tick.followups.length, 1);
+  assert.equal(adapter.prompts.length, 1);
+  assert.match(adapter.prompts[0]?.prompt ?? "", /Create dist\/app\.js/);
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "running");
+  assert.equal((await runtime.getGoalSubagent("goal-1", "subagent-1"))?.status, "running");
+});
+
+test("validation follow-up dispatch failures degrade to needs-followup instead of leaving controller-validating", async () => {
+  class FailingPromptAdapter extends FakeSubagentAdapter {
+    override sendPrompt(request: HarnessSubagentPromptRequest): void {
+      super.sendPrompt(request);
+      throw new Error("RPC unavailable");
+    }
+  }
+
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", expectedOutputs: ["dist/app.js"] }]);
+  await runtime.saveGoalDagNode({ ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode), status: "running", updatedAt: now });
+  await runtime.saveGoalSubagent(subagent());
+  const adapter = new FailingPromptAdapter();
+  adapter.states.set("subagent-1", { status: "selfReportedComplete", selfReportedResult: "done", lastActivityAt: "2026-06-02T00:01:00.000Z" });
+
+  const tick = await runtime.runGoalControllerTick("goal-1", {
+    adapter,
+    validator: () => ({ status: "failed", summary: "missing outputs: dist/app.js", followupPrompt: "Create dist/app.js before reporting done." }),
+  });
+
+  assert.equal(tick.followups.length, 1);
+  assert.equal(adapter.prompts.length, 1);
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "needsFollowup");
+  const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
+  assert.equal(saved?.status, "needsFollowup");
+  assert.match(saved?.integrationStatus ?? "", /follow-up dispatch failed: RPC unavailable/);
 });
 
 test("controller validator completion unlocks dependent ready nodes in the same tick", async () => {
@@ -234,7 +412,147 @@ test("controller blocks repeated identical validator follow-up failures", async 
   assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "blocked");
   const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
   assert.equal(saved?.status, "blocked");
+  assert.equal(saved?.retryCount, 2);
   assert.deepEqual(saved?.controllerValidationResults, ["tests failed", "tests failed", "tests failed"]);
+});
+
+test("controller starts a replacement session after validation follow-up cap when resources are reusable", async () => {
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", expectedOutputs: ["dist/app.js"] }]);
+  await runtime.saveGoalDagNode({ ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode), status: "running", updatedAt: now });
+  await runtime.saveGoalSubagent(subagent({
+    workspacePath: "/repo/.worktrees/build",
+    branch: "feat/build",
+    retryCount: 2,
+    controllerValidationResults: ["tests failed", "tests failed"],
+  }));
+  const adapter = new FakeSubagentAdapter();
+  adapter.states.set("subagent-1", { status: "selfReportedComplete", selfReportedResult: "done", lastActivityAt: "2026-06-02T00:01:00.000Z" });
+
+  const tick = await runtime.runGoalControllerTick("goal-1", {
+    adapter,
+    validator: () => ({ status: "failed", summary: "tests failed", followupPrompt: "Fix failing tests" }),
+  });
+
+  assert.equal(tick.blocked.length, 0);
+  assert.equal(tick.followups.length, 0);
+  assert.equal(tick.started.length, 1);
+  assert.equal(adapter.starts.length, 1);
+  assert.equal(adapter.starts[0]?.subagentId, "subagent-1-retry-1");
+  assert.equal(adapter.starts[0]?.cwd, "/repo/.worktrees/build");
+  assert.equal(adapter.starts[0]?.branch, "feat/build");
+  assert.match(adapter.starts[0]?.initialPrompt ?? "", /VALIDATION_FOLLOWUP_CAP_REPLACEMENT/);
+  assert.match(adapter.starts[0]?.initialPrompt ?? "", /dist\/app\.js/);
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "running");
+  assert.equal((await runtime.getGoalSubagent("goal-1", "subagent-1"))?.status, "failed");
+  const replacement = await runtime.getGoalSubagent("goal-1", "subagent-1-retry-1");
+  assert.equal(replacement?.status, "running");
+  assert.equal(replacement?.retryCount, 1);
+});
+
+test("controller restarts interrupted validation-cap replacement attempts", async () => {
+  const cappedSummary = "Controller validation failed: missing outputs: dist/app.js repeated identical controller validation failure (1821 occurrences); automatic same-session follow-ups are capped at 2";
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", expectedOutputs: ["dist/app.js"] }]);
+  await runtime.saveGoalDagNode({
+    ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode),
+    status: "blocked",
+    updatedAt: now,
+    lastValidationSummary: cappedSummary,
+  });
+  await runtime.saveGoalSubagent(subagent({
+    status: "failed",
+    workspacePath: "/repo/.worktrees/build",
+    branch: "feat/build",
+    retryCount: 2,
+    integrationStatus: `stale subagent attempt terminalized: replaced by subagent-1-retry-1: ${cappedSummary}`,
+    lastRecoveryDecision: {
+      action: "restartRunnerSameWorktreeNewSession",
+      reason: cappedSummary,
+      at: now,
+      ruleId: "validation-followup-cap-replacement",
+      retryCount: 1,
+      maxRetries: 2,
+    },
+  }));
+  const adapter = new FakeSubagentAdapter();
+
+  const tick = await runtime.runGoalControllerTick("goal-1", { adapter, maxAutoRetries: 2 });
+
+  assert.equal(tick.started.length, 1);
+  assert.equal(adapter.starts.length, 1);
+  assert.equal(adapter.starts[0]?.subagentId, "subagent-1-retry-1");
+  assert.equal(adapter.starts[0]?.cwd, "/repo/.worktrees/build");
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "running");
+  assert.equal((await runtime.getGoalSubagent("goal-1", "subagent-1-retry-1"))?.status, "running");
+});
+
+test("controller ignores stale self-report replays after validation follow-up cap", async () => {
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
+  await runtime.saveGoalDagNode({ ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode), status: "running", updatedAt: now });
+  await runtime.saveGoalSubagent(subagent({ controllerValidationResults: ["tests failed", "tests failed"] }));
+  const adapter = new FakeSubagentAdapter();
+  adapter.states.set("subagent-1", { status: "selfReportedComplete", selfReportedResult: "done", lastActivityAt: "2026-06-02T00:01:00.000Z" });
+  let validationCalls = 0;
+  const validator = () => {
+    validationCalls += 1;
+    return { status: "failed" as const, summary: "tests failed", followupPrompt: "Fix failing tests" };
+  };
+
+  await runtime.runGoalControllerTick("goal-1", { adapter, validator });
+  const capped = await runtime.getGoalSubagent("goal-1", "subagent-1");
+  assert.equal(capped?.status, "blocked");
+  assert.equal(capped?.retryCount, 2);
+
+  const replay = await runtime.runGoalControllerTick("goal-1", {
+    adapter,
+    validator,
+    now: "2026-06-02T00:03:00.000Z",
+  });
+
+  assert.equal(validationCalls, 1);
+  assert.equal(replay.synced.length, 0);
+  assert.equal(replay.validating.length, 0);
+  assert.equal(replay.followups.length, 0);
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "blocked");
+  const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
+  assert.equal(saved?.status, "blocked");
+  assert.equal(saved?.selfReportedResult, "done");
+  assert.match(saved?.integrationStatus ?? "", /repeated identical controller validation failure/);
+});
+
+test("controller does not bypass persisted validation follow-up caps with generic blocked recovery", async () => {
+  const cappedSummary = "Controller validation failed: missing outputs repeated identical controller validation failure (1437 occurrences); automatic same-session follow-ups are capped at 2";
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
+  await runtime.saveGoalDagNode({
+    ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode),
+    status: "blocked",
+    updatedAt: now,
+    lastValidationSummary: cappedSummary,
+  });
+  await runtime.saveGoalSubagent(subagent({
+    status: "blocked",
+    selfReportedResult: "done",
+    integrationStatus: cappedSummary,
+    lastActivityAt: "2026-06-02T00:01:00.000Z",
+  }));
+  const adapter = new FakeSubagentAdapter();
+  adapter.states.set("subagent-1", { status: "selfReportedComplete", selfReportedResult: "done", lastActivityAt: "2026-06-02T00:01:00.000Z" });
+
+  const tick = await runtime.runGoalControllerTick("goal-1", {
+    adapter,
+    validator: () => {
+      throw new Error("stale self-report should not be revalidated");
+    },
+    now: "2026-06-02T00:03:00.000Z",
+  });
+
+  assert.equal(tick.synced.length, 0);
+  assert.equal(tick.validating.length, 0);
+  assert.equal(tick.followups.length, 0);
+  assert.equal(adapter.prompts.length, 0);
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "blocked");
+  const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
+  assert.equal(saved?.status, "blocked");
+  assert.equal(saved?.integrationStatus, cappedSummary);
 });
 
 test("controller re-syncs blocked subagents and accepts late successful results while goal is active", async () => {
@@ -294,6 +612,50 @@ test("controller sends same-session recovery prompts for blocked subagents while
   assert.match(saved?.integrationStatus ?? "", /active-goal blocked-node recovery 1\/2/);
 });
 
+test("controller retries dirty-controller integration blockers after the controller workspace is clean", async () => {
+  const dirty = "controller workspace has uncommitted changes; cannot integrate safely:\nM projects/frontend/beyourself_frontend";
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", workspaceStrategy: "native-git-worktree" }]);
+  await runtime.saveGoalDagNode({
+    ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode),
+    status: "blocked",
+    lifecyclePhase: "terminal",
+    updatedAt: now,
+    lastValidationSummary: dirty,
+  });
+  await runtime.saveGoalSubagent(subagent({
+    status: "blocked",
+    workspacePath: "/repo/.worktrees/build",
+    branch: "feat/build",
+    commitSha: "abc123",
+    integrationState: "failed",
+    integrationStatus: dirty,
+    integrationError: dirty,
+    controllerValidationResults: ["Controller validation passed (1 signal(s))."],
+    lastActivityAt: now,
+    updatedAt: now,
+  }));
+  const adapter = new FakeSubagentAdapter();
+  adapter.states.set("subagent-1", { status: "blocked", error: dirty, lastActivityAt: now });
+
+  const tick = await runtime.runGoalControllerTick("goal-1", {
+    adapter,
+    now: "2026-06-02T00:02:00.000Z",
+    integrator: () => ({
+      status: "complete",
+      summary: "integrated cleanly after controller workspace cleanup",
+      sourceHead: "abc123",
+      integrationCommitSha: "def456",
+    }),
+  });
+
+  assert.equal(tick.completed.length, 1);
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "complete");
+  const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
+  assert.equal(saved?.status, "complete");
+  assert.equal(saved?.integrationState, "complete");
+  assert.equal(saved?.integrationCommitSha, "def456");
+});
+
 test("controller does not prompt blocked subagents for provider quota blockers", async () => {
   const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
   await runtime.saveGoalDagNode({
@@ -302,7 +664,7 @@ test("controller does not prompt blocked subagents for provider quota blockers",
     updatedAt: now,
     lastValidationSummary: "insufficient_quota: available balance exhausted",
   });
-  await runtime.saveGoalSubagent(subagent({ status: "blocked", integrationStatus: "insufficient_quota: available balance exhausted", retryCount: 0 }));
+  await runtime.saveGoalSubagent(subagent({ status: "blocked", integrationStatus: "insufficient_quota: available balance exhausted", retryCount: 0, lastActivityAt: "2026-06-02T00:01:00.000Z" }));
   const adapter = new FakeSubagentAdapter();
   adapter.states.set("subagent-1", {
     status: "blocked",
@@ -314,7 +676,8 @@ test("controller does not prompt blocked subagents for provider quota blockers",
 
   assert.equal(tick.followups.length, 0);
   assert.equal(adapter.prompts.length, 0);
-  assert.equal(tick.blocked.length, 1);
+  assert.equal(tick.blocked.length, 0);
+  assert.equal(tick.changed, false);
   assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "blocked");
 });
 

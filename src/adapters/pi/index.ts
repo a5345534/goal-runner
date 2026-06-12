@@ -1,5 +1,7 @@
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -655,9 +657,13 @@ function isTransientStoreLockError(error: unknown): boolean {
   return /database is locked|SQLITE_BUSY/i.test(message);
 }
 
+function piGoalControllerPollLeasePath(goalId: string): string {
+  return path.join(resolveDefaultStateRoot(), "controller-poll-leases", `${goalId.replace(/[^a-zA-Z0-9_.-]/g, "_")}.json`);
+}
+
 function acquirePiGoalControllerPollLease(goalId: string): PiGoalControllerPollLease | undefined {
-  const dir = path.join(resolveDefaultStateRoot(), "controller-poll-leases");
-  const leasePath = path.join(dir, `${goalId.replace(/[^a-zA-Z0-9_.-]/g, "_")}.json`);
+  const leasePath = piGoalControllerPollLeasePath(goalId);
+  const dir = path.dirname(leasePath);
   const token = `${process.pid}-${Date.now()}-${randomUUID()}`;
   const ttlMs = readPiGoalControllerLeaseMs();
   const writePayload = () => JSON.stringify({ goalId, token, pid: process.pid, createdAt: Date.now(), expiresAt: Date.now() + ttlMs });
@@ -1426,8 +1432,14 @@ async function runTargetGoalLifecycleCommand(
 ): Promise<void> {
   const goal = await resolveGoalReferenceOrThrow(runtime, reference);
   if (action === "clear") {
-    const ok = await ctx.ui.confirm("Clear goal state?", `${goal.shortGoalId}: ${goal.objectiveSummary}\n\nExecution workspaces are not deleted.`);
+    const preview = await previewPiGoalOwnedResourceCleanup(runtime, goal);
+    const ok = await ctx.ui.confirm("Clear goal and delete owned resources?", renderPiGoalClearConfirmation(goal, preview));
     if (!ok) return;
+    const cleanup = await cleanupPiGoalOwnedResources(runtime, goal, preview);
+    const command = parseGoalCommand(action);
+    const result = await runtime.executeParsedCommand(goal.sessionKey, command, { confirmReplace: true });
+    ctx.ui.notify(`${result.message} ${formatPiGoalClearCleanupResult(cleanup)}`, cleanup.errors.length ? "warning" : "info");
+    return;
   }
   if (action === "resume") {
     await resumeTargetGoal(runtime, ctx, goal);
@@ -1436,6 +1448,343 @@ async function runTargetGoalLifecycleCommand(
   const command = parseGoalCommand(action);
   const result = await runtime.executeParsedCommand(goal.sessionKey, command, { confirmReplace: true });
   ctx.ui.notify(result.message, "info");
+}
+
+interface PiGoalOwnedResourceCleanupPreview {
+  autoAllocatedControllerWorkspace: boolean;
+  repoRoot?: string;
+  controllerWorktree?: string;
+  controllerBranch?: string;
+  subagentWorktrees: Array<{ path: string; branch?: string }>;
+  runnerCount: number;
+  sessionTranscriptCount: number;
+  skipped: string[];
+}
+
+interface PiGoalOwnedResourceCleanupResult {
+  runnersMatched: number;
+  runnersSignaled: number;
+  runnerDirsArchived: number;
+  runnerDirsSkippedLive: number;
+  worktreesRemoved: number;
+  branchesDeleted: number;
+  leasesRemoved: number;
+  sessionTranscriptsDeleted: number;
+  skipped: string[];
+  errors: string[];
+}
+
+async function previewPiGoalOwnedResourceCleanup(runtime: GoalRuntime, goal: GoalSummary): Promise<PiGoalOwnedResourceCleanupPreview> {
+  const state = await runtime.getGoalOrchestrationState(goal.goalId);
+  const binding = goal.executionWorkspace
+    ? {
+        workspace: goal.executionWorkspace,
+        branch: goal.branch,
+        ref: goal.ref,
+        promotionTargetRef: goal.promotionTargetRef,
+      }
+    : undefined;
+  const autoAllocatedControllerWorkspace = binding ? isAutoAllocatedPiControllerWorkspace(binding) : false;
+  const repoRoot = autoAllocatedControllerWorkspace ? inferRepoRootFromAutoWorktree(goal.executionWorkspace) : undefined;
+  const skipped: string[] = [];
+  const subagentWorktrees: Array<{ path: string; branch?: string }> = [];
+  const seenWorktrees = new Set<string>();
+
+  if (!autoAllocatedControllerWorkspace && goal.executionWorkspace) {
+    skipped.push(`explicit execution workspace preserved: ${goal.executionWorkspace}`);
+  }
+
+  if (autoAllocatedControllerWorkspace && goal.executionWorkspace) {
+    for (const candidate of ownedSubagentWorkspaceCandidates(state, goal.executionWorkspace)) {
+      const normalized = path.resolve(candidate.path);
+      if (seenWorktrees.has(normalized)) continue;
+      seenWorktrees.add(normalized);
+      subagentWorktrees.push({ path: normalized, branch: candidate.branch });
+    }
+  } else if (state.subagents.some((subagent) => subagent.workspacePath)) {
+    skipped.push("subagent worktrees preserved because the controller workspace is not auto-allocated");
+  }
+
+  const runners = readPiBackgroundRunnerInventory(goal.goalId, state.subagents);
+  const sessionTranscriptCount = autoAllocatedControllerWorkspace ? uniqueGoalSessionTranscriptPaths(goal, state.subagents).length : 0;
+  if (!autoAllocatedControllerWorkspace && uniqueGoalSessionTranscriptPaths(goal, state.subagents).length > 0) {
+    skipped.push("session transcripts preserved because the controller workspace is not auto-allocated");
+  }
+  return {
+    autoAllocatedControllerWorkspace,
+    repoRoot,
+    controllerWorktree: autoAllocatedControllerWorkspace ? goal.executionWorkspace : undefined,
+    controllerBranch: autoAllocatedControllerWorkspace && isOwnedControllerBranch(goal.branch) ? goal.branch : undefined,
+    subagentWorktrees,
+    runnerCount: runners.length,
+    sessionTranscriptCount,
+    skipped,
+  };
+}
+
+function renderPiGoalClearConfirmation(goal: GoalSummary, preview: PiGoalOwnedResourceCleanupPreview): string {
+  const lines = [
+    `${goal.shortGoalId}: ${goal.objectiveSummary}`,
+    "",
+    "This clears runtime goal state and deletes resources that were auto-allocated for this goal.",
+    preview.controllerWorktree ? `Delete controller worktree: ${preview.controllerWorktree}` : undefined,
+    preview.controllerBranch ? `Delete controller branch: ${preview.controllerBranch}` : undefined,
+    preview.subagentWorktrees.length ? `Delete subagent worktrees/branches: ${preview.subagentWorktrees.length}` : undefined,
+    preview.runnerCount ? `Stop/archive background runner temp dirs: ${preview.runnerCount}` : undefined,
+    preview.sessionTranscriptCount ? `Delete goal-owned session transcript(s): ${preview.sessionTranscriptCount}` : undefined,
+    preview.skipped.length ? `Preserved: ${preview.skipped.join("; ")}` : undefined,
+    "",
+    "Remote branches/PRs and user-provided workspaces are not deleted.",
+  ];
+  return lines.filter((line): line is string => Boolean(line)).join("\n");
+}
+
+async function cleanupPiGoalOwnedResources(
+  runtime: GoalRuntime,
+  goal: GoalSummary,
+  preview: PiGoalOwnedResourceCleanupPreview,
+): Promise<PiGoalOwnedResourceCleanupResult> {
+  stopPiGoalBackgroundResources(goal.goalId);
+  stopPiGoalControllerPollingLoop(goal.goalId);
+
+  const state = await runtime.getGoalOrchestrationState(goal.goalId);
+  const result: PiGoalOwnedResourceCleanupResult = {
+    runnersMatched: 0,
+    runnersSignaled: 0,
+    runnerDirsArchived: 0,
+    runnerDirsSkippedLive: 0,
+    worktreesRemoved: 0,
+    branchesDeleted: 0,
+    leasesRemoved: 0,
+    sessionTranscriptsDeleted: 0,
+    skipped: [...preview.skipped],
+    errors: [],
+  };
+
+  const runners = readPiBackgroundRunnerInventory(goal.goalId, state.subagents);
+  const stopped = signalPiBackgroundRunners(runners, "stop");
+  const archived = archivePiBackgroundRunnerDirs(runners);
+  result.runnersMatched = runners.length;
+  result.runnersSignaled = stopped.signaled;
+  result.runnerDirsArchived = archived.archived;
+  result.runnerDirsSkippedLive = archived.skippedLive;
+  result.errors.push(...stopped.messages.filter(isFailureMessage), ...archived.messages.filter(isFailureMessage));
+
+  const repoRoot = preview.repoRoot;
+  if (repoRoot) {
+    for (const worktree of preview.subagentWorktrees) {
+      const cleanup = cleanupOwnedGitWorktreeAndBranch(repoRoot, worktree.path, worktree.branch, {
+        allowRemovePath: (candidate) => isPathInside(candidate, preview.controllerWorktree ? path.join(preview.controllerWorktree, ".worktrees") : ""),
+        allowDeleteBranch: isOwnedSubagentBranch,
+      });
+      result.worktreesRemoved += cleanup.worktreeRemoved ? 1 : 0;
+      result.branchesDeleted += cleanup.branchDeleted ? 1 : 0;
+      result.skipped.push(...cleanup.skipped);
+      result.errors.push(...cleanup.errors);
+    }
+
+    if (preview.controllerWorktree || preview.controllerBranch) {
+      const cleanup = cleanupOwnedGitWorktreeAndBranch(repoRoot, preview.controllerWorktree, preview.controllerBranch, {
+        allowRemovePath: (candidate) => Boolean(preview.controllerWorktree) && path.resolve(candidate) === path.resolve(preview.controllerWorktree ?? ""),
+        allowDeleteBranch: isOwnedControllerBranch,
+      });
+      result.worktreesRemoved += cleanup.worktreeRemoved ? 1 : 0;
+      result.branchesDeleted += cleanup.branchDeleted ? 1 : 0;
+      result.skipped.push(...cleanup.skipped);
+      result.errors.push(...cleanup.errors);
+    }
+  } else if (preview.autoAllocatedControllerWorkspace) {
+    result.errors.push(`cannot infer repository root for auto-allocated workspace ${preview.controllerWorktree ?? "(unknown)"}`);
+  }
+
+  const leasePath = piGoalControllerPollLeasePath(goal.goalId);
+  try {
+    if (fs.existsSync(leasePath)) {
+      fs.rmSync(leasePath, { force: true });
+      result.leasesRemoved += 1;
+    }
+  } catch (error) {
+    result.errors.push(`failed to remove poll lease ${leasePath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  if (preview.autoAllocatedControllerWorkspace) {
+    for (const transcriptPath of uniqueGoalSessionTranscriptPaths(goal, state.subagents)) {
+      const cleanup = cleanupOwnedGoalSessionTranscript(transcriptPath);
+      result.sessionTranscriptsDeleted += cleanup.deleted ? 1 : 0;
+      result.skipped.push(...cleanup.skipped);
+      result.errors.push(...cleanup.errors);
+    }
+  }
+
+  await runtime.recordControllerEvent(goal.goalId, {
+    event: "goal.clearCleanup",
+    ...result,
+    controllerWorktree: preview.controllerWorktree,
+    controllerBranch: preview.controllerBranch,
+  });
+  return result;
+}
+
+function formatPiGoalClearCleanupResult(result: PiGoalOwnedResourceCleanupResult): string {
+  const details = [
+    `worktrees removed ${result.worktreesRemoved}`,
+    `branches deleted ${result.branchesDeleted}`,
+    `runners signaled ${result.runnersSignaled}/${result.runnersMatched}`,
+    `runner dirs archived ${result.runnerDirsArchived}`,
+    result.runnerDirsSkippedLive ? `runner dirs still live ${result.runnerDirsSkippedLive}` : undefined,
+    result.sessionTranscriptsDeleted ? `session transcripts deleted ${result.sessionTranscriptsDeleted}` : undefined,
+    result.errors.length ? `${result.errors.length} cleanup error(s)` : undefined,
+  ].filter(Boolean).join("; ");
+  return `Cleanup complete (${details}).`;
+}
+
+interface OwnedGitCleanupResult {
+  worktreeRemoved: boolean;
+  branchDeleted: boolean;
+  skipped: string[];
+  errors: string[];
+}
+
+function ownedSubagentWorkspaceCandidates(state: GoalOrchestrationState, controllerWorkspace: string): Array<{ path: string; branch?: string }> {
+  const root = path.join(controllerWorkspace, ".worktrees");
+  const candidates: Array<{ path: string; branch?: string }> = [];
+  const push = (workspacePath: string | undefined, branch: string | undefined): void => {
+    if (!workspacePath || !isPathInside(workspacePath, root)) return;
+    candidates.push({ path: workspacePath, branch });
+  };
+  for (const subagent of state.subagents) push(subagent.workspacePath, subagent.branch);
+  for (const node of state.nodes) {
+    push(node.preparedResources?.workspacePath, node.preparedResources?.branch);
+    const native = nativeGitWorkspaceMetadata(node.preparedResources?.metadata);
+    push(native?.worktreePath, native?.branch);
+  }
+  return candidates;
+}
+
+function nativeGitWorkspaceMetadata(metadata: Record<string, unknown> | undefined): { worktreePath?: string; branch?: string } | undefined {
+  const value = metadata?.nativeGitWorkspace;
+  if (typeof value !== "object" || value === null) return undefined;
+  const candidate = value as { worktreePath?: unknown; branch?: unknown };
+  return {
+    worktreePath: typeof candidate.worktreePath === "string" ? candidate.worktreePath : undefined,
+    branch: typeof candidate.branch === "string" ? candidate.branch : undefined,
+  };
+}
+
+function cleanupOwnedGitWorktreeAndBranch(
+  repoRoot: string,
+  worktreePath: string | undefined,
+  branch: string | undefined,
+  policy: { allowRemovePath: (worktreePath: string) => boolean; allowDeleteBranch: (branch: string) => boolean },
+): OwnedGitCleanupResult {
+  const result: OwnedGitCleanupResult = { worktreeRemoved: false, branchDeleted: false, skipped: [], errors: [] };
+  if (!fs.existsSync(repoRoot)) {
+    result.errors.push(`repository root does not exist: ${repoRoot}`);
+    return result;
+  }
+
+  if (worktreePath) {
+    const resolvedWorktree = path.resolve(worktreePath);
+    if (!policy.allowRemovePath(resolvedWorktree)) {
+      result.skipped.push(`worktree path is outside owned goal area: ${resolvedWorktree}`);
+    } else {
+      const existedOnDisk = fs.existsSync(resolvedWorktree);
+      const removed = runGitForGoalClear(repoRoot, ["worktree", "remove", "--force", resolvedWorktree]);
+      if (removed.ok) result.worktreeRemoved = true;
+      else if (existedOnDisk) {
+        result.errors.push(`git worktree remove failed for ${resolvedWorktree}: ${removed.error}`);
+        try {
+          fs.rmSync(resolvedWorktree, { recursive: true, force: true });
+          runGitForGoalClear(repoRoot, ["worktree", "prune"]);
+          result.worktreeRemoved = true;
+        } catch (error) {
+          result.errors.push(`failed to remove worktree path ${resolvedWorktree}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      } else {
+        runGitForGoalClear(repoRoot, ["worktree", "prune"]);
+      }
+    }
+  }
+
+  if (branch) {
+    if (!policy.allowDeleteBranch(branch)) result.skipped.push(`branch is not considered goal-owned: ${branch}`);
+    else if (gitLocalBranchExists(repoRoot, branch)) {
+      const deleted = runGitForGoalClear(repoRoot, ["branch", "-D", branch]);
+      if (deleted.ok) result.branchDeleted = true;
+      else result.errors.push(`failed to delete branch ${branch}: ${deleted.error}`);
+    }
+  }
+
+  return result;
+}
+
+function runGitForGoalClear(repoRoot: string, args: string[]): { ok: true; output: string } | { ok: false; error: string } {
+  try {
+    return { ok: true, output: execFileSync("git", args, { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim() };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function gitLocalBranchExists(repoRoot: string, branch: string): boolean {
+  return runGitForGoalClear(repoRoot, ["rev-parse", "--verify", `refs/heads/${branch}`]).ok;
+}
+
+function inferRepoRootFromAutoWorktree(worktreePath: string | undefined): string | undefined {
+  if (!worktreePath) return undefined;
+  const resolved = path.resolve(worktreePath);
+  const marker = `${path.sep}.worktrees${path.sep}`;
+  const index = resolved.lastIndexOf(marker);
+  if (index >= 0) return resolved.slice(0, index);
+  const parent = path.dirname(resolved);
+  if (path.basename(parent) === ".worktrees") return path.dirname(parent);
+  return undefined;
+}
+
+function isOwnedControllerBranch(branch: string | undefined): branch is string {
+  return typeof branch === "string" && /^goal\/goal-[A-Za-z0-9._-]+$/.test(branch);
+}
+
+function isOwnedSubagentBranch(branch: string | undefined): branch is string {
+  return typeof branch === "string" && !isProtectedLocalBranch(branch) && /^(goal|feat|fix|chore|docs|test|refactor|subagent)\//.test(branch);
+}
+
+function isProtectedLocalBranch(branch: string): boolean {
+  return ["main", "master", "develop", "development", "trunk", "release"].includes(branch);
+}
+
+function uniqueGoalSessionTranscriptPaths(goal: GoalSummary, subagents: GoalSubagentRecord[]): string[] {
+  const paths = new Set<string>();
+  if (goal.sessionFile) paths.add(path.resolve(goal.sessionFile));
+  for (const subagent of subagents) {
+    if (subagent.sessionFile) paths.add(path.resolve(subagent.sessionFile));
+  }
+  return [...paths];
+}
+
+function cleanupOwnedGoalSessionTranscript(transcriptPath: string): { deleted: boolean; skipped: string[]; errors: string[] } {
+  const resolved = path.resolve(transcriptPath);
+  const sessionRoot = path.join(os.homedir(), ".pi", "agent", "sessions");
+  if (!isPathInside(resolved, sessionRoot)) {
+    return { deleted: false, skipped: [`session transcript preserved outside Pi session root: ${resolved}`], errors: [] };
+  }
+  try {
+    if (!fs.existsSync(resolved)) return { deleted: false, skipped: [], errors: [] };
+    fs.rmSync(resolved, { force: true });
+    return { deleted: true, skipped: [], errors: [] };
+  } catch (error) {
+    return { deleted: false, skipped: [], errors: [`failed to delete session transcript ${resolved}: ${error instanceof Error ? error.message : String(error)}`] };
+  }
+}
+
+function isPathInside(candidatePath: string, parentPath: string): boolean {
+  if (!parentPath) return false;
+  const relative = path.relative(path.resolve(parentPath), path.resolve(candidatePath));
+  return relative.length > 0 && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+function isFailureMessage(message: string): boolean {
+  return /^failed\b/i.test(message);
 }
 
 async function resumeTargetGoal(runtime: GoalRuntime, ctx: ExtensionCommandContext, goal: GoalSummary): Promise<void> {

@@ -286,9 +286,9 @@ export class NativeGitWorkspaceManager {
     }
     resolveBaseRef(repoRoot, overrideBaseRef) {
         if (overrideBaseRef?.trim())
-            return overrideBaseRef.trim();
+            return resolveExplicitBaseRef(repoRoot, overrideBaseRef.trim());
         if (this.options.defaultBaseRef?.trim())
-            return this.options.defaultBaseRef.trim();
+            return resolveExplicitBaseRef(repoRoot, this.options.defaultBaseRef.trim());
         const remoteHead = safeGit(repoRoot, ["symbolic-ref", "--quiet", "--short", `refs/remotes/${this.options.remote}/HEAD`]);
         if (remoteHead)
             return remoteHead;
@@ -302,7 +302,7 @@ export class NativeGitWorkspaceManager {
     }
     resolveSubagentBaseRef(repoRoot, request) {
         if (request.baseRef?.trim())
-            return request.baseRef.trim();
+            return resolveExplicitBaseRef(repoRoot, request.baseRef.trim());
         if (request.controllerWorkspacePath?.trim()) {
             const controllerBranch = safeGit(request.controllerWorkspacePath, ["branch", "--show-current"]);
             if (controllerBranch)
@@ -686,6 +686,11 @@ function sanitizeFallback(value) {
 }
 function gitRefExists(repoRoot, ref) {
     return safeGit(repoRoot, ["show-ref", "--verify", `refs/heads/${ref}`]).length > 0;
+}
+function resolveExplicitBaseRef(repoRoot, ref) {
+    if (safeGit(repoRoot, ["rev-parse", "--verify", `${ref}^{commit}`]))
+        return ref;
+    throw new Error(`cannot resolve goal workspace base ref: ${ref} is not a commit-ish ref in ${repoRoot}. Fetch or create the branch/ref, or choose an existing base ref.`);
 }
 function git(cwd, args) {
     return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();

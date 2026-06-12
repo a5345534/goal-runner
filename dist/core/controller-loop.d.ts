@@ -96,6 +96,8 @@ export interface GoalControllerTickOptions {
     maxStartsPerTick?: number;
     /** Maximum auto-retry attempts for transient subagent failures (default 2). */
     maxAutoRetries?: number;
+    /** Non-terminal controller/node state age that triggers stale-state intervention (default 10 minutes). */
+    staleStateThresholdMs?: number;
     systemPrompt?: string;
     metadata?: Record<string, unknown>;
     now?: Date | string | (() => Date | string);

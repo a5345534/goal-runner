@@ -41,6 +41,17 @@ test("native git manager auto-allocates a controller worktree and branch", () =>
         rmSync(repo, { recursive: true, force: true });
     }
 });
+test("native git manager rejects missing explicit controller base refs before worktree add", () => {
+    const repo = createRepo();
+    try {
+        const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "feat/missing", fetch: false });
+        assert.throws(() => manager.allocateControllerWorkspace({ invocationCwd: repo, goalId: "goal-missing-base", objective: "Implement missing base" }), /cannot resolve goal workspace base ref: feat\/missing is not a commit-ish ref/);
+        assert.equal(git(repo, ["worktree", "list", "--porcelain"]).includes("goal-missing-base"), false);
+    }
+    finally {
+        rmSync(repo, { recursive: true, force: true });
+    }
+});
 test("native git manager resolves slug collisions without reusing branches", () => {
     const repo = createRepo();
     try {

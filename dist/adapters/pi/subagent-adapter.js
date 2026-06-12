@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { closeSync, existsSync, openSync, readSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { launchPiRpcBackgroundGoalSession, } from "./background-session.js";
@@ -258,11 +259,20 @@ function launchRequestForStart(request, modelArg) {
     };
 }
 function piSessionId(subagentId) {
-    const normalized = `subagent-${subagentId}`
+    const normalized = normalizePiSessionId(`subagent-${subagentId}`);
+    if (normalized.length <= 64)
+        return normalized || "subagent";
+    const hash = createHash("sha256").update(normalized).digest("hex").slice(0, 10);
+    const tail = normalizePiSessionId(normalized.slice(-20)) || hash;
+    const prefixLength = Math.max(1, 64 - hash.length - tail.length - 2);
+    const prefix = normalizePiSessionId(normalized.slice(0, prefixLength)) || "subagent";
+    return normalizePiSessionId(`${prefix}-${hash}-${tail}`).slice(0, 64).replace(/[^a-zA-Z0-9]+$/g, "") || `subagent-${hash}`;
+}
+function normalizePiSessionId(value) {
+    return value
         .replace(/[^a-zA-Z0-9_-]/g, "-")
         .replace(/-{2,}/g, "-")
         .replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, "");
-    return normalized.slice(0, 64).replace(/[^a-zA-Z0-9]+$/g, "") || "subagent";
 }
 function sessionNameForSubagent(subagent) {
     return `subagent ${subagent.subagentId}: ${subagent.nodeId}`;
@@ -317,7 +327,7 @@ function isContextOverflowError(message) {
 }
 function staleUnresolvedSessionReason(parsed, options) {
     const role = parsed.lastMessageRole;
-    if (!role || role === "assistant")
+    if (!role)
         return undefined;
     const lastActivity = parsed.lastActivityAt;
     if (options.live === false)
@@ -332,6 +342,9 @@ function staleUnresolvedSessionReason(parsed, options) {
     if (nowMs - lastMs < staleAfterMs)
         return undefined;
     const ageSeconds = Math.max(0, Math.floor((nowMs - lastMs) / 1000));
+    if (role === "assistant") {
+        return `stale-subagent-session: unresolved assistant message without SUBAGENT_RESULT/SUBAGENT_BLOCKED for ${ageSeconds}s at ${lastActivity}`;
+    }
     return `stale-subagent-session: no transcript activity for ${ageSeconds}s after last message role=${role} at ${lastActivity}`;
 }
 function cleanupMarkerText(value) {

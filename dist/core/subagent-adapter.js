@@ -47,13 +47,16 @@ export async function sendGoalSubagentPrompt(adapter, subagent, prompt, options 
 export async function syncGoalSubagentState(adapter, subagent, options = {}) {
     const state = await adapter.getSessionState({ subagent, metadata: options.metadata });
     const now = toIso(options.now ?? new Date());
+    const nextStatus = mapHarnessStatusToSubagentStatus(state.status);
+    if (isStaleBlockedOutcomeReplay(subagent, state, nextStatus))
+        return subagent;
     const observation = adapterObservationFromHarnessState(adapter.adapterId, state, { at: now });
     const controllerValidationResults = state.validationSignals?.length
         ? [...(subagent.controllerValidationResults ?? []), ...state.validationSignals]
         : subagent.controllerValidationResults;
     return {
         ...subagent,
-        status: mapHarnessStatusToSubagentStatus(state.status),
+        status: nextStatus,
         lastActivityAt: state.lastActivityAt ?? now,
         selfReportedResult: state.selfReportedResult ?? subagent.selfReportedResult,
         controllerValidationResults,
@@ -61,6 +64,37 @@ export async function syncGoalSubagentState(adapter, subagent, options = {}) {
         lastAdapterObservation: observation,
         updatedAt: now,
     };
+}
+function isStaleBlockedOutcomeReplay(subagent, state, nextStatus) {
+    if (subagent.status !== "blocked")
+        return false;
+    if (nextStatus !== "selfReportedComplete" && nextStatus !== "blocked" && nextStatus !== "failed")
+        return false;
+    if (hasNewerActivity(state.lastActivityAt, subagent.lastActivityAt))
+        return false;
+    const sameSelfReport = equivalentOptionalText(state.selfReportedResult, subagent.selfReportedResult);
+    const sameError = equivalentOptionalText(state.error, subagent.integrationStatus) || equivalentOptionalText(state.error, subagent.selfReportedResult);
+    return sameSelfReport && sameError;
+}
+function equivalentOptionalText(incoming, current) {
+    if (!incoming)
+        return true;
+    if (!current)
+        return false;
+    return incoming === current || current.includes(incoming) || incoming.includes(current);
+}
+function hasNewerActivity(incoming, current) {
+    if (!incoming)
+        return false;
+    if (!current)
+        return true;
+    const incomingMs = Date.parse(incoming);
+    const currentMs = Date.parse(current);
+    if (!Number.isFinite(incomingMs))
+        return false;
+    if (!Number.isFinite(currentMs))
+        return true;
+    return incomingMs > currentMs;
 }
 export function mapHarnessStatusToSubagentStatus(status) {
     switch (status) {

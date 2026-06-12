@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-const BACKGROUND_SESSION_START_TIMEOUT_MS = 15_000;
+const BACKGROUND_SESSION_START_TIMEOUT_MS = 60_000;
 export async function launchPiRpcBackgroundGoalSession(request) {
     const runId = randomUUID();
     const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-goal-runtime-bg-"));
@@ -15,6 +15,8 @@ export async function launchPiRpcBackgroundGoalSession(request) {
     const runnerPath = fileURLToPath(new URL("./background-runner.js", import.meta.url));
     if (!request.sessionId && !request.sessionFile)
         throw new Error("Background goal session launch requires a session id or session file");
+    if (!fs.existsSync(request.cwd))
+        throw new Error(`Background goal session cwd does not exist: ${request.cwd}`);
     const config = {
         runId,
         cwd: request.cwd,
@@ -35,9 +37,15 @@ export async function launchPiRpcBackgroundGoalSession(request) {
         detached: true,
         stdio: "ignore",
     });
+    const spawnError = new Promise((_resolve, reject) => {
+        runner.once("error", reject);
+    });
     runner.unref();
     try {
-        const ready = await waitForBackgroundRunnerReady(readyPath, logPath, BACKGROUND_SESSION_START_TIMEOUT_MS);
+        const ready = await Promise.race([
+            waitForBackgroundRunnerReady(readyPath, logPath, BACKGROUND_SESSION_START_TIMEOUT_MS),
+            spawnError,
+        ]);
         let pendingSessionName = request.sessionName;
         return {
             sessionFile: ready.sessionFile,
