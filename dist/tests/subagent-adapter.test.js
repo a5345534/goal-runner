@@ -63,6 +63,9 @@ test("harness subagent adapter contract starts sessions and creates registry rec
     assert.equal(started.record.workspacePath, "/repo/.worktrees/attendance");
     assert.equal(started.record.branch, "feat/attendance");
     assert.equal(started.record.status, "running");
+    assert.equal(started.record.attemptCursor?.source, "controller-start");
+    assert.equal(started.record.lastActionAttempt?.actionKind, "runnerLaunch");
+    assert.equal(started.record.lastActionAttempt?.status, "succeeded");
     assert.deepEqual(started.record.prompts, ["implement attendance"]);
 });
 test("subagent prompt and state sync keep controller-owned registry updates explicit", async () => {
@@ -86,6 +89,9 @@ test("subagent prompt and state sync keep controller-owned registry updates expl
     const followed = await sendGoalSubagentPrompt(adapter, base, "please fix tests", { now: "2026-06-02T00:00:30.000Z" });
     assert.deepEqual(prompts, ["please fix tests"]);
     assert.equal(followed.status, "needsFollowup");
+    assert.equal(followed.attemptCursor?.source, "prompt-dispatch");
+    assert.equal(followed.lastActionAttempt?.actionKind, "promptDispatch");
+    assert.equal(followed.lastActionAttempt?.status, "succeeded");
     assert.deepEqual(followed.prompts, ["initial", "please fix tests"]);
     const synced = await syncGoalSubagentState(adapter, followed, { now: "2026-06-02T00:02:00.000Z" });
     assert.equal(synced.status, "selfReportedComplete");

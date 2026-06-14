@@ -150,6 +150,8 @@ function cloneSubagent(subagent) {
         ...subagent,
         prompts: [...subagent.prompts],
         controllerValidationResults: subagent.controllerValidationResults ? [...subagent.controllerValidationResults] : undefined,
+        attemptCursor: subagent.attemptCursor ? cloneJson(subagent.attemptCursor) : undefined,
+        lastActionAttempt: subagent.lastActionAttempt ? cloneJson(subagent.lastActionAttempt) : undefined,
         lastAdapterObservation: subagent.lastAdapterObservation ? cloneJson(subagent.lastAdapterObservation) : undefined,
         lastRecoveryDecision: subagent.lastRecoveryDecision ? cloneJson(subagent.lastRecoveryDecision) : undefined,
     };

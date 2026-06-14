@@ -199,9 +199,11 @@ export class SQLiteGoalStore {
           last_activity_at, self_reported_result, controller_validation_results_json,
           commit_sha, integration_status, integration_state, integration_source_branch,
           integration_source_ref, integration_source_head, integration_commit_sha,
-          integration_error, integration_completed_at, retry_count, last_adapter_observation_json,
-          last_recovery_decision_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          integration_error, integration_completed_at, retry_count, attempt_id,
+          attempt_started_at, attempt_cursor_json, last_action_attempt_json,
+          recovery_loop_signature, last_adapter_observation_json, last_recovery_decision_json,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(goal_id, subagent_id) DO UPDATE SET
           node_id = excluded.node_id,
           harness_adapter_id = excluded.harness_adapter_id,
@@ -225,10 +227,15 @@ export class SQLiteGoalStore {
           integration_error = excluded.integration_error,
           integration_completed_at = excluded.integration_completed_at,
           retry_count = excluded.retry_count,
+          attempt_id = excluded.attempt_id,
+          attempt_started_at = excluded.attempt_started_at,
+          attempt_cursor_json = excluded.attempt_cursor_json,
+          last_action_attempt_json = excluded.last_action_attempt_json,
+          recovery_loop_signature = excluded.recovery_loop_signature,
           last_adapter_observation_json = excluded.last_adapter_observation_json,
           last_recovery_decision_json = excluded.last_recovery_decision_json,
           updated_at = excluded.updated_at`)
-            .run(subagent.goalId, subagent.nodeId, subagent.subagentId, subagent.harnessAdapterId, subagent.sessionId ?? null, subagent.sessionFile ?? null, subagent.workspacePath ?? null, subagent.branch ?? null, subagent.ref ?? null, subagent.status, JSON.stringify(subagent.prompts), subagent.lastActivityAt ?? null, subagent.selfReportedResult ?? null, subagent.controllerValidationResults === undefined ? null : JSON.stringify(subagent.controllerValidationResults), subagent.commitSha ?? null, subagent.integrationStatus ?? null, subagent.integrationState ?? null, subagent.integrationSourceBranch ?? null, subagent.integrationSourceRef ?? null, subagent.integrationSourceHead ?? null, subagent.integrationCommitSha ?? null, subagent.integrationError ?? null, subagent.integrationCompletedAt ?? null, subagent.retryCount ?? null, subagent.lastAdapterObservation === undefined ? null : JSON.stringify(subagent.lastAdapterObservation), subagent.lastRecoveryDecision === undefined ? null : JSON.stringify(subagent.lastRecoveryDecision), subagent.createdAt, subagent.updatedAt);
+            .run(subagent.goalId, subagent.nodeId, subagent.subagentId, subagent.harnessAdapterId, subagent.sessionId ?? null, subagent.sessionFile ?? null, subagent.workspacePath ?? null, subagent.branch ?? null, subagent.ref ?? null, subagent.status, JSON.stringify(subagent.prompts), subagent.lastActivityAt ?? null, subagent.selfReportedResult ?? null, subagent.controllerValidationResults === undefined ? null : JSON.stringify(subagent.controllerValidationResults), subagent.commitSha ?? null, subagent.integrationStatus ?? null, subagent.integrationState ?? null, subagent.integrationSourceBranch ?? null, subagent.integrationSourceRef ?? null, subagent.integrationSourceHead ?? null, subagent.integrationCommitSha ?? null, subagent.integrationError ?? null, subagent.integrationCompletedAt ?? null, subagent.retryCount ?? null, subagent.attemptId ?? null, subagent.attemptStartedAt ?? null, subagent.attemptCursor === undefined ? null : JSON.stringify(subagent.attemptCursor), subagent.lastActionAttempt === undefined ? null : JSON.stringify(subagent.lastActionAttempt), subagent.recoveryLoopSignature ?? null, subagent.lastAdapterObservation === undefined ? null : JSON.stringify(subagent.lastAdapterObservation), subagent.lastRecoveryDecision === undefined ? null : JSON.stringify(subagent.lastRecoveryDecision), subagent.createdAt, subagent.updatedAt);
     }
     async getGoalSubagent(goalId, subagentId) {
         const row = this.db
@@ -404,6 +411,11 @@ export class SQLiteGoalStore {
         integration_error TEXT,
         integration_completed_at TEXT,
         retry_count INTEGER,
+        attempt_id TEXT,
+        attempt_started_at TEXT,
+        attempt_cursor_json TEXT,
+        last_action_attempt_json TEXT,
+        recovery_loop_signature TEXT,
         last_adapter_observation_json TEXT,
         last_recovery_decision_json TEXT,
         created_at TEXT NOT NULL,
@@ -434,6 +446,11 @@ export class SQLiteGoalStore {
         addColumnIfMissing(this.db, "goal_subagents", "integration_commit_sha", "TEXT");
         addColumnIfMissing(this.db, "goal_subagents", "integration_error", "TEXT");
         addColumnIfMissing(this.db, "goal_subagents", "integration_completed_at", "TEXT");
+        addColumnIfMissing(this.db, "goal_subagents", "attempt_id", "TEXT");
+        addColumnIfMissing(this.db, "goal_subagents", "attempt_started_at", "TEXT");
+        addColumnIfMissing(this.db, "goal_subagents", "attempt_cursor_json", "TEXT");
+        addColumnIfMissing(this.db, "goal_subagents", "last_action_attempt_json", "TEXT");
+        addColumnIfMissing(this.db, "goal_subagents", "recovery_loop_signature", "TEXT");
         addColumnIfMissing(this.db, "goal_subagents", "last_adapter_observation_json", "TEXT");
         addColumnIfMissing(this.db, "goal_subagents", "last_recovery_decision_json", "TEXT");
     }
@@ -598,6 +615,11 @@ function rowToSubagent(row) {
         integrationError: row.integration_error ?? undefined,
         integrationCompletedAt: row.integration_completed_at ?? undefined,
         retryCount: row.retry_count ?? undefined,
+        attemptId: row.attempt_id ?? undefined,
+        attemptStartedAt: row.attempt_started_at ?? undefined,
+        attemptCursor: parseRecord(row.attempt_cursor_json),
+        lastActionAttempt: parseRecord(row.last_action_attempt_json),
+        recoveryLoopSignature: row.recovery_loop_signature ?? undefined,
         lastAdapterObservation: parseRecord(row.last_adapter_observation_json),
         lastRecoveryDecision: parseRecord(row.last_recovery_decision_json),
         createdAt: row.created_at,

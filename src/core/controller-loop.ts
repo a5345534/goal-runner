@@ -4,7 +4,7 @@ import { normalizeExceptionSignature } from "./exception-handler.js";
 import { nodeRequiresSubagentIntegration, requiredSubagentIntegrationTerminalSuccess } from "./integration.js";
 import { attachPreparedResourcesToNode, recordAdapterObservationOnNode, recordRecoveryDecisionOnNode, supersedePreparedResourcesOnNode, withGoalDagNodeLifecyclePhase } from "./lifecycle.js";
 import type { HarnessSubagentAdapter, StartGoalSubagentOptions } from "./subagent-adapter.js";
-import type { GoalAdapterObservationRecord, GoalDagNode, GoalNodePreparedResources, GoalOrchestrationState, GoalRecoveryDecisionRecord, GoalSubagentRecord } from "./types.js";
+import type { GoalAdapterObservationRecord, GoalControllerActionAttemptRecord, GoalControllerTypedEventCategory, GoalDagNode, GoalNodePreparedResources, GoalOrchestrationState, GoalRecoveryDecisionRecord, GoalSubagentRecord } from "./types.js";
 
 export interface GoalControllerRuntimePort {
   getGoalOrchestrationState(goalId: string): Promise<GoalOrchestrationState>;
@@ -117,6 +117,8 @@ export interface GoalControllerTickOptions {
   staleStateThresholdMs?: number;
   /** Maximum time to wait for adapter prompt dispatch before degrading to recoverable needs-followup (default 60 seconds). */
   subagentPromptDispatchTimeoutMs?: number;
+  /** Maximum time to wait for adapter runner launch before recording a recoverable launch timeout (default 60 seconds). */
+  subagentRunnerLaunchTimeoutMs?: number;
   systemPrompt?: string;
   metadata?: Record<string, unknown>;
   now?: Date | string | (() => Date | string);
@@ -164,9 +166,23 @@ const MAX_AUTO_RETRIES_DEFAULT = 2;
 const MAX_VALIDATION_FOLLOWUPS_FOR_SAME_FAILURE = 2;
 const DEFAULT_STALE_CONTROLLER_STATE_MS = 10 * 60_000;
 const DEFAULT_SUBAGENT_PROMPT_DISPATCH_TIMEOUT_MS = 60_000;
+const DEFAULT_SUBAGENT_RUNNER_LAUNCH_TIMEOUT_MS = 60_000;
 const INTEGRATION_RETRY_COOLDOWN_MS = 60_000;
 const RECOVERY_BLOCKED_LEDGER_COOLDOWN_MS = 5 * 60_000;
 const recoveryBlockedLedgerCooldown = new Map<string, number>();
+
+class ControllerActionTimeoutError extends Error {
+  readonly actionKind: GoalControllerActionAttemptRecord["actionKind"];
+
+  constructor(
+    message: string,
+    readonly actionAttempt: GoalControllerActionAttemptRecord,
+  ) {
+    super(message);
+    this.name = "ControllerActionTimeoutError";
+    this.actionKind = actionAttempt.actionKind;
+  }
+}
 
 const TRANSIENT_ERROR_PATTERNS = [
   /server_error/i,
@@ -243,10 +259,25 @@ async function recordControllerEvent(
   if (!runtime.recordControllerEvent) return;
   if (shouldSuppressControllerEvent(goalId, event, details, at)) return;
   try {
-    await runtime.recordControllerEvent(goalId, { event, ...details }, { at });
+    await runtime.recordControllerEvent(goalId, { event, eventKind: event, eventCategory: controllerEventCategory(event), ...details }, { at });
   } catch {
     // Controller history is diagnostic only; never let ledger writes disrupt orchestration.
   }
+}
+
+function controllerEventCategory(event: string): GoalControllerTypedEventCategory {
+  if (event.startsWith("poll.")) return "poll";
+  if (event.startsWith("stale") || event.includes(".stale") || event.includes("staleReplay")) return "node.staleDetected";
+  if (event === "exception.decision" || event === "recovery.decision") return "recovery.decision";
+  if (event.startsWith("recovery.rule") || event.includes("Rule")) return "recovery.rule";
+  if (event.startsWith("recovery.") || event.startsWith("followup.")) return "recovery.action";
+  if (event.startsWith("validation.")) return "validation.result";
+  if (event.startsWith("integration.")) return "integration.result";
+  if (event.startsWith("promotion.")) return "promotion.result";
+  if (event.startsWith("cleanup.") || event.includes("Cleanup")) return "cleanup.result";
+  if (event.startsWith("transcript.")) return "transcript";
+  if (event.startsWith("node.") || event.startsWith("subagent.") || event.startsWith("workspaceAllocation.")) return "node.lifecycle";
+  return "diagnostic";
 }
 
 function shouldSuppressControllerEvent(goalId: string, event: string, details: Record<string, unknown>, at?: Date | string): boolean {
@@ -556,7 +587,7 @@ async function startReplacementSubagent(
     now: tickStartedAt,
     thinkingLevel: preparedResources.thinkingLevel ?? node.thinkingLevel,
   };
-  const started = await runtime.startGoalSubagent(adapter, node, startOptions);
+  const started = await startGoalSubagentWithTimeout(runtime, options, adapter, node, startOptions, tickStartedAt);
   const replacement = withSubagentPatch(started, {
     retryCount: attempt,
     integrationStatus: behavior.replacementSummary(attempt, maxReplacementAttempts, subagent.subagentId, errorMessage),
@@ -718,7 +749,7 @@ async function tryAutoRecoverFailedNode(
       retryCount: retryCount + 1,
       updatedAt: tickStartedAt,
     }));
-    const newSubagent = await runtime.startGoalSubagent(adapter, node, startOptions);
+    const newSubagent = await startGoalSubagentWithTimeout(runtime, options, adapter, node, startOptions, tickStartedAt);
     await recordControllerEvent(runtime, subagent.goalId, "recovery.started", {
       nodeId: node.nodeId,
       subagentId: newSubagent.subagentId,
@@ -751,10 +782,32 @@ async function tryAutoRecoverFailedNode(
   const recoveryPrompt = isTransient
     ? buildRecoveryPrompt(node, errorMessage, retryCount, maxRetries)
     : buildUnhandledScenarioRecoveryPrompt(node, errorMessage, retryCount, maxRetries);
-  const recovered = await sendGoalSubagentPromptWithTimeout(runtime, options, adapter, subagent, recoveryPrompt, tickStartedAt);
   const status = isTransient
     ? `in-place recovery ${retryCount + 1}/${maxRetries}: ${errorMessage}`
     : `unhandled-scenario recovery ${retryCount + 1}/${maxRetries}: ${errorMessage}`;
+  let recovered: GoalSubagentRecord;
+  try {
+    recovered = await sendGoalSubagentPromptWithTimeout(runtime, options, adapter, subagent, recoveryPrompt, tickStartedAt);
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    if (isProviderLimitError(errorMessage)) {
+      const summary = quotaBlockedSummary(errorMessage);
+      const blockedSubagent = withSubagentPatch(subagent, { status: "blocked", integrationStatus: summary, retryCount, updatedAt: tickStartedAt });
+      const blockedNode = withNodePatch(node, { status: "blocked", lastValidationSummary: summary, updatedAt: tickStartedAt });
+      await runtime.saveGoalSubagent(blockedSubagent);
+      await runtime.saveGoalDagNode(blockedNode);
+      await recordControllerEvent(runtime, subagent.goalId, "recovery.blocked", {
+        nodeId: node.nodeId,
+        subagentId: subagent.subagentId,
+        reason: summary,
+      }, tickStartedAt);
+      result.blocked.push(blockedNode);
+      result.synced.push(blockedSubagent);
+      return true;
+    }
+    await degradePromptDispatchFailure(runtime, node, subagent, result, tickStartedAt, `${status}; recovery prompt dispatch failed: ${errorMessage}`, error);
+    return true;
+  }
   const runningSubagent = withSubagentPatch(recovered, {
     status: "running",
     integrationStatus: status,
@@ -984,7 +1037,14 @@ async function reconcileSubagentOutcomes(
       const handled = await tryHandleAbnormalObservation(runtime, options, state, node, subagent, result, tickStartedAt, subagent.lastAdapterObservation ?? observationFromSubagentStatus(options.adapter.adapterId, subagent, "protocolViolation", tickStartedAt));
       if (handled) continue;
       const followupPrompt = buildSubagentFollowupPrompt(node, subagent);
-      const followed = await sendGoalSubagentPromptWithTimeout(runtime, options, options.adapter, subagent, followupPrompt, tickStartedAt);
+      let followed: GoalSubagentRecord;
+      try {
+        followed = await sendGoalSubagentPromptWithTimeout(runtime, options, options.adapter, subagent, followupPrompt, tickStartedAt);
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        await degradePromptDispatchFailure(runtime, node, subagent, result, tickStartedAt, `explicit outcome-marker follow-up dispatch failed: ${errorMessage}`, error);
+        continue;
+      }
       const runningSubagent = withSubagentPatch(followed, { status: "running", integrationStatus: undefined });
       const runningNode = withNodePatch(node, { status: "running", lastValidationSummary: "Requested explicit SUBAGENT_RESULT/SUBAGENT_BLOCKED marker from subagent." });
       await runtime.saveGoalSubagent(runningSubagent);
@@ -1159,7 +1219,7 @@ async function reconcileStaleRunnerStartingNodes(
     }
 
     try {
-      const started = await runtime.startGoalSubagent(options.adapter, node, {
+      const started = await startGoalSubagentWithTimeout(runtime, options, options.adapter, node, {
         subagentId: preparedResources.subagentId,
         cwd: preparedResources.workspacePath,
         branch: preparedResources.branch,
@@ -1170,7 +1230,7 @@ async function reconcileStaleRunnerStartingNodes(
         metadata: { ...(options.metadata ?? {}), ...(preparedResources.metadata ?? {}) },
         now: tickStartedAt,
         thinkingLevel: preparedResources.thinkingLevel ?? node.thinkingLevel,
-      });
+      }, tickStartedAt);
       await recordControllerEvent(runtime, node.goalId, "staleRunnerStarting.restarted", {
         nodeId: node.nodeId,
         subagentId: started.subagentId,
@@ -1232,7 +1292,7 @@ async function tryHandleAbnormalObservation(
   observation: GoalAdapterObservationRecord,
 ): Promise<boolean> {
   if (!options.exceptionHandler) return false;
-  const decision = await options.exceptionHandler({
+  let decision = await options.exceptionHandler({
     goalId: node.goalId,
     node,
     subagent,
@@ -1244,6 +1304,32 @@ async function tryHandleAbnormalObservation(
     maxRetries: options.maxAutoRetries ?? MAX_AUTO_RETRIES_DEFAULT,
     now: tickStartedAt,
   });
+  const loopSignature = recoveryLoopSignature(options.adapter.adapterId, observation, decision);
+  const previousLoopCount = countMatchingRecoveryLoopDecisions(state, node.nodeId, loopSignature);
+  decision = {
+    ...decision,
+    evidence: {
+      ...(decision.evidence ?? {}),
+      recoveryLoopSignature: loopSignature,
+      recoveryLoopCount: previousLoopCount + 1,
+    },
+  };
+  const loopLimit = decision.maxRetries ?? options.maxAutoRetries ?? MAX_AUTO_RETRIES_DEFAULT;
+  if (shouldOpenRecoveryCircuitBreaker(decision, previousLoopCount, loopLimit)) {
+    decision = {
+      ...decision,
+      action: "markNodeBlocked",
+      ruleId: decision.ruleId ?? "recovery-circuit-breaker",
+      reason: `recovery circuit breaker opened after ${previousLoopCount} repeated ${decision.action} decision(s) for signature ${loopSignature}: ${decision.reason}`,
+      confidence: "high",
+      evidence: {
+        ...(decision.evidence ?? {}),
+        circuitBreakerOpen: true,
+        previousLoopCount,
+        loopLimit,
+      },
+    };
+  }
   await recordControllerEvent(runtime, node.goalId, "exception.decision", {
     nodeId: node.nodeId,
     subagentId: subagent.subagentId,
@@ -1252,10 +1338,18 @@ async function tryHandleAbnormalObservation(
     reason: decision.reason,
     ruleId: decision.ruleId,
     confidence: decision.confidence,
+    recoveryLoopSignature: loopSignature,
+    recoveryLoopCount: previousLoopCount + 1,
+    circuitBreakerOpen: Boolean(decision.evidence?.circuitBreakerOpen),
   }, tickStartedAt);
 
   const nodeWithDecision = recordRecoveryDecisionOnNode(node, decision, { phase: "controllerJudging", now: tickStartedAt });
-  const subagentWithDecision = withSubagentPatch(subagent, { lastRecoveryDecision: decision, integrationStatus: decision.reason, updatedAt: tickStartedAt });
+  const subagentWithDecision = withSubagentPatch(subagent, {
+    lastRecoveryDecision: decision,
+    recoveryLoopSignature: loopSignature,
+    integrationStatus: decision.reason,
+    updatedAt: tickStartedAt,
+  });
 
   if (decision.action === "delegateToLegacyRecovery") {
     await runtime.saveGoalDagNode(nodeWithDecision);
@@ -1266,7 +1360,14 @@ async function tryHandleAbnormalObservation(
 
   if (decision.action === "sendPromptToSameSession" || decision.action === "restartRunnerSameSession") {
     const prompt = decision.prompt ?? buildSameSessionRecoveryPrompt(node, decision);
-    const followed = await sendGoalSubagentPromptWithTimeout(runtime, options, options.adapter, subagentWithDecision, prompt, tickStartedAt);
+    let followed: GoalSubagentRecord;
+    try {
+      followed = await sendGoalSubagentPromptWithTimeout(runtime, options, options.adapter, subagentWithDecision, prompt, tickStartedAt);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      await degradePromptDispatchFailure(runtime, nodeWithDecision, subagentWithDecision, result, tickStartedAt, `exception recovery prompt dispatch failed: ${errorMessage}`, error);
+      return true;
+    }
     const runningSubagent = withSubagentPatch(followed, {
       status: "running",
       lastRecoveryDecision: decision,
@@ -1335,6 +1436,20 @@ function previousRecoveryDecisionsForNode(state: GoalOrchestrationState, nodeId:
   ].filter((item): item is GoalRecoveryDecisionRecord => Boolean(item));
 }
 
+function recoveryLoopSignature(adapterId: string, observation: GoalAdapterObservationRecord, decision: GoalRecoveryDecisionRecord): string {
+  return [adapterId, observation.kind, normalizeExceptionSignature(observation), decision.action].join(":");
+}
+
+function countMatchingRecoveryLoopDecisions(state: GoalOrchestrationState, nodeId: string, signature: string): number {
+  return previousRecoveryDecisionsForNode(state, nodeId).filter((decision) => decision.evidence?.recoveryLoopSignature === signature).length;
+}
+
+function shouldOpenRecoveryCircuitBreaker(decision: GoalRecoveryDecisionRecord, previousLoopCount: number, loopLimit: number): boolean {
+  if (!Number.isFinite(loopLimit) || loopLimit <= 0) return false;
+  if (["markNodeBlocked", "askUser", "proposeRecoveryRule", "delegateToLegacyRecovery"].includes(decision.action)) return false;
+  return previousLoopCount >= loopLimit;
+}
+
 function buildSameSessionRecoveryPrompt(node: GoalDagNode, decision: GoalRecoveryDecisionRecord): string {
   return [
     `[SYSTEM RECOVERY: ${decision.action}]`,
@@ -1387,7 +1502,7 @@ async function startRecoverySubagentOnSameResources(
     updatedAt: tickStartedAt,
   });
   await runtime.saveGoalSubagent(terminalSubagent);
-  const started = await runtime.startGoalSubagent(options.adapter, node, {
+  const started = await startGoalSubagentWithTimeout(runtime, options, options.adapter, node, {
     subagentId: replacementSubagentId,
     cwd: resources.workspacePath,
     branch: resources.branch,
@@ -1398,7 +1513,7 @@ async function startRecoverySubagentOnSameResources(
     metadata: { ...(options.metadata ?? {}), ...(resources.metadata ?? {}) },
     now: tickStartedAt,
     thinkingLevel: resources.thinkingLevel ?? node.thinkingLevel,
-  });
+  }, tickStartedAt);
   const replacement = withSubagentPatch(started, {
     retryCount,
     lastRecoveryDecision: decision,
@@ -1472,7 +1587,7 @@ async function startRecoverySubagentWithSupersededResources(
     lastRecoveryDecision: decision,
   });
   await runtime.saveGoalSubagent(terminalSubagent);
-  const started = await runtime.startGoalSubagent(options.adapter, supersededNode, {
+  const started = await startGoalSubagentWithTimeout(runtime, options, options.adapter, supersededNode, {
     subagentId: replacementSubagentId,
     cwd: resources.workspacePath,
     branch: resources.branch,
@@ -1483,7 +1598,7 @@ async function startRecoverySubagentWithSupersededResources(
     metadata: { ...(options.metadata ?? {}), ...(allocation?.metadata ?? {}) },
     now: tickStartedAt,
     thinkingLevel: node.thinkingLevel,
-  });
+  }, tickStartedAt);
   const replacement = withSubagentPatch(started, {
     retryCount,
     lastRecoveryDecision: decision,
@@ -1662,6 +1777,10 @@ async function tryRecoverBlockedSubagent(
     return true;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
+    if (error instanceof ControllerActionTimeoutError) {
+      await degradePromptDispatchFailure(runtime, node, subagent, result, tickStartedAt, `blocked-node recovery prompt dispatch failed: ${errorMessage}`, error);
+      return true;
+    }
     if (!isProviderLimitError(errorMessage)) throw error;
     const summary = quotaBlockedSummary(errorMessage);
     const blockedSubagent = withSubagentPatch(subagent, { status: "blocked", integrationStatus: summary, retryCount, updatedAt: tickStartedAt });
@@ -1762,6 +1881,48 @@ async function tryRestartInterruptedValidationCappedReplacement(
   };
   const replacementBaseSubagent = { ...subagent, retryCount: replacementAttempt - 1, integrationStatus: reason };
   return startRecoverySubagentOnSameResources(runtime, options, state, node, replacementBaseSubagent, result, tickStartedAt, decision);
+}
+
+async function degradePromptDispatchFailure(
+  runtime: GoalControllerRuntimePort,
+  node: GoalDagNode,
+  subagent: GoalSubagentRecord,
+  result: GoalControllerTickResult,
+  tickStartedAt: string,
+  summary: string,
+  error: unknown,
+): Promise<GoalSubagentRecord> {
+  const failedAttempt = controllerActionAttemptFromError(error);
+  const needsFollowupSubagent = withSubagentPatch(subagent, {
+    status: "needsFollowup",
+    integrationStatus: summary,
+    attemptId: subagent.attemptId ?? (failedAttempt ? `${subagent.subagentId}-attempt-dispatch-${String(Date.parse(tickStartedAt)).replace(/[^0-9]/g, "") || "now"}` : undefined),
+    attemptStartedAt: subagent.attemptStartedAt ?? (failedAttempt ? tickStartedAt : undefined),
+    attemptCursor: subagent.attemptCursor ?? (failedAttempt ? { at: tickStartedAt, source: "prompt-dispatch" } : undefined),
+    lastActionAttempt: failedAttempt ?? subagent.lastActionAttempt,
+    updatedAt: tickStartedAt,
+  });
+  const needsFollowupNode = withNodePatch(node, { status: "needsFollowup", lastValidationSummary: summary, updatedAt: tickStartedAt });
+  await runtime.saveGoalDagNode(needsFollowupNode);
+  await runtime.saveGoalSubagent(needsFollowupSubagent);
+  await recordControllerEvent(runtime, node.goalId, "recovery.actionDegraded", {
+    nodeId: node.nodeId,
+    subagentId: subagent.subagentId,
+    actionId: failedAttempt?.actionId,
+    actionKind: failedAttempt?.actionKind ?? "promptDispatch",
+    summary,
+    error: error instanceof Error ? error.message : String(error),
+  }, tickStartedAt);
+  result.followups.push(needsFollowupSubagent);
+  result.synced.push(needsFollowupSubagent);
+  return needsFollowupSubagent;
+}
+
+function controllerActionAttemptFromError(error: unknown): GoalControllerActionAttemptRecord | undefined {
+  if (error instanceof ControllerActionTimeoutError) {
+    return { ...error.actionAttempt, status: "timedOut", error: error.message };
+  }
+  return undefined;
 }
 
 function buildValidationCappedReplacementPrompt(
@@ -1883,17 +2044,13 @@ async function validateOrHold(
       followed = await sendGoalSubagentPromptWithTimeout(runtime, options, options.adapter, validationResults, validation.followupPrompt, tickStartedAt);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      const dispatchSummary = appendSummary(validationSummary, `controller validation follow-up dispatch failed: ${errorMessage}`);
-      const needsFollowupNode = withNodePatch(validatingNode, { status: "needsFollowup", lastValidationSummary: dispatchSummary });
-      const needsFollowupSubagent = withSubagentPatch(validationResults, { status: "needsFollowup", integrationStatus: dispatchSummary });
-      await runtime.saveGoalDagNode(needsFollowupNode);
-      await runtime.saveGoalSubagent(needsFollowupSubagent);
+      const dispatchSummary = appendSummary(validationSummary, `controller validation follow-up dispatch failed: ${errorMessage}`) ?? `controller validation follow-up dispatch failed: ${errorMessage}`;
       await recordControllerEvent(runtime, node.goalId, "followup.dispatchFailed", {
         nodeId: node.nodeId,
         subagentId: subagent.subagentId,
         summary: dispatchSummary,
       }, tickStartedAt);
-      result.followups.push(needsFollowupSubagent);
+      await degradePromptDispatchFailure(runtime, validatingNode, validationResults, result, tickStartedAt, dispatchSummary, error);
       return;
     }
     const runningSubagent = withSubagentPatch(followed, { status: "running" });
@@ -2021,7 +2178,14 @@ async function integrateOrCompleteValidatedSubagent(
   });
 
   if (integration.followupPrompt) {
-    const followed = await sendGoalSubagentPromptWithTimeout(runtime, options, options.adapter, failedSubagent, integration.followupPrompt, tickStartedAt);
+    let followed: GoalSubagentRecord;
+    try {
+      followed = await sendGoalSubagentPromptWithTimeout(runtime, options, options.adapter, failedSubagent, integration.followupPrompt, tickStartedAt);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      await degradePromptDispatchFailure(runtime, integratingNode, failedSubagent, result, tickStartedAt, appendSummary(validationSummary, `integration follow-up dispatch failed: ${errorMessage}`) ?? `integration follow-up dispatch failed: ${errorMessage}`, error);
+      return;
+    }
     const runningSubagent = withSubagentPatch(followed, {
       status: "running",
       integrationState: "failed",
@@ -2146,7 +2310,39 @@ async function startReadyNodes(
       now: tickStartedAt,
       thinkingLevel: node.thinkingLevel,
     };
-    const subagent = await runtime.startGoalSubagent(options.adapter, lifecycleNode, startOptions);
+    let subagent: GoalSubagentRecord;
+    try {
+      subagent = await startGoalSubagentWithTimeout(runtime, options, options.adapter, lifecycleNode, startOptions, tickStartedAt);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (error instanceof ControllerActionTimeoutError) {
+        const pendingNode = withNodePatch(lifecycleNode, {
+          status: "running",
+          lifecyclePhase: "runnerStarting",
+          lastValidationSummary: `runner launch timed out; stale runner-start recovery can retry after threshold: ${errorMessage}`,
+          updatedAt: tickStartedAt,
+        });
+        await runtime.saveGoalDagNode(pendingNode);
+        await recordControllerEvent(runtime, goalId, "node.runnerLaunchTimedOut", {
+          nodeId: node.nodeId,
+          subagentId: startOptions.subagentId,
+          summary: pendingNode.lastValidationSummary,
+        }, tickStartedAt);
+        continue;
+      }
+      const summary = isProviderLimitError(errorMessage)
+        ? quotaBlockedSummary(errorMessage)
+        : unhandledScenarioBlockedSummary(`runner launch failed: ${errorMessage}`);
+      const blockedNode = withNodePatch(lifecycleNode, { status: "blocked", lifecyclePhase: "terminal", lastValidationSummary: summary, updatedAt: tickStartedAt });
+      await runtime.saveGoalDagNode(blockedNode);
+      await recordControllerEvent(runtime, goalId, "node.runnerLaunchFailed", {
+        nodeId: node.nodeId,
+        summary,
+        error: errorMessage,
+      }, tickStartedAt);
+      result.blocked.push(blockedNode);
+      continue;
+    }
     await recordControllerEvent(runtime, goalId, "node.started", {
       nodeId: node.nodeId,
       subagentId: subagent.subagentId,
@@ -2277,6 +2473,77 @@ function toIso(value: Date | string): string {
   return typeof value === "string" ? new Date(value).toISOString() : value.toISOString();
 }
 
+async function startGoalSubagentWithTimeout(
+  runtime: GoalControllerRuntimePort,
+  options: GoalControllerTickOptions,
+  adapter: HarnessSubagentAdapter,
+  node: GoalDagNode,
+  startOptions: StartGoalSubagentOptions,
+  tickStartedAt: string,
+): Promise<GoalSubagentRecord> {
+  const timeoutMs = options.subagentRunnerLaunchTimeoutMs ?? DEFAULT_SUBAGENT_RUNNER_LAUNCH_TIMEOUT_MS;
+  const expectedSubagentId = startOptions.subagentId ?? node.preparedResources?.subagentId ?? "auto";
+  const actionAttempt = buildControllerActionAttempt("runnerLaunch", {
+    goalId: node.goalId,
+    nodeId: node.nodeId,
+    subagentId: expectedSubagentId,
+  }, tickStartedAt, timeoutMs > 0 ? timeoutMs : undefined, {
+    adapterId: adapter.adapterId,
+    workspacePath: startOptions.cwd,
+    branch: startOptions.branch,
+    ref: startOptions.ref,
+  });
+  await recordControllerEvent(runtime, node.goalId, "recovery.actionStarted", {
+    nodeId: node.nodeId,
+    subagentId: expectedSubagentId,
+    actionId: actionAttempt.actionId,
+    actionKind: actionAttempt.actionKind,
+    deadlineAt: actionAttempt.deadlineAt,
+    workspacePath: startOptions.cwd,
+    branch: startOptions.branch,
+  }, tickStartedAt);
+  const launch = runtime.startGoalSubagent(adapter, node, {
+    ...startOptions,
+    metadata: { ...(startOptions.metadata ?? {}), controllerActionAttempt: actionAttempt },
+  });
+  try {
+    const started = timeoutMs <= 0
+      ? await launch
+      : await promiseWithTimeout(launch, timeoutMs, `subagent runner launch timed out after ${timeoutMs}ms for ${expectedSubagentId}`, actionAttempt);
+    const succeededAttempt: GoalControllerActionAttemptRecord = {
+      ...actionAttempt,
+      status: "succeeded",
+      evidence: { ...(actionAttempt.evidence ?? {}), subagentId: started.subagentId, sessionId: started.sessionId },
+    };
+    const patched = withSubagentPatch(started, { lastActionAttempt: succeededAttempt });
+    await runtime.saveGoalSubagent(patched);
+    await recordControllerEvent(runtime, node.goalId, "recovery.actionSucceeded", {
+      nodeId: node.nodeId,
+      subagentId: started.subagentId,
+      actionId: succeededAttempt.actionId,
+      actionKind: succeededAttempt.actionKind,
+    }, tickStartedAt);
+    return patched;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const timeout = error instanceof ControllerActionTimeoutError;
+    const failedAttempt: GoalControllerActionAttemptRecord = {
+      ...actionAttempt,
+      status: timeout ? "timedOut" : "failed",
+      error: errorMessage,
+    };
+    await recordControllerEvent(runtime, node.goalId, timeout ? "recovery.actionTimedOut" : "recovery.actionFailed", {
+      nodeId: node.nodeId,
+      subagentId: expectedSubagentId,
+      actionId: failedAttempt.actionId,
+      actionKind: failedAttempt.actionKind,
+      deadlineAt: failedAttempt.deadlineAt,
+      error: errorMessage,
+    }, tickStartedAt);
+    throw error;
+  }
+}
+
 async function sendGoalSubagentPromptWithTimeout(
   runtime: GoalControllerRuntimePort,
   options: GoalControllerTickOptions,
@@ -2285,22 +2552,84 @@ async function sendGoalSubagentPromptWithTimeout(
   prompt: string,
   tickStartedAt: string,
 ): Promise<GoalSubagentRecord> {
+  const timeoutMs = options.subagentPromptDispatchTimeoutMs ?? DEFAULT_SUBAGENT_PROMPT_DISPATCH_TIMEOUT_MS;
+  const actionAttempt = buildControllerActionAttempt("promptDispatch", subagent, tickStartedAt, timeoutMs > 0 ? timeoutMs : undefined, {
+    promptChars: prompt.length,
+    adapterId: adapter.adapterId,
+  });
+  await recordControllerEvent(runtime, subagent.goalId, "recovery.actionStarted", {
+    nodeId: subagent.nodeId,
+    subagentId: subagent.subagentId,
+    actionId: actionAttempt.actionId,
+    actionKind: actionAttempt.actionKind,
+    deadlineAt: actionAttempt.deadlineAt,
+    promptChars: prompt.length,
+  }, tickStartedAt);
+  const metadata = { ...(options.metadata ?? {}), controllerActionAttempt: actionAttempt };
   const dispatch = runtime.sendGoalSubagentPrompt(adapter, subagent, prompt, {
-    metadata: options.metadata,
+    metadata,
     now: tickStartedAt,
   });
-  const timeoutMs = options.subagentPromptDispatchTimeoutMs ?? DEFAULT_SUBAGENT_PROMPT_DISPATCH_TIMEOUT_MS;
-  if (timeoutMs <= 0) return dispatch;
-  return promiseWithTimeout(dispatch, timeoutMs, `subagent prompt dispatch timed out after ${timeoutMs}ms for ${subagent.subagentId}`);
+  try {
+    const updated = timeoutMs <= 0
+      ? await dispatch
+      : await promiseWithTimeout(dispatch, timeoutMs, `subagent prompt dispatch timed out after ${timeoutMs}ms for ${subagent.subagentId}`, actionAttempt);
+    const succeededAttempt: GoalControllerActionAttemptRecord = { ...actionAttempt, status: "succeeded" };
+    await recordControllerEvent(runtime, subagent.goalId, "recovery.actionSucceeded", {
+      nodeId: subagent.nodeId,
+      subagentId: subagent.subagentId,
+      actionId: succeededAttempt.actionId,
+      actionKind: succeededAttempt.actionKind,
+    }, tickStartedAt);
+    return withSubagentPatch(updated, { lastActionAttempt: succeededAttempt });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const timeout = error instanceof ControllerActionTimeoutError;
+    const failedAttempt: GoalControllerActionAttemptRecord = {
+      ...actionAttempt,
+      status: timeout ? "timedOut" : "failed",
+      error: errorMessage,
+    };
+    await recordControllerEvent(runtime, subagent.goalId, timeout ? "recovery.actionTimedOut" : "recovery.actionFailed", {
+      nodeId: subagent.nodeId,
+      subagentId: subagent.subagentId,
+      actionId: failedAttempt.actionId,
+      actionKind: failedAttempt.actionKind,
+      deadlineAt: failedAttempt.deadlineAt,
+      error: errorMessage,
+    }, tickStartedAt);
+    throw error;
+  }
 }
 
-async function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+function buildControllerActionAttempt(
+  actionKind: GoalControllerActionAttemptRecord["actionKind"],
+  target: Pick<GoalSubagentRecord, "goalId" | "nodeId" | "subagentId">,
+  startedAt: string,
+  timeoutMs: number | undefined,
+  evidence: Record<string, unknown> = {},
+): GoalControllerActionAttemptRecord {
+  const startedMs = Date.parse(startedAt);
+  const deadlineAt = timeoutMs === undefined || timeoutMs <= 0 || !Number.isFinite(startedMs)
+    ? undefined
+    : new Date(startedMs + timeoutMs).toISOString();
+  return {
+    actionId: `${actionKind}-${target.goalId}-${target.subagentId}-${String(Date.parse(startedAt)).replace(/[^0-9]/g, "") || "now"}`,
+    actionKind,
+    startedAt,
+    deadlineAt,
+    status: "started",
+    evidence: { nodeId: target.nodeId, ...evidence },
+  };
+}
+
+async function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string, actionAttempt: GoalControllerActionAttemptRecord): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
     return await Promise.race([
       promise,
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+        timer = setTimeout(() => reject(new ControllerActionTimeoutError(message, actionAttempt)), timeoutMs);
       }),
     ]);
   } finally {

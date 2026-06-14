@@ -107,6 +107,27 @@ test("controller retries stale initial workspace allocation blockers after the s
     assert.equal(adapter.starts[0]?.cwd, "/repo/.worktrees/build-feature");
     assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "running");
 });
+test("controller runner launch timeouts remain recoverable through stale runner-start retry", async () => {
+    class HangingStartAdapter extends FakeSubagentAdapter {
+        startSession(request) {
+            this.starts.push(request);
+            return new Promise(() => undefined);
+        }
+    }
+    const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
+    const adapter = new HangingStartAdapter();
+    const tick = await runtime.runGoalControllerTick("goal-1", {
+        adapter,
+        subagentRunnerLaunchTimeoutMs: 1,
+        workspaceAllocator: ({ node }) => ({ subagentId: "subagent-1", cwd: `/repo/.worktrees/${node.slug}`, branch: `feat/${node.slug}` }),
+    });
+    assert.equal(tick.started.length, 0);
+    assert.equal(adapter.starts.length, 1);
+    const saved = await runtime.getGoalDagNode("goal-1", "build");
+    assert.equal(saved?.status, "running");
+    assert.equal(saved?.lifecyclePhase, "runnerStarting");
+    assert.match(saved?.lastValidationSummary ?? "", /runner launch timed out/);
+});
 test("controller tick durably records lifecycle phases before adapter start", async () => {
     const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
     const adapter = new FakeSubagentAdapter();
@@ -240,9 +261,11 @@ test("controller tick records durable controller history events when a goal reco
     });
     const ledger = await runtime.listLedgerEvents("s1", created.goal.goalId);
     const controllerEvents = ledger.filter((event) => event.type === "controller_event");
-    assert.deepEqual(controllerEvents.map((event) => event.details?.event), ["poll.started", "node.started", "poll.finished"]);
-    assert.equal(controllerEvents[1]?.details?.nodeId, "build");
-    assert.equal(controllerEvents[1]?.details?.subagentId, "subagent-1");
+    assert.deepEqual(controllerEvents.map((event) => event.details?.event), ["poll.started", "recovery.actionStarted", "recovery.actionSucceeded", "node.started", "poll.finished"]);
+    assert.deepEqual(controllerEvents.map((event) => event.details?.eventCategory), ["poll", "recovery.action", "recovery.action", "node.lifecycle", "poll"]);
+    assert.equal(controllerEvents[1]?.details?.actionKind, "runnerLaunch");
+    assert.equal(controllerEvents[3]?.details?.nodeId, "build");
+    assert.equal(controllerEvents[3]?.details?.subagentId, "subagent-1");
 });
 test("subagent self-report is held for controller validation when no validator is configured", async () => {
     const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
@@ -323,6 +346,9 @@ test("validation follow-up dispatch timeouts degrade to needs-followup instead o
     const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
     assert.equal(saved?.status, "needsFollowup");
     assert.match(saved?.integrationStatus ?? "", /prompt dispatch timed out/);
+    assert.equal(saved?.lastActionAttempt?.actionKind, "promptDispatch");
+    assert.equal(saved?.lastActionAttempt?.status, "timedOut");
+    assert.equal(saved?.attemptCursor?.source, "prompt-dispatch");
 });
 test("controller validator completion unlocks dependent ready nodes in the same tick", async () => {
     const { runtime } = await runtimeWithPlan([
@@ -676,6 +702,41 @@ test("controller sends stale subagent continuation prompt for stale needs-follow
     assert.match(adapter.prompts[0]?.prompt ?? "", /Continue from the existing session transcript/);
     assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "running");
     assert.equal((await runtime.getGoalSubagent("goal-1", "subagent-1"))?.status, "running");
+});
+test("controller circuit-breaks repeated identical recovery decisions", async () => {
+    const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
+    const loopSignature = "fake:runnerError:fake runnererror boom:sendPromptToSameSession";
+    await runtime.saveGoalDagNode({ ...await runtime.getGoalDagNode("goal-1", "build"), status: "failed", updatedAt: now, lastValidationSummary: "boom" });
+    await runtime.saveGoalSubagent(subagent({
+        status: "failed",
+        integrationStatus: "boom",
+        workspacePath: "/repo/.worktrees/build",
+        lastAdapterObservation: { adapterId: "fake", kind: "runnerError", at: now, error: "boom" },
+        lastRecoveryDecision: {
+            action: "sendPromptToSameSession",
+            reason: "boom",
+            at: now,
+            evidence: { recoveryLoopSignature: loopSignature },
+        },
+    }));
+    const adapter = new FakeSubagentAdapter();
+    const tick = await runtime.runGoalControllerTick("goal-1", {
+        adapter,
+        maxAutoRetries: 1,
+        exceptionHandler: () => ({
+            action: "sendPromptToSameSession",
+            reason: "boom",
+            at: now,
+            prompt: "retry boom",
+            maxRetries: 1,
+        }),
+    });
+    assert.equal(adapter.prompts.length, 0);
+    assert.equal(tick.blocked.length, 1);
+    const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
+    assert.equal(saved?.status, "blocked");
+    assert.equal(saved?.lastRecoveryDecision?.ruleId, "recovery-circuit-breaker");
+    assert.equal(saved?.lastRecoveryDecision?.evidence?.circuitBreakerOpen, true);
 });
 test("controller replaces stale missing-session subagents instead of prompting a nonexistent session", async () => {
     const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", validators: ["npm test"] }]);

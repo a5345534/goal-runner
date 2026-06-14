@@ -328,6 +328,61 @@ export interface GoalRecoveryDecisionRecord {
   evidence?: Record<string, unknown>;
 }
 
+export type GoalControllerTypedEventCategory =
+  | "poll"
+  | "node.lifecycle"
+  | "node.staleDetected"
+  | "recovery.decision"
+  | "recovery.action"
+  | "recovery.rule"
+  | "transcript"
+  | "validation.result"
+  | "integration.result"
+  | "promotion.result"
+  | "cleanup.result"
+  | "diagnostic";
+
+export type GoalControllerActionAttemptKind =
+  | "runnerLaunch"
+  | "promptDispatch"
+  | "recovery"
+  | "validation"
+  | "integration"
+  | "promotion"
+  | "cleanup";
+
+export type GoalControllerActionAttemptStatus =
+  | "started"
+  | "succeeded"
+  | "timedOut"
+  | "failed"
+  | "degraded";
+
+export interface GoalAttemptCursor {
+  /** Timestamp boundary used by adapters that can only inspect transcripts by message time. */
+  at?: string;
+  /** Adapter-specific transcript entry id, when available. */
+  entryId?: string;
+  /** Adapter-specific message index, when available. */
+  messageIndex?: number;
+  /** Adapter-specific byte offset, when available. */
+  byteOffset?: number;
+  /** Human/debug label for the cursor source, e.g. controller-start or prompt-dispatch. */
+  source?: string;
+  [key: string]: unknown;
+}
+
+export interface GoalControllerActionAttemptRecord {
+  actionId: string;
+  actionKind: GoalControllerActionAttemptKind;
+  startedAt: string;
+  deadlineAt?: string;
+  status: GoalControllerActionAttemptStatus;
+  decisionId?: string;
+  error?: string;
+  evidence?: Record<string, unknown>;
+}
+
 export interface GoalDagConflictHints {
   files?: string[];
   modules?: string[];
@@ -456,6 +511,16 @@ export interface GoalSubagentRecord {
   integrationCompletedAt?: string;
   /** Number of automatic retries attempted for this subagent. */
   retryCount?: number;
+  /** Current controller attempt id for transcript/outcome scoping. */
+  attemptId?: string;
+  /** Timestamp when the current controller attempt started. */
+  attemptStartedAt?: string;
+  /** Adapter-neutral transcript cursor for the current controller attempt. */
+  attemptCursor?: GoalAttemptCursor;
+  /** Last durable controller action attempt involving this subagent. */
+  lastActionAttempt?: GoalControllerActionAttemptRecord;
+  /** Last normalized recovery loop signature involving this subagent. */
+  recoveryLoopSignature?: string;
   /** Last normalized adapter observation recorded for this subagent. */
   lastAdapterObservation?: GoalAdapterObservationRecord;
   /** Last controller recovery decision involving this subagent. */

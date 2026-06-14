@@ -192,30 +192,41 @@ export function readPiSubagentSessionState(
   const currentAttemptAt = currentAttemptCutoffAt(subagent);
   const effectiveLastActivityAt = maxIso(parsed.lastActivityAt, currentAttemptAt);
   const assistantIsCurrent = isAtOrAfter(parsed.lastAssistantAt, currentAttemptAt);
+  const staleResult = !assistantIsCurrent ? extractResultMarker(parsed.lastAssistantText) : undefined;
+  const staleBlocked = !assistantIsCurrent ? extractBlockedMarker(parsed.lastAssistantText) : undefined;
+  const hasExplicitAttempt = Boolean(subagent.attemptId || subagent.attemptStartedAt || subagent.attemptCursor);
+  const attemptMetadata = compactMetadata({
+    attemptId: subagent.attemptId,
+    attemptStartedAt: subagent.attemptStartedAt,
+    attemptCursorAt: hasExplicitAttempt ? currentAttemptAt : undefined,
+    staleReplayIgnored: Boolean(staleResult || staleBlocked),
+    staleReplayMarker: staleResult ? "SUBAGENT_RESULT" : staleBlocked ? "SUBAGENT_BLOCKED" : undefined,
+    staleReplayAt: staleResult || staleBlocked ? parsed.lastAssistantAt : undefined,
+  });
   const blocked = assistantIsCurrent ? extractBlockedMarker(parsed.lastAssistantText) : undefined;
   if (blocked) {
-    return withInspectionMetadata({ status: "blocked", selfReportedResult: blocked, lastActivityAt: parsed.lastAssistantAt ?? effectiveLastActivityAt }, parsed);
+    return withInspectionMetadata({ status: "blocked", selfReportedResult: blocked, lastActivityAt: parsed.lastAssistantAt ?? effectiveLastActivityAt }, parsed, attemptMetadata);
   }
   const result = assistantIsCurrent ? extractResultMarker(parsed.lastAssistantText) : undefined;
   if (result) {
-    return withInspectionMetadata({ status: "selfReportedComplete", selfReportedResult: result, lastActivityAt: parsed.lastAssistantAt ?? effectiveLastActivityAt }, parsed);
+    return withInspectionMetadata({ status: "selfReportedComplete", selfReportedResult: result, lastActivityAt: parsed.lastAssistantAt ?? effectiveLastActivityAt }, parsed, attemptMetadata);
   }
   if (parsed.lastError) {
     if (isRecoverableContextOverflow(parsed, options, effectiveLastActivityAt)) {
-      return withInspectionMetadata({ status: "running", error: `Pi context overflow recovery pending: ${parsed.lastError}`, lastActivityAt: effectiveLastActivityAt }, parsed);
+      return withInspectionMetadata({ status: "running", error: `Pi context overflow recovery pending: ${parsed.lastError}`, lastActivityAt: effectiveLastActivityAt }, parsed, attemptMetadata);
     }
-    return withInspectionMetadata({ status: "failed", error: parsed.lastError, lastActivityAt: effectiveLastActivityAt }, parsed);
+    return withInspectionMetadata({ status: "failed", error: parsed.lastError, lastActivityAt: effectiveLastActivityAt }, parsed, attemptMetadata);
   }
   const terminalish = parsed.lastMessageRole === "assistant" && assistantIsCurrent ? terminalishAssistantTextWithoutMarker(parsed.lastAssistantText) : undefined;
   if (terminalish) {
-    return withInspectionMetadata({ status: "needsFollowup", selfReportedResult: terminalish, lastActivityAt: parsed.lastAssistantAt ?? effectiveLastActivityAt }, parsed);
+    return withInspectionMetadata({ status: "needsFollowup", selfReportedResult: terminalish, lastActivityAt: parsed.lastAssistantAt ?? effectiveLastActivityAt }, parsed, attemptMetadata);
   }
   const staleReason = staleUnresolvedSessionReason(parsed, options, effectiveLastActivityAt, currentAttemptAt);
   if (staleReason) {
-    return withInspectionMetadata({ status: "needsFollowup", error: staleReason, lastActivityAt: effectiveLastActivityAt }, parsed);
+    return withInspectionMetadata({ status: "needsFollowup", error: staleReason, lastActivityAt: effectiveLastActivityAt }, parsed, attemptMetadata);
   }
   const status = parsed.lastMessageRole === "assistant" ? "idle" : options.live ? "running" : "idle";
-  return withInspectionMetadata({ status, lastActivityAt: effectiveLastActivityAt }, parsed);
+  return withInspectionMetadata({ status, lastActivityAt: effectiveLastActivityAt }, parsed, attemptMetadata);
 }
 
 function parsePiSessionFile(content: string): ParsedPiSessionState {
@@ -298,8 +309,12 @@ function isRuntimeStateMirrorEntry(entry: Record<string, unknown>): boolean {
   return (entry.type === "custom" || entry.type === "custom_message") && entry.customType === "agent-goal-runtime-state";
 }
 
-function withInspectionMetadata(state: HarnessSubagentSessionState, parsed: ParsedPiSessionState): HarnessSubagentSessionState {
-  return { ...state, metadata: { ...(state.metadata ?? {}), entryCount: parsed.entryCount, messageCount: parsed.messageCount } };
+function withInspectionMetadata(state: HarnessSubagentSessionState, parsed: ParsedPiSessionState, extra: Record<string, unknown> = {}): HarnessSubagentSessionState {
+  return { ...state, metadata: { ...(state.metadata ?? {}), entryCount: parsed.entryCount, messageCount: parsed.messageCount, ...extra } };
+}
+
+function compactMetadata(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== false));
 }
 
 function launchRequestForStart(request: HarnessSubagentStartRequest, modelArg: string | undefined): BackgroundGoalSessionLaunchRequest {
@@ -408,6 +423,8 @@ function staleUnresolvedSessionReason(parsed: ParsedPiSessionState, options: PiS
 }
 
 function currentAttemptCutoffAt(subagent: GoalSubagentRecord): string | undefined {
+  const cursorAt = typeof subagent.attemptCursor?.at === "string" ? subagent.attemptCursor.at : undefined;
+  if (cursorAt || subagent.attemptStartedAt) return cursorAt ?? subagent.attemptStartedAt;
   return maxIso(subagent.lastActivityAt, subagent.createdAt);
 }
 

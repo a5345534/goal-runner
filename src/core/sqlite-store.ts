@@ -152,6 +152,11 @@ interface SqliteSubagentRow {
   integration_error: string | null;
   integration_completed_at: string | null;
   retry_count: number | null;
+  attempt_id: string | null;
+  attempt_started_at: string | null;
+  attempt_cursor_json: string | null;
+  last_action_attempt_json: string | null;
+  recovery_loop_signature: string | null;
   last_adapter_observation_json: string | null;
   last_recovery_decision_json: string | null;
   created_at: string;
@@ -459,9 +464,11 @@ export class SQLiteGoalStore implements GoalStore {
           last_activity_at, self_reported_result, controller_validation_results_json,
           commit_sha, integration_status, integration_state, integration_source_branch,
           integration_source_ref, integration_source_head, integration_commit_sha,
-          integration_error, integration_completed_at, retry_count, last_adapter_observation_json,
-          last_recovery_decision_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          integration_error, integration_completed_at, retry_count, attempt_id,
+          attempt_started_at, attempt_cursor_json, last_action_attempt_json,
+          recovery_loop_signature, last_adapter_observation_json, last_recovery_decision_json,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(goal_id, subagent_id) DO UPDATE SET
           node_id = excluded.node_id,
           harness_adapter_id = excluded.harness_adapter_id,
@@ -485,6 +492,11 @@ export class SQLiteGoalStore implements GoalStore {
           integration_error = excluded.integration_error,
           integration_completed_at = excluded.integration_completed_at,
           retry_count = excluded.retry_count,
+          attempt_id = excluded.attempt_id,
+          attempt_started_at = excluded.attempt_started_at,
+          attempt_cursor_json = excluded.attempt_cursor_json,
+          last_action_attempt_json = excluded.last_action_attempt_json,
+          recovery_loop_signature = excluded.recovery_loop_signature,
           last_adapter_observation_json = excluded.last_adapter_observation_json,
           last_recovery_decision_json = excluded.last_recovery_decision_json,
           updated_at = excluded.updated_at`,
@@ -514,6 +526,11 @@ export class SQLiteGoalStore implements GoalStore {
         subagent.integrationError ?? null,
         subagent.integrationCompletedAt ?? null,
         subagent.retryCount ?? null,
+        subagent.attemptId ?? null,
+        subagent.attemptStartedAt ?? null,
+        subagent.attemptCursor === undefined ? null : JSON.stringify(subagent.attemptCursor),
+        subagent.lastActionAttempt === undefined ? null : JSON.stringify(subagent.lastActionAttempt),
+        subagent.recoveryLoopSignature ?? null,
         subagent.lastAdapterObservation === undefined ? null : JSON.stringify(subagent.lastAdapterObservation),
         subagent.lastRecoveryDecision === undefined ? null : JSON.stringify(subagent.lastRecoveryDecision),
         subagent.createdAt,
@@ -706,6 +723,11 @@ export class SQLiteGoalStore implements GoalStore {
         integration_error TEXT,
         integration_completed_at TEXT,
         retry_count INTEGER,
+        attempt_id TEXT,
+        attempt_started_at TEXT,
+        attempt_cursor_json TEXT,
+        last_action_attempt_json TEXT,
+        recovery_loop_signature TEXT,
         last_adapter_observation_json TEXT,
         last_recovery_decision_json TEXT,
         created_at TEXT NOT NULL,
@@ -736,6 +758,11 @@ export class SQLiteGoalStore implements GoalStore {
     addColumnIfMissing(this.db, "goal_subagents", "integration_commit_sha", "TEXT");
     addColumnIfMissing(this.db, "goal_subagents", "integration_error", "TEXT");
     addColumnIfMissing(this.db, "goal_subagents", "integration_completed_at", "TEXT");
+    addColumnIfMissing(this.db, "goal_subagents", "attempt_id", "TEXT");
+    addColumnIfMissing(this.db, "goal_subagents", "attempt_started_at", "TEXT");
+    addColumnIfMissing(this.db, "goal_subagents", "attempt_cursor_json", "TEXT");
+    addColumnIfMissing(this.db, "goal_subagents", "last_action_attempt_json", "TEXT");
+    addColumnIfMissing(this.db, "goal_subagents", "recovery_loop_signature", "TEXT");
     addColumnIfMissing(this.db, "goal_subagents", "last_adapter_observation_json", "TEXT");
     addColumnIfMissing(this.db, "goal_subagents", "last_recovery_decision_json", "TEXT");
   }
@@ -908,6 +935,11 @@ function rowToSubagent(row: SqliteSubagentRow): GoalSubagentRecord {
     integrationError: row.integration_error ?? undefined,
     integrationCompletedAt: row.integration_completed_at ?? undefined,
     retryCount: row.retry_count ?? undefined,
+    attemptId: row.attempt_id ?? undefined,
+    attemptStartedAt: row.attempt_started_at ?? undefined,
+    attemptCursor: parseRecord(row.attempt_cursor_json) as GoalSubagentRecord["attemptCursor"] | undefined,
+    lastActionAttempt: parseRecord(row.last_action_attempt_json) as GoalSubagentRecord["lastActionAttempt"] | undefined,
+    recoveryLoopSignature: row.recovery_loop_signature ?? undefined,
     lastAdapterObservation: parseRecord(row.last_adapter_observation_json) as GoalSubagentRecord["lastAdapterObservation"] | undefined,
     lastRecoveryDecision: parseRecord(row.last_recovery_decision_json) as GoalSubagentRecord["lastRecoveryDecision"] | undefined,
     createdAt: row.created_at,

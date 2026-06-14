@@ -501,6 +501,8 @@ test("Pi subagent session inspection ignores outcome markers from earlier reused
   assert.notEqual(recent.status, "selfReportedComplete");
   assert.equal(recent.status, "idle");
   assert.equal(recent.lastActivityAt, "2026-06-02T00:20:00.000Z");
+  assert.equal(recent.metadata?.staleReplayIgnored, true);
+  assert.equal(recent.metadata?.staleReplayMarker, "SUBAGENT_RESULT");
 
   const stale = readPiSubagentSessionState(recentAttempt, {
     exists: () => true,
@@ -511,6 +513,7 @@ test("Pi subagent session inspection ignores outcome markers from earlier reused
   });
   assert.equal(stale.status, "needsFollowup");
   assert.match(stale.error ?? "", /no current-attempt transcript activity/);
+  assert.equal(stale.metadata?.staleReplayIgnored, true);
 });
 
 test("Pi subagent session inspection maps blocked markers and missing sessions", () => {

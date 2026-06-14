@@ -411,7 +411,7 @@ function renderCompactControllerHistoryEvents(events) {
     for (const event of events) {
         const eventName = controllerHistoryEventName(event);
         const details = event.details ?? {};
-        if (!isCompactControllerHistoryEvent(eventName))
+        if (!isCompactControllerHistoryEvent(eventName, details))
             continue;
         const fingerprint = controllerHistoryFingerprint(eventName, details);
         const previous = folds[folds.length - 1];
@@ -428,7 +428,9 @@ function controllerHistoryEventName(event) {
     const details = event.details ?? {};
     return event.type === "controller_event" && typeof details.event === "string" ? details.event : event.type.replace(/_/g, ".");
 }
-function isCompactControllerHistoryEvent(eventName) {
+function isCompactControllerHistoryEvent(eventName, details = {}) {
+    if (details.eventCategory === "poll")
+        return false;
     return ![
         "poll.started",
         "poll.finished",
@@ -436,6 +438,7 @@ function isCompactControllerHistoryEvent(eventName) {
         "validation.started",
         "validation.holding",
         "recovery.started",
+        "recovery.actionSucceeded",
     ].includes(eventName);
 }
 function controllerHistoryFingerprint(eventName, details) {
@@ -508,6 +511,7 @@ function formatControllerHistoryDetails(eventName, details) {
     append("observation", details.observation, 48);
     append("action", details.action, 48);
     append("rule", details.ruleId, 72);
+    append("category", details.eventCategory, 32);
     append("activation", details.activationState, 32);
     for (const key of ["started", "synced", "validating", "completed", "followups", "blocked", "failed", "ready", "queueBlocked", "nodes", "subagents", "validators", "expectedOutputs", "retry", "maxRetries", "signals", "changed", "allComplete", "integrationIssues", "subagentCleanupErrors"]) {
         append(key, details[key], 32);

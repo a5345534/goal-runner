@@ -176,21 +176,53 @@ test("runtime stores lifecycle/resource/recovery records in memory and sqlite st
         at: now,
         evidence: { runnerPid: 123 },
     }, { now });
+    const subagent = {
+        goalId: "goal-1",
+        nodeId: "node-1",
+        subagentId: "subagent-node-1",
+        harnessAdapterId: "pi",
+        status: "running",
+        prompts: ["initial"],
+        attemptId: "subagent-node-1-attempt-1",
+        attemptStartedAt: now,
+        attemptCursor: { at: now, source: "controller-start", messageIndex: 10 },
+        lastActionAttempt: {
+            actionId: "promptDispatch-goal-1-subagent-node-1",
+            actionKind: "promptDispatch",
+            startedAt: now,
+            deadlineAt: "2026-06-11T00:01:00.000Z",
+            status: "timedOut",
+            error: "timeout",
+        },
+        recoveryLoopSignature: "pi:protocolViolation:x:sendPromptToSameSession",
+        createdAt: now,
+        updatedAt: now,
+    };
     const memoryRuntime = new GoalRuntime({ store: new MemoryGoalStore() });
     await memoryRuntime.saveGoalDagNode(enriched);
+    await memoryRuntime.saveGoalSubagent(subagent);
     const fromMemory = await memoryRuntime.getGoalDagNode("goal-1", "node-1");
+    const memorySubagent = await memoryRuntime.getGoalSubagent("goal-1", "subagent-node-1");
     assert.equal(fromMemory?.lifecyclePhase, "resourcesReady");
     assert.equal(fromMemory?.preparedResources?.branch, "goal/node-1");
     assert.equal(fromMemory?.lastRecoveryDecision?.action, "restartRunnerSameSession");
+    assert.equal(memorySubagent?.attemptCursor?.messageIndex, 10);
+    assert.equal(memorySubagent?.lastActionAttempt?.status, "timedOut");
     const dir = mkdtempSync(join(tmpdir(), "agent-goal-lifecycle-test-"));
     try {
         const sqlite = new SQLiteGoalStore({ dbPath: join(dir, "goals.sqlite") });
         const sqliteRuntime = new GoalRuntime({ store: sqlite });
         await sqliteRuntime.saveGoalDagNode(enriched);
+        await sqliteRuntime.saveGoalSubagent(subagent);
         const fromSqlite = await sqliteRuntime.getGoalDagNode("goal-1", "node-1");
+        const sqliteSubagent = await sqliteRuntime.getGoalSubagent("goal-1", "subagent-node-1");
         assert.equal(fromSqlite?.lifecyclePhase, "resourcesReady");
         assert.equal(fromSqlite?.preparedResources?.workspacePath, "/repo/.worktrees/node-1");
         assert.equal(fromSqlite?.lastRecoveryDecision?.evidence?.runnerPid, 123);
+        assert.equal(sqliteSubagent?.attemptId, "subagent-node-1-attempt-1");
+        assert.equal(sqliteSubagent?.attemptCursor?.source, "controller-start");
+        assert.equal(sqliteSubagent?.lastActionAttempt?.actionKind, "promptDispatch");
+        assert.equal(sqliteSubagent?.recoveryLoopSignature, "pi:protocolViolation:x:sendPromptToSameSession");
         sqlite.close?.();
     }
     finally {

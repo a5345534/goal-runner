@@ -2,6 +2,20 @@ import { adapterObservationFromHarnessState } from "./lifecycle.js";
 export async function startGoalSubagent(adapter, node, options) {
     const subagentId = options.subagentId ?? `${node.nodeId}-${randomSuffix()}`;
     const startedAt = toIso(options.now ?? new Date());
+    const attemptId = metadataString(options.metadata, "attemptId") ?? buildAttemptId(subagentId, startedAt, 1);
+    const attemptStartedAt = metadataString(options.metadata, "attemptStartedAt") ?? startedAt;
+    const attemptCursor = normalizeAttemptCursor(options.metadata?.attemptCursor, {
+        at: attemptStartedAt,
+        source: "controller-start",
+        promptIndex: 0,
+    });
+    const launchAttempt = normalizeActionAttempt(options.metadata?.controllerActionAttempt, {
+        actionId: buildActionAttemptId("runnerLaunch", node.goalId, subagentId, startedAt),
+        actionKind: "runnerLaunch",
+        startedAt,
+        status: "started",
+        evidence: { adapterId: adapter.adapterId, nodeId: node.nodeId },
+    });
     const startResult = await adapter.startSession({
         goalId: node.goalId,
         node,
@@ -12,7 +26,14 @@ export async function startGoalSubagent(adapter, node, options) {
         systemPrompt: options.systemPrompt,
         initialPrompt: options.initialPrompt,
         preparedResources: options.preparedResources,
-        metadata: { ...(options.metadata ?? {}), ...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}) },
+        metadata: {
+            ...(options.metadata ?? {}),
+            attemptId,
+            attemptStartedAt,
+            attemptCursor,
+            controllerActionAttempt: launchAttempt,
+            ...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
+        },
     });
     const record = {
         goalId: node.goalId,
@@ -28,24 +49,56 @@ export async function startGoalSubagent(adapter, node, options) {
         integrationState: options.cwd || options.branch || options.ref || options.preparedResources ? "pending" : undefined,
         prompts: [options.initialPrompt],
         lastActivityAt: startResult.lastActivityAt ?? startedAt,
+        attemptId,
+        attemptStartedAt,
+        attemptCursor,
+        lastActionAttempt: { ...launchAttempt, status: "succeeded" },
         createdAt: startedAt,
         updatedAt: startedAt,
     };
     return { record, startResult };
 }
 export async function sendGoalSubagentPrompt(adapter, subagent, prompt, options = {}) {
-    await adapter.sendPrompt({ subagent, prompt, metadata: options.metadata });
     const now = toIso(options.now ?? new Date());
+    const attemptId = metadataString(options.metadata, "attemptId") ?? buildAttemptId(subagent.subagentId, now, subagent.prompts.length + 1);
+    const attemptStartedAt = metadataString(options.metadata, "attemptStartedAt") ?? now;
+    const attemptCursor = normalizeAttemptCursor(options.metadata?.attemptCursor, {
+        at: attemptStartedAt,
+        source: "prompt-dispatch",
+        promptIndex: subagent.prompts.length,
+    });
+    const dispatchAttempt = normalizeActionAttempt(options.metadata?.controllerActionAttempt, {
+        actionId: buildActionAttemptId("promptDispatch", subagent.goalId, subagent.subagentId, now),
+        actionKind: "promptDispatch",
+        startedAt: now,
+        status: "started",
+        evidence: { adapterId: adapter.adapterId, nodeId: subagent.nodeId, promptIndex: subagent.prompts.length },
+    });
+    const attemptScopedSubagent = { ...subagent, attemptId, attemptStartedAt, attemptCursor, lastActionAttempt: dispatchAttempt };
+    await adapter.sendPrompt({
+        subagent: attemptScopedSubagent,
+        prompt,
+        metadata: { ...(options.metadata ?? {}), attemptId, attemptStartedAt, attemptCursor, controllerActionAttempt: dispatchAttempt },
+    });
     return {
-        ...subagent,
+        ...attemptScopedSubagent,
         status: "needsFollowup",
         prompts: [...subagent.prompts, prompt],
+        lastActionAttempt: { ...dispatchAttempt, status: "succeeded" },
         lastActivityAt: now,
         updatedAt: now,
     };
 }
 export async function syncGoalSubagentState(adapter, subagent, options = {}) {
-    const state = await adapter.getSessionState({ subagent, metadata: options.metadata });
+    const state = await adapter.getSessionState({
+        subagent,
+        metadata: {
+            ...(options.metadata ?? {}),
+            attemptId: subagent.attemptId,
+            attemptStartedAt: subagent.attemptStartedAt,
+            attemptCursor: subagent.attemptCursor,
+        },
+    });
     const now = toIso(options.now ?? new Date());
     const nextStatus = mapHarnessStatusToSubagentStatus(state.status);
     if (isStaleBlockedOutcomeReplay(subagent, state, nextStatus))
@@ -115,6 +168,46 @@ export function mapHarnessStatusToSubagentStatus(status) {
         case "stopped":
             return "complete";
     }
+}
+function metadataString(metadata, key) {
+    const value = metadata?.[key];
+    return typeof value === "string" && value.trim() ? value : undefined;
+}
+function normalizeAttemptCursor(value, fallback) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+        return fallback;
+    const record = value;
+    return { ...record, at: typeof record.at === "string" ? record.at : fallback.at, source: typeof record.source === "string" ? record.source : fallback.source };
+}
+function normalizeActionAttempt(value, fallback) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+        return fallback;
+    const record = value;
+    return {
+        ...fallback,
+        ...record,
+        actionId: typeof record.actionId === "string" ? record.actionId : fallback.actionId,
+        actionKind: isActionAttemptKind(record.actionKind) ? record.actionKind : fallback.actionKind,
+        startedAt: typeof record.startedAt === "string" ? record.startedAt : fallback.startedAt,
+        deadlineAt: typeof record.deadlineAt === "string" ? record.deadlineAt : fallback.deadlineAt,
+        status: isActionAttemptStatus(record.status) ? record.status : fallback.status,
+        error: typeof record.error === "string" ? record.error : fallback.error,
+        evidence: record.evidence && typeof record.evidence === "object" && !Array.isArray(record.evidence) ? record.evidence : fallback.evidence,
+    };
+}
+function isActionAttemptKind(value) {
+    return typeof value === "string" && ["runnerLaunch", "promptDispatch", "recovery", "validation", "integration", "promotion", "cleanup"].includes(value);
+}
+function isActionAttemptStatus(value) {
+    return typeof value === "string" && ["started", "succeeded", "timedOut", "failed", "degraded"].includes(value);
+}
+function buildActionAttemptId(kind, goalId, subagentId, at) {
+    const timestamp = String(Date.parse(at)).replace(/[^0-9]/g, "") || at.replace(/[^0-9a-zA-Z]+/g, "-");
+    return `${kind}-${goalId}-${subagentId}-${timestamp}`;
+}
+function buildAttemptId(subagentId, at, promptIndex) {
+    const timestamp = String(Date.parse(at)).replace(/[^0-9]/g, "") || at.replace(/[^0-9a-zA-Z]+/g, "-");
+    return `${subagentId}-attempt-${promptIndex}-${timestamp}`;
 }
 function randomSuffix() {
     return Math.random().toString(36).slice(2, 10);
