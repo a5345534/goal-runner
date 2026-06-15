@@ -1,0 +1,15 @@
+/**
+ * Convert the goal-runner canonical model id (`provider/model`) into
+ * opencode's session.prompt body shape.
+ */
+export function toOpencodeBodyModel(modelArg) {
+    const trimmed = modelArg?.trim();
+    if (!trimmed)
+        return undefined;
+    const [providerID, ...rest] = trimmed.split("/");
+    const modelID = rest.join("/");
+    if (!providerID || !modelID)
+        return { providerID: trimmed, modelID: trimmed };
+    return { providerID, modelID };
+}
+//# sourceMappingURL=model-args.js.map
