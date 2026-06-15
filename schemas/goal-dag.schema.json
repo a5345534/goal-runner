@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/a5345534/goal-runner/schemas/goal-dag.schema.json",
   "title": "Agent Goal DAG",
+  "description": "Stage 3 goal-runner runtime DAG JSON. This is the only multi-node runtime input for /goal --dag; producer trace sidecars, OpenSpec packages, PRDs, and markdown plans are not valid runtime inputs.",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "objective", "nodes"],
@@ -70,6 +71,7 @@
     },
     "validation": {
       "type": "object",
+      "description": "Generic controller validation contract. High-risk implementation nodes without validators, outputs, profile, approved test-spec references, artifact locks, or required evidence fail closed during controller validation.",
       "additionalProperties": false,
       "properties": {
         "profile": { "type": "string", "minLength": 1 },
@@ -154,7 +156,7 @@
         "completionGates": { "$ref": "#/$defs/stringList" },
         "conflicts": { "$ref": "#/$defs/conflicts" },
         "modelScenario": { "$ref": "#/$defs/scenarioId" },
-        "thinkingLevel": { "type": "string", "minLength": 1 }
+        "thinkingLevel": { "type": "string", "minLength": 1, "description": "Default Pi thinking level for nodes that do not override thinkingLevel." }
       }
     },
     "node": {
@@ -172,14 +174,14 @@
         "validators": { "$ref": "#/$defs/stringList" },
         "conflicts": { "$ref": "#/$defs/conflicts" },
         "scope": { "type": "string", "minLength": 1 },
-        "kind": { "type": "string", "minLength": 1 },
-        "validation": { "$ref": "#/$defs/validation" },
+        "kind": { "type": "string", "minLength": 1, "description": "Optional workflow role label such as test-spec, test-review, implementation, or audit. Runtime treats unknown values as labels, while validation policy may enforce known high-risk combinations." },
+        "validation": { "$ref": "#/$defs/validation", "description": "Controller validation contract enforced by goal-runner; producer trace metadata is not consulted at runtime." },
         "workspaceStrategy": { "type": "string", "minLength": 1 },
         "workspace": { "$ref": "#/$defs/workspace" },
         "risk": { "enum": ["low", "medium", "high"] },
         "completionGates": { "$ref": "#/$defs/stringList" },
         "modelScenario": { "$ref": "#/$defs/scenarioId" },
-        "thinkingLevel": { "type": "string", "minLength": 1 }
+        "thinkingLevel": { "type": "string", "minLength": 1, "description": "Pi thinking level for this node; overrides defaults.thinkingLevel." }
       }
     }
   }

@@ -20,6 +20,16 @@ This project provides the common framework first:
 
 Other agent harness bridges are intentionally out of scope for this first implementation and should be added through separate changes.
 
+## Pipeline Role
+
+`goal-runner` is Stage 3 of the goal execution pipeline:
+
+```text
+Goal DAG JSON → runtime execution
+```
+
+It consumes explicit DAG files through `/goal --dag <path>`. It does not generate DAG files and does not infer multi-node plans from prose, OpenSpec, PRDs, or markdown task lists. See [`docs/pipeline-boundaries.md`](docs/pipeline-boundaries.md) for the producer/consumer boundary.
+
 The current orchestration-state slices record DAG nodes and subagent registry
 records through the portable store/runtime APIs, provide a default native Git
 workspace manager that can allocate dedicated controller and subagent
@@ -107,7 +117,7 @@ The portable core exports deterministic DAG helpers for controller adapters. See
 file format supported by `/goal --dag <path>`.
 
 - `planGoalDagFromObjective()` converts free-form objective text into exactly one
-  `GoalDagPlanNodeInput` fallback node,
+  `GoalDagPlanNodeInput` fallback node and never parses markdown task lists into multiple nodes,
 - `parseGoalDagFileContent()` and `planGoalDagFromFileDocument()` load explicit,
   schema-shaped JSON DAG files for multi-node execution, including optional
   model-routing scenarios for controller/subagent model selection,

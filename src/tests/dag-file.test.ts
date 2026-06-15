@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   createGoalDagNodesFromFileContent,
   GoalRuntime,
@@ -18,6 +19,7 @@ const validDag = {
     workspaceStrategy: "native-git-worktree",
     completionGates: ["controller-validation"],
     conflicts: { modules: ["people-frappe-module"] },
+    thinkingLevel: "high",
   },
   nodes: [
     {
@@ -32,6 +34,7 @@ const validDag = {
       after: ["attendance-parity"],
       validators: ["pytest"],
       risk: "medium",
+      thinkingLevel: "xhigh",
     },
   ],
 } as const;
@@ -51,6 +54,8 @@ test("goal DAG file parser creates explicit nodes without inferred sequencing", 
   assert.deepEqual(plan.nodeInputs[0]?.conflictHints?.modules, undefined);
   assert.deepEqual(plan.nodeInputs[1]?.conflictHints?.modules, ["people-frappe-module"]);
   assert.equal(plan.nodeInputs[1]?.risk, "medium");
+  assert.equal(plan.nodeInputs[0]?.thinkingLevel, "high");
+  assert.equal(plan.nodeInputs[1]?.thinkingLevel, "xhigh");
 });
 
 test("goal DAG file parser accepts node workspace bindings and rejects nested worktree outputs", () => {
@@ -94,6 +99,7 @@ test("goal DAG file parser rejects invalid structure before execution", () => {
   assert.throws(() => parseGoalDagFileContent(JSON.stringify({ version: 1, objective: "x", nodes: [{ id: "Bad_Id", objective: "x" }] })), /kebab-case/);
   assert.throws(() => parseGoalDagFileContent(JSON.stringify({ version: 1, objective: "x", nodes: [{ id: "a", objective: "x" }, { id: "a", objective: "y" }] })), /duplicate node id: a/);
   assert.throws(() => parseGoalDagFileContent(JSON.stringify({ version: 1, objective: "x", nodes: [{ id: "a", objective: "x", after: ["missing"] }] })), /depends on missing node missing/);
+  assert.throws(() => parseGoalDagFileContent(JSON.stringify({ version: 1, objective: "x", nodes: [{ id: "a", objective: "x", after: ["a"] }] })), /depends on itself/);
   assert.throws(
     () =>
       parseGoalDagFileContent(
@@ -108,6 +114,49 @@ test("goal DAG file parser rejects invalid structure before execution", () => {
       ),
     /cycle detected: a -> b -> a/,
   );
+});
+
+test("goal DAG file parser rejects trace sidecars and producer-only fields", () => {
+  assert.throws(
+    () => parseGoalDagFileContent(JSON.stringify({ version: 1, goalDagSpecId: "spec-1", trace: { source: "producer" } })),
+    /root has unsupported field goalDagSpecId|nodes must be an array/,
+  );
+  assert.throws(
+    () => parseGoalDagFileContent(JSON.stringify({ version: 1, objective: "x", nodes: [{ id: "a", objective: "x", consumes: ["spec"], produces: ["output"], evidence: [] }] })),
+    /nodes\[0\] has unsupported field consumes/,
+  );
+});
+
+test("goal DAG file parser rejects invalid validation locks and unknown model scenarios", () => {
+  assert.throws(
+    () => parseGoalDagFileContent(JSON.stringify({
+      version: 1,
+      objective: "x",
+      nodes: [{ id: "a", objective: "x", validation: { artifactLocks: [{ path: "tests/a.test.ts", sha256: "not-a-sha" }] } }],
+    })),
+    /sha256 hex digest/,
+  );
+  assert.throws(
+    () => parseGoalDagFileContent(JSON.stringify({
+      version: 1,
+      objective: "x",
+      modelRouting: { scenarios: { docs: { model: "openai/gpt" } } },
+      nodes: [{ id: "a", objective: "x", modelScenario: "missing" }],
+    })),
+    /modelScenario references unknown scenario missing/,
+  );
+});
+
+test("goal DAG file documentation full examples pass parser validation", () => {
+  const docs = readFileSync(new URL("../../docs/goal-dag-format.md", import.meta.url), "utf8");
+  const blocks = [...docs.matchAll(/```json\n([\s\S]*?)\n```/g)].map((match) => match[1] ?? "");
+  const runtimeExamples = blocks.filter((block) => block.includes('"version"') && block.includes('"nodes"'));
+  assert.ok(runtimeExamples.length >= 2);
+  for (const block of runtimeExamples) {
+    const document = parseGoalDagFileContent(block);
+    assert.equal(document.version, 1);
+    assert.ok(document.nodes.length > 0);
+  }
 });
 
 test("goal DAG file nodes are persisted and scheduled by dependencies", async () => {
@@ -129,6 +178,8 @@ test("goal DAG file content creates durable nodes", () => {
 
   assert.equal(plan.nodes.length, 2);
   assert.equal(plan.nodes[0]?.workspaceStrategy, "native-git-worktree");
+  assert.equal(plan.nodes[0]?.thinkingLevel, "high");
+  assert.equal(plan.nodes[1]?.thinkingLevel, "xhigh");
   assert.deepEqual(plan.nodes[1]?.dependencyNodeIds, ["attendance-parity"]);
 });
 

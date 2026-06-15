@@ -908,6 +908,7 @@ test("Pi goal start can load an explicit DAG file", async () => {
       ],
     }),
   );
+  writeFileSync(join(workspace, "goal.trace.json"), JSON.stringify({ traceVersion: 1, dagFile: "goal.dag.json", decisions: [] }));
   setPiBackgroundGoalSessionLauncherForTests(async (request) => {
     launched.push(request);
     return {
@@ -959,6 +960,11 @@ test("Pi goal start can load an explicit DAG file", async () => {
   try {
     goalPiExtension(pi as never);
     assert.ok(commandHandler);
+    await commandHandler?.("--dag goal.trace.json", controllerCtx as never);
+    assert.match(notifications.at(-1) ?? "", /Invalid goal DAG file/);
+    await commandHandler?.("--dag goal.dag.json extra objective", controllerCtx as never);
+    assert.match(notifications.at(-1) ?? "", /objective must come from the DAG file/);
+    assert.equal(launched.length, 0);
     await commandHandler?.("--dag goal.dag.json", controllerCtx as never);
 
     assert.equal(launched.length, 2);

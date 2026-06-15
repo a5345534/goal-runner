@@ -5,7 +5,19 @@
 - Use `/goal <objective>` for a single execution node.
 - Use `/goal --dag <path>` for an explicit multi-node DAG.
 
-The JSON schema lives at [`schemas/goal-dag.schema.json`](../schemas/goal-dag.schema.json).
+The JSON schema lives at [`schemas/goal-dag.schema.json`](../schemas/goal-dag.schema.json). `goal-runner` owns this schema, the parser, graph validation, scheduling behavior, model-routing application, controller/subagent state, validator execution, completion audit, and lifecycle ledger. See [`pipeline-boundaries.md`](pipeline-boundaries.md) for the Stage 3 boundary.
+
+## Producer / Consumer Boundary
+
+Producer tools such as `goal-dag` may produce `.dag.json` and optional `.trace.json` files.
+
+`goal-runner` consumes only `.dag.json` runtime DAG files that match [`schemas/goal-dag.schema.json`](../schemas/goal-dag.schema.json).
+
+`.trace.json` is review/audit sidecar data for humans and producer workflows. It is not runtime input and must not affect scheduling, validation, model routing, workspace allocation, validator execution, or completion.
+
+OpenSpec change packages are not runtime inputs. Convert them into DAG JSON using the producer stage before invoking `/goal --dag`.
+
+`goal-runner` does not consume `GoalDagSpec`, producer trace sidecars, `source-manifest.json`, `change-explainer.html`, PRDs, design docs, ticket markdown, or markdown task lists.
 
 ## Command
 
@@ -68,7 +80,8 @@ Nodes with no `after` dependencies are immediately schedulable, subject to contr
     ],
     "conflicts": {
       "modules": ["people-frappe-module"]
-    }
+    },
+    "thinkingLevel": "high"
   },
   "modelRouting": {
     "scenarios": {
@@ -165,6 +178,7 @@ Nodes with no `after` dependencies are immediately schedulable, subject to contr
 | `risk` | no | `low` / `medium` / `high` | Risk label for scheduling/model-routing/review policy. |
 | `completionGates` | no | string array | Completion gates. Defaults to `controller-validation`. Integration gate names such as `subagent-integration`, `subagent-branch-integration`, `branch-integration`, or `native-git-integration` explicitly require branch integration before completion. `post-merge-validation` additionally requires post-merge validators in the controller workspace. |
 | `modelScenario` | no | scenario id | Explicit model-routing scenario for this node. Overrides defaults and rules. |
+| `thinkingLevel` | no | string | Pi thinking level for this node. Overrides `defaults.thinkingLevel`. |
 
 ## Validation contract
 
@@ -208,6 +222,10 @@ Every subagent launch includes a controller execution policy in the executor pro
 Supported built-in evidence labels include `validators-ran`, `locked-artifacts-unchanged`, `implementation-diff-present`, `non-test-diff-present`, `post-merge-validation-ran`, and `audit-report-present`. `post-merge-validation-ran` is deferred to native Git integration and is only satisfied by the post-merge validation gate, not by ordinary pre-integration validator execution. `audit-report-present` requires a readable report file and fails if the report explicitly says violations remain (for example `9 violation paths / 98 files remain`). Unknown labels fail closed until a planner/runtime adapter teaches the controller how to satisfy them.
 
 For high-risk `kind=implementation` nodes, controller validation fails if the node has no validators, outputs, validation profile, approved test-spec reference, artifact locks, or required evidence. This prevents high-risk work from completing on self-report alone.
+
+### Producer guidance
+
+Producer tools should use `kind` and `validation` when modeling test-spec-first, implementation, review, and audit nodes. Runtime enforces the declared contract; it does not infer missing validation policy from producer trace metadata. If a producer cannot provide validators, expected outputs, validation profile, approved test-spec references, artifact locks, or required evidence for a high-risk implementation node, the node should remain outside `/goal --dag` until the producer can emit a complete runtime DAG contract.
 
 ## Subagent branch integration
 
@@ -263,11 +281,12 @@ Subagents running in native-git workspaces should commit intended repository cha
     "modules": ["module"],
     "capabilities": ["capability"]
   },
-  "modelScenario": "implementation"
+  "modelScenario": "implementation",
+  "thinkingLevel": "high"
 }
 ```
 
-A node-level field overrides the corresponding default. For example, if `defaults.validators` is set and a node also has `validators`, only the node's validators are used for that node.
+A node-level field overrides the corresponding default. For example, if `defaults.validators` is set and a node also has `validators`, only the node's validators are used for that node. `defaults.thinkingLevel` is applied to nodes that do not set `thinkingLevel`.
 
 ## Model routing
 
@@ -312,7 +331,7 @@ A node-level field overrides the corresponding default. For example, if `default
 }
 ```
 
-Scenario ids must match `^[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$`. `model` is the harness-native model string; in Pi this is the same `provider/model` shape accepted by Pi package model arguments.
+Scenario ids must match `^[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$`. `model` is the adapter-neutral canonical `provider/model` string; harness adapters translate it into their native request shapes.
 
 Selection order for subagents:
 

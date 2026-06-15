@@ -40,11 +40,13 @@ const SCENARIO_ID_PATTERN = /^[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$/;
 
 export function parseGoalModelRoutingConfig(input: unknown, path = "modelRouting"): GoalModelRoutingConfig {
   if (!isRecord(input)) throw new Error(`Invalid goal model routing: ${path} must be an object`);
+  assertKnownKeys(input, ["scenarios", "controllerScenario", "defaultSubagentScenario", "rules"], path);
   if (!isRecord(input.scenarios)) throw new Error(`Invalid goal model routing: ${path}.scenarios must be an object`);
   const scenarios: Record<string, GoalModelScenario> = {};
   for (const [name, value] of Object.entries(input.scenarios)) {
     const scenarioId = requireScenarioId(name, `${path}.scenarios key`);
     if (!isRecord(value)) throw new Error(`Invalid goal model routing: ${path}.scenarios.${name} must be an object`);
+    assertKnownKeys(value, ["model", "description"], `${path}.scenarios.${name}`);
     const model = requireNonEmptyString(value.model, `${path}.scenarios.${name}.model`);
     const description = value.description === undefined ? undefined : requireNonEmptyString(value.description, `${path}.scenarios.${name}.description`);
     scenarios[scenarioId] = description ? { model, description } : { model };
@@ -129,6 +131,7 @@ function parseRules(input: unknown, scenarios: Record<string, GoalModelScenario>
   return input.map((item, index): GoalModelRoutingRule => {
     const itemPath = `${path}[${index}]`;
     if (!isRecord(item)) throw new Error(`Invalid goal model routing: ${itemPath} must be an object`);
+    assertKnownKeys(item, ["scenario", "when"], itemPath);
     const scenario = requireKnownScenario(item.scenario, scenarios, `${itemPath}.scenario`);
     const when = item.when === undefined ? undefined : parseRuleMatch(item.when, `${itemPath}.when`);
     return when ? { scenario, when } : { scenario };
@@ -137,6 +140,7 @@ function parseRules(input: unknown, scenarios: Record<string, GoalModelScenario>
 
 function parseRuleMatch(input: unknown, path: string): GoalModelRoutingRuleMatch {
   if (!isRecord(input)) throw new Error(`Invalid goal model routing: ${path} must be an object`);
+  assertKnownKeys(input, ["nodeIds", "scopes", "risks", "modules", "capabilities", "files", "objectiveIncludes", "hasValidators", "hasOutputs"], path);
   const match: GoalModelRoutingRuleMatch = {};
   if (input.nodeIds !== undefined) match.nodeIds = parseStringArray(input.nodeIds, `${path}.nodeIds`);
   if (input.scopes !== undefined) match.scopes = parseStringArray(input.scopes, `${path}.scopes`);
@@ -207,4 +211,11 @@ function requireNonEmptyString(input: unknown, path: string): string {
 
 function isRecord(input: unknown): input is Record<string, unknown> {
   return Boolean(input) && typeof input === "object" && !Array.isArray(input);
+}
+
+function assertKnownKeys(input: Record<string, unknown>, allowed: string[], path: string): void {
+  const allowedSet = new Set(allowed);
+  for (const key of Object.keys(input)) {
+    if (!allowedSet.has(key)) throw new Error(`Invalid goal model routing: ${path} has unsupported field ${key}`);
+  }
 }

@@ -18,6 +18,7 @@ export interface GoalDagFileDefaults {
   completionGates?: string[];
   conflicts?: GoalDagConflictHints;
   modelScenario?: string;
+  thinkingLevel?: string;
 }
 
 export interface GoalDagFileNode {
@@ -57,6 +58,7 @@ export function parseGoalDagFileContent(content: string): GoalDagFileDocument {
 
 export function parseGoalDagFileDocument(input: unknown): GoalDagFileDocument {
   if (!isRecord(input)) throw new Error("Invalid goal DAG file: root must be an object");
+  assertKnownKeys(input, ["version", "objective", "defaults", "modelRouting", "nodes"], "root");
   const version = input.version;
   if (version !== 1) throw new Error("Invalid goal DAG file: version must be 1");
   const objective = requireNonEmptyString(input.objective, "objective");
@@ -89,6 +91,7 @@ export function planGoalDagFromFileDocument(
   const defaultCompletionGates = document.defaults?.completionGates ?? options.defaultCompletionGates;
   const defaultConflicts = document.defaults?.conflicts;
   const defaultModelScenario = document.defaults?.modelScenario;
+  const defaultThinkingLevel = document.defaults?.thinkingLevel;
 
   return {
     goalId,
@@ -122,7 +125,7 @@ export function planGoalDagFromFileDocument(
         risk: node.risk,
         modelScenario,
         modelArg: selection.model,
-        thinkingLevel: node.thinkingLevel,
+        thinkingLevel: node.thinkingLevel ?? defaultThinkingLevel,
         conflictHints,
         completionGates: [...(node.completionGates ?? defaultCompletionGates ?? ["controller-validation"])],
       };
@@ -154,6 +157,7 @@ export function createGoalDagNodesFromFileContent(
 
 function parseDefaults(input: unknown, path: string): GoalDagFileDefaults {
   if (!isRecord(input)) throw new Error(`Invalid goal DAG file: ${path} must be an object`);
+  assertKnownKeys(input, ["outputs", "validators", "workspaceStrategy", "completionGates", "conflicts", "modelScenario", "thinkingLevel"], path);
   const defaults: GoalDagFileDefaults = {};
   if (input.outputs !== undefined) defaults.outputs = parseStringArray(input.outputs, `${path}.outputs`);
   if (input.validators !== undefined) defaults.validators = parseStringArray(input.validators, `${path}.validators`);
@@ -161,11 +165,13 @@ function parseDefaults(input: unknown, path: string): GoalDagFileDefaults {
   if (input.completionGates !== undefined) defaults.completionGates = parseStringArray(input.completionGates, `${path}.completionGates`);
   if (input.conflicts !== undefined) defaults.conflicts = parseConflicts(input.conflicts, `${path}.conflicts`);
   if (input.modelScenario !== undefined) defaults.modelScenario = requireNonEmptyString(input.modelScenario, `${path}.modelScenario`);
+  if (input.thinkingLevel !== undefined) defaults.thinkingLevel = requireNonEmptyString(input.thinkingLevel, `${path}.thinkingLevel`);
   return defaults;
 }
 
 function parseNode(input: unknown, path: string): GoalDagFileNode {
   if (!isRecord(input)) throw new Error(`Invalid goal DAG file: ${path} must be an object`);
+  assertKnownKeys(input, ["id", "objective", "after", "outputs", "validators", "conflicts", "scope", "kind", "validation", "workspaceStrategy", "workspace", "risk", "completionGates", "modelScenario", "thinkingLevel"], path);
   const id = requireKebabId(input.id, `${path}.id`);
   const objective = requireNonEmptyString(input.objective, `${path}.objective`);
   const node: GoalDagFileNode = { id, objective };
@@ -187,6 +193,7 @@ function parseNode(input: unknown, path: string): GoalDagFileNode {
 
 function parseWorkspaceBinding(input: unknown, path: string): GoalDagNode["workspace"] {
   if (!isRecord(input)) throw new Error(`Invalid goal DAG file: ${path} must be an object`);
+  assertKnownKeys(input, ["worktreeSlug", "branch", "baseRef"], path);
   const binding: NonNullable<GoalDagNode["workspace"]> = {};
   if (input.worktreeSlug !== undefined) binding.worktreeSlug = requireNonEmptyString(input.worktreeSlug, `${path}.worktreeSlug`);
   if (input.branch !== undefined) binding.branch = requireNonEmptyString(input.branch, `${path}.branch`);
@@ -197,6 +204,7 @@ function parseWorkspaceBinding(input: unknown, path: string): GoalDagNode["works
 
 function parseValidationContract(input: unknown, path: string): GoalDagValidationContract {
   if (!isRecord(input)) throw new Error(`Invalid goal DAG file: ${path} must be an object`);
+  assertKnownKeys(input, ["profile", "testSpecNodeId", "approvedByNodeId", "artifactLocks", "requiredEvidence", "onAuditTestGap", "diffBaseRef", "auditReportPaths", "allowedPaths", "forbiddenPaths"], path);
   const contract: GoalDagValidationContract = {};
   if (input.profile !== undefined) contract.profile = requireNonEmptyString(input.profile, `${path}.profile`);
   if (input.testSpecNodeId !== undefined) contract.testSpecNodeId = requireKebabId(input.testSpecNodeId, `${path}.testSpecNodeId`);
@@ -218,6 +226,7 @@ function parseArtifactLocks(input: unknown, path: string): GoalValidationArtifac
 
 function parseArtifactLock(input: unknown, path: string): GoalValidationArtifactLock {
   if (!isRecord(input)) throw new Error(`Invalid goal DAG file: ${path} must be an object`);
+  assertKnownKeys(input, ["path", "sha256", "sourceNodeId", "approvedByNodeId", "approvedAt"], path);
   const lock: GoalValidationArtifactLock = {
     path: requireNonEmptyString(input.path, `${path}.path`),
     sha256: requireSha256(input.sha256, `${path}.sha256`),
@@ -290,6 +299,7 @@ function validateFileModelScenarios(
 
 function parseConflicts(input: unknown, path: string): GoalDagConflictHints {
   if (!isRecord(input)) throw new Error(`Invalid goal DAG file: ${path} must be an object`);
+  assertKnownKeys(input, ["files", "modules", "capabilities"], path);
   const conflicts: GoalDagConflictHints = {};
   if (input.files !== undefined) conflicts.files = parseStringArray(input.files, `${path}.files`);
   if (input.modules !== undefined) conflicts.modules = parseStringArray(input.modules, `${path}.modules`);
@@ -331,6 +341,13 @@ function requireSha256(input: unknown, path: string): string {
 
 function isRecord(input: unknown): input is Record<string, unknown> {
   return Boolean(input) && typeof input === "object" && !Array.isArray(input);
+}
+
+function assertKnownKeys(input: Record<string, unknown>, allowed: string[], path: string): void {
+  const allowedSet = new Set(allowed);
+  for (const key of Object.keys(input)) {
+    if (!allowedSet.has(key)) throw new Error(`Invalid goal DAG file: ${path} has unsupported field ${key}`);
+  }
 }
 
 function cloneConflictHints(hints: GoalDagConflictHints | undefined): GoalDagConflictHints | undefined {

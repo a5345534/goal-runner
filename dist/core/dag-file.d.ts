@@ -16,6 +16,7 @@ export interface GoalDagFileDefaults {
     completionGates?: string[];
     conflicts?: GoalDagConflictHints;
     modelScenario?: string;
+    thinkingLevel?: string;
 }
 export interface GoalDagFileNode {
     id: string;
