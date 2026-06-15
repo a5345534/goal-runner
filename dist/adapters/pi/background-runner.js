@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
+import { normalizePiModelArg } from "./model-args.js";
 import { isPiGoalSessionEntryType } from "./session-store.js";
 const TERMINAL_GOAL_STATUSES = new Set(["complete", "blocked", "paused", "budgetLimited", "usageLimited"]);
 const configPath = process.argv[2];
@@ -157,8 +158,9 @@ async function main() {
     else
         throw new Error("Background runner config requires sessionId or sessionFile");
     args.push("--name", config.sessionName);
-    if (config.modelArg)
-        args.push("--model", config.modelArg);
+    const modelArg = normalizePiModelArg(config.modelArg);
+    if (modelArg)
+        args.push("--model", modelArg);
     if (config.thinkingLevel)
         args.push("--thinking", config.thinkingLevel);
     const child = spawn(process.execPath, args, {

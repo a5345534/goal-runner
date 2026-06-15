@@ -43,6 +43,7 @@ import {
   type BackgroundGoalSessionLauncher,
 } from "./background-session.js";
 import { GoalListController } from "./goal-list-ui.js";
+import { normalizePiModelArg } from "./model-args.js";
 import { GoalMonitorController, type GoalMonitorDagSnapshot, type GoalMonitorRunnerOperation, type GoalMonitorSelection } from "./monitor-ui.js";
 import { PI_GOAL_SESSION_ENTRY_TYPE, PiSessionGoalMirrorStore } from "./session-store.js";
 import {
@@ -552,11 +553,12 @@ async function startGoalOwnedPiSession(
   const labelObjective = command.objective.length <= 64 ? command.objective : `${command.objective.slice(0, 61)}...`;
   const provisionalSessionName = `goal: ${labelObjective}`;
   const controllerModel = resolveControllerModelArg(options.modelRouting, modelArgFromContext(ctx));
+  const controllerModelArg = normalizePiModelArg(controllerModel.model);
   const background = await backgroundGoalSessionLauncher({
     cwd: binding.workspace,
     sessionId: `goal-${randomUUID().replace(/-/g, "").slice(0, 24)}`,
     sessionName: provisionalSessionName,
-    modelArg: controllerModel.model,
+    modelArg: controllerModelArg,
     thinkingLevel: options.thinkingLevel,
   });
 
@@ -580,7 +582,7 @@ async function startGoalOwnedPiSession(
       sessionFile: background.sessionFile,
       sessionName,
       controllerModelScenario: controllerModel.scenario,
-      controllerModelArg: controllerModel.model,
+      controllerModelArg,
       legacySessionBound: false,
       createdAt: created.goal.createdAt,
       updatedAt: new Date().toISOString(),
@@ -670,7 +672,7 @@ function buildPiGoalControllerLoopOptions(
   controllerDefaults: PiGoalControllerDefaults = {},
 ): Parameters<GoalRuntime["runGoalControllerLoop"]>[1] {
   const workspaceManager = new NativeGitWorkspaceManager({ defaultBaseRef: binding.branch ?? binding.ref, fetch: false });
-  const fallbackModelArg = modelArgFromContext(ctx);
+  const fallbackModelArg = normalizePiModelArg(modelArgFromContext(ctx));
   const fallbackThinkingLevel = controllerDefaults.thinkingLevel;
   const adapter = getOrCreatePiGoalControllerAdapter(goal.goalId, fallbackModelArg);
   const allocator = createNativeGitSubagentWorkspaceAllocator(workspaceManager, {
@@ -692,7 +694,7 @@ function buildPiGoalControllerLoopOptions(
         metadata: {
           ...(allocation?.metadata ?? {}),
           controllerGoalId: goal.goalId,
-          modelArg: selection.model,
+          modelArg: normalizePiModelArg(selection.model),
           modelScenario: selection.scenario,
           modelScenarioReason: selection.reason,
           thinkingLevel: request.node.thinkingLevel ?? fallbackThinkingLevel,
@@ -1947,7 +1949,7 @@ async function resumeTargetGoal(runtime: GoalRuntime, ctx: ExtensionCommandConte
         cwd: goal.executionWorkspace,
         sessionFile: goal.sessionFile,
         sessionName,
-        modelArg: goal.controllerModelArg ?? modelArgFromContext(ctx),
+        modelArg: normalizePiModelArg(goal.controllerModelArg ?? modelArgFromContext(ctx)),
         thinkingLevel: controllerDefaults.thinkingLevel,
       });
       backgroundGoalSessions.set(resumed.goalId, background);

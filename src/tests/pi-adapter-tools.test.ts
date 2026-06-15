@@ -999,9 +999,9 @@ test("Pi DAG model routing selects controller and subagent models", async () => 
       objective: "Route model scenarios",
       modelRouting: {
         scenarios: {
-          controller: { model: "controller/model" },
+          controller: { model: "openai-codex.gpt-5.5" },
           implementation: { model: "implementation/model" },
-          docs: { model: "docs/model" },
+          docs: { model: "deepseek.deepseek-v4-pro" },
         },
         controllerScenario: "controller",
         defaultSubagentScenario: "implementation",
@@ -1058,9 +1058,9 @@ test("Pi DAG model routing selects controller and subagent models", async () => 
     await commandHandler?.("--dag models.dag.json", controllerCtx as never);
 
     assert.equal(launched.length, 2);
-    assert.equal(launched[0]?.modelArg, "controller/model");
+    assert.equal(launched[0]?.modelArg, "openai-codex/gpt-5.5");
     assert.equal(launched[0]?.thinkingLevel, "xhigh");
-    assert.equal(launched[1]?.modelArg, "docs/model");
+    assert.equal(launched[1]?.modelArg, "deepseek/deepseek-v4-pro");
     assert.equal(launched[1]?.thinkingLevel, "xhigh");
   } finally {
     setPiBackgroundGoalSessionLauncherForTests();

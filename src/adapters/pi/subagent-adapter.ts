@@ -17,6 +17,7 @@ import {
   type BackgroundGoalSessionLauncher,
   type BackgroundGoalSessionLaunchRequest,
 } from "./background-session.js";
+import { normalizePiModelArg } from "./model-args.js";
 import { readPiBackgroundRunnerInventory } from "./runner-ops.js";
 import { isPiGoalSessionEntryType } from "./session-store.js";
 
@@ -126,7 +127,7 @@ export class PiHarnessSubagentAdapter implements HarnessSubagentAdapter {
       cwd: subagent.workspacePath ?? process.cwd(),
       sessionFile: subagent.sessionFile,
       sessionName: sessionNameForSubagent(subagent),
-      modelArg: this.modelArg,
+      modelArg: normalizePiModelArg(this.modelArg),
     };
     this.stopExistingHandle(subagent);
     const handle = await this.launcher(launch);
@@ -324,7 +325,7 @@ function launchRequestForStart(request: HarnessSubagentStartRequest, modelArg: s
     sessionId: request.preparedResources?.sessionId ?? (request.preparedResources?.sessionFile ? undefined : piSessionId(request.subagentId)),
     sessionFile: request.preparedResources?.sessionFile,
     sessionName: metadataString(request.metadata, "sessionName") ?? `subagent ${request.subagentId}: ${request.node.slug}`,
-    modelArg: request.preparedResources?.modelArg ?? metadataString(request.metadata, "modelArg") ?? modelArg,
+    modelArg: normalizePiModelArg(request.preparedResources?.modelArg ?? metadataString(request.metadata, "modelArg") ?? modelArg),
     thinkingLevel: request.preparedResources?.thinkingLevel ?? metadataString(request.metadata, "thinkingLevel"),
   };
 }

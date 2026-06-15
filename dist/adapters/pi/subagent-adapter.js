@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { closeSync, existsSync, openSync, readSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { launchPiRpcBackgroundGoalSession, } from "./background-session.js";
+import { normalizePiModelArg } from "./model-args.js";
 import { readPiBackgroundRunnerInventory } from "./runner-ops.js";
 import { isPiGoalSessionEntryType } from "./session-store.js";
 const RESULT_MARKER = /(?:^|\n)\s*SUBAGENT_RESULT\s*:\s*([\s\S]*?)(?=\n\s*SUBAGENT_[A-Z_]+\s*:|$)/i;
@@ -81,7 +82,7 @@ export class PiHarnessSubagentAdapter {
             cwd: subagent.workspacePath ?? process.cwd(),
             sessionFile: subagent.sessionFile,
             sessionName: sessionNameForSubagent(subagent),
-            modelArg: this.modelArg,
+            modelArg: normalizePiModelArg(this.modelArg),
         };
         this.stopExistingHandle(subagent);
         const handle = await this.launcher(launch);
@@ -277,7 +278,7 @@ function launchRequestForStart(request, modelArg) {
         sessionId: request.preparedResources?.sessionId ?? (request.preparedResources?.sessionFile ? undefined : piSessionId(request.subagentId)),
         sessionFile: request.preparedResources?.sessionFile,
         sessionName: metadataString(request.metadata, "sessionName") ?? `subagent ${request.subagentId}: ${request.node.slug}`,
-        modelArg: request.preparedResources?.modelArg ?? metadataString(request.metadata, "modelArg") ?? modelArg,
+        modelArg: normalizePiModelArg(request.preparedResources?.modelArg ?? metadataString(request.metadata, "modelArg") ?? modelArg),
         thinkingLevel: request.preparedResources?.thinkingLevel ?? metadataString(request.metadata, "thinkingLevel"),
     };
 }

@@ -41,11 +41,17 @@ export async function launchPiRpcBackgroundGoalSession(request) {
     const spawnError = new Promise((_resolve, reject) => {
         runner.once("error", reject);
     });
+    const runnerExit = new Promise((_resolve, reject) => {
+        runner.once("exit", (code, signal) => {
+            reject(new Error(`Detached background Pi runner exited before ready (code=${code ?? "null"}, signal=${signal ?? "null"})${readLogTail(logPath)}`));
+        });
+    });
     runner.unref();
     try {
         const ready = await Promise.race([
             waitForBackgroundRunnerReady(readyPath, logPath, BACKGROUND_SESSION_START_TIMEOUT_MS),
             spawnError,
+            runnerExit,
         ]);
         let pendingSessionName = request.sessionName;
         return {
