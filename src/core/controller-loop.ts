@@ -2150,7 +2150,11 @@ async function integrateOrCompleteValidatedSubagent(
     tickStartedAt,
   });
   const integrationSummary = integration.summary ?? integration.error ?? `integration ${integration.status}`;
+  const integrationValidationResults = integration.validationSignals?.length
+    ? [...(integratingSubagent.controllerValidationResults ?? []), ...integration.validationSignals]
+    : integratingSubagent.controllerValidationResults;
   const integrationPatch: Partial<GoalSubagentRecord> = {
+    controllerValidationResults: integrationValidationResults,
     integrationSourceBranch: integration.sourceBranch ?? integratingSubagent.branch,
     integrationSourceRef: integration.sourceRef ?? integratingSubagent.ref,
     integrationSourceHead: integration.sourceHead ?? integratingSubagent.commitSha,
@@ -2169,6 +2173,7 @@ async function integrateOrCompleteValidatedSubagent(
       summary: integrationSummary,
       sourceHead: integration.sourceHead,
       integrationCommitSha: integration.integrationCommitSha,
+      signals: integration.validationSignals?.length ?? 0,
     }, tickStartedAt);
     await completeValidatedSubagent(runtime, integratingNode, withSubagentPatch(integratingSubagent, {
       ...integrationPatch,
@@ -2221,6 +2226,7 @@ async function integrateOrCompleteValidatedSubagent(
     subagentId: subagent.subagentId,
     summary: integrationSummary,
     error: integration.error,
+    signals: integration.validationSignals?.length ?? 0,
   }, tickStartedAt);
   result.blocked.push(blockedNode);
 }

@@ -1736,7 +1736,11 @@ async function integrateOrCompleteValidatedSubagent(runtime, options, state, nod
         tickStartedAt,
     });
     const integrationSummary = integration.summary ?? integration.error ?? `integration ${integration.status}`;
+    const integrationValidationResults = integration.validationSignals?.length
+        ? [...(integratingSubagent.controllerValidationResults ?? []), ...integration.validationSignals]
+        : integratingSubagent.controllerValidationResults;
     const integrationPatch = {
+        controllerValidationResults: integrationValidationResults,
         integrationSourceBranch: integration.sourceBranch ?? integratingSubagent.branch,
         integrationSourceRef: integration.sourceRef ?? integratingSubagent.ref,
         integrationSourceHead: integration.sourceHead ?? integratingSubagent.commitSha,
@@ -1754,6 +1758,7 @@ async function integrateOrCompleteValidatedSubagent(runtime, options, state, nod
             summary: integrationSummary,
             sourceHead: integration.sourceHead,
             integrationCommitSha: integration.integrationCommitSha,
+            signals: integration.validationSignals?.length ?? 0,
         }, tickStartedAt);
         await completeValidatedSubagent(runtime, integratingNode, withSubagentPatch(integratingSubagent, {
             ...integrationPatch,
@@ -1804,6 +1809,7 @@ async function integrateOrCompleteValidatedSubagent(runtime, options, state, nod
         subagentId: subagent.subagentId,
         summary: integrationSummary,
         error: integration.error,
+        signals: integration.validationSignals?.length ?? 0,
     }, tickStartedAt);
     result.blocked.push(blockedNode);
 }

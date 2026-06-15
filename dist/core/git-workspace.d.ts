@@ -89,6 +89,8 @@ export interface NativeGitSubagentBranchIntegrationRequest {
     subagent: GoalSubagentRecord;
     /** Reserved for future strategy selection. Current implementation uses git merge. */
     strategy?: "merge";
+    /** Re-run node validators in the controller workspace after subagent integration. Defaults true. */
+    postMergeValidation?: boolean;
 }
 export type NativeGitSubagentBranchIntegrationStatus = "complete" | "notRequired" | "failed";
 export interface NativeGitSubagentBranchIntegrationResult {
@@ -100,11 +102,14 @@ export interface NativeGitSubagentBranchIntegrationResult {
     integrationCommitSha?: string;
     error?: string;
     followupPrompt?: string;
+    validationSignals?: string[];
     completedAt?: string;
 }
 export interface NativeGitSubagentBranchIntegratorOptions {
     controllerWorkspacePath: string;
     strategy?: "merge";
+    /** Re-run node validators in the controller workspace after subagent integration. Defaults true. */
+    postMergeValidation?: boolean;
 }
 export interface NativeGitControllerBranchPromotionRequest {
     controllerWorkspacePath: string;

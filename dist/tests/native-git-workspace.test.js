@@ -489,6 +489,106 @@ test("native git integrator merges committed subagent branch into controller wor
         rmSync(repo, { recursive: true, force: true });
     }
 });
+test("native git integrator runs post-merge validators before committing integration", () => {
+    const repo = createRepo();
+    try {
+        const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+        const controller = manager.allocateControllerWorkspace({ invocationCwd: repo, goalId: "goal-abcdef12", objective: "Controller" });
+        const allocation = manager.allocateSubagentWorkspace({ invocationCwd: repo, controllerWorkspacePath: controller.worktreePath, goalId: "goal-abcdef12", nodeId: "post-merge" });
+        writeFileSync(join(allocation.worktreePath, "feature.txt"), "implemented\n");
+        git(allocation.worktreePath, ["add", "feature.txt"]);
+        git(allocation.worktreePath, ["commit", "-m", "implement feature"]);
+        const result = manager.integrateSubagentBranch({
+            controllerWorkspacePath: controller.worktreePath,
+            node: {
+                goalId: "goal-abcdef12",
+                nodeId: "post-merge",
+                slug: "post-merge",
+                objective: "Integrate feature",
+                dependencyNodeIds: [],
+                expectedOutputs: ["feature.txt"],
+                validators: ["test -f feature.txt"],
+                completionGates: ["controller-validation", "native-git-integration"],
+                status: "controllerValidating",
+                createdAt: "2026-06-02T00:00:00.000Z",
+                updatedAt: "2026-06-02T00:00:00.000Z",
+            },
+            subagent: {
+                goalId: "goal-abcdef12",
+                nodeId: "post-merge",
+                subagentId: allocation.subagentId,
+                harnessAdapterId: "fake",
+                workspacePath: allocation.worktreePath,
+                branch: allocation.branch,
+                status: "controllerValidating",
+                prompts: [],
+                createdAt: "2026-06-02T00:00:00.000Z",
+                updatedAt: "2026-06-02T00:00:00.000Z",
+            },
+        });
+        assert.equal(result.status, "complete");
+        assert.match(result.summary, /post-merge validation passed/);
+        assert.match(result.validationSignals?.join("\n") ?? "", /post-merge validator passed: test -f feature\.txt/);
+        assert.equal(git(controller.worktreePath, ["show", "HEAD:feature.txt"]), "implemented");
+        manager.cleanupWorkspace({ repoRoot: repo, worktreePath: allocation.worktreePath, branch: allocation.branch, force: true });
+        manager.cleanupWorkspace({ repoRoot: repo, worktreePath: controller.worktreePath, branch: controller.branch, force: true });
+    }
+    finally {
+        rmSync(repo, { recursive: true, force: true });
+    }
+});
+test("native git integrator aborts merge when post-merge validation fails", () => {
+    const repo = createRepo();
+    try {
+        const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+        const controller = manager.allocateControllerWorkspace({ invocationCwd: repo, goalId: "goal-abcdef12", objective: "Controller" });
+        const allocation = manager.allocateSubagentWorkspace({ invocationCwd: repo, controllerWorkspacePath: controller.worktreePath, goalId: "goal-abcdef12", nodeId: "post-merge-fail" });
+        writeFileSync(join(allocation.worktreePath, "feature.txt"), "implemented\n");
+        git(allocation.worktreePath, ["add", "feature.txt"]);
+        git(allocation.worktreePath, ["commit", "-m", "implement feature"]);
+        const controllerHead = git(controller.worktreePath, ["rev-parse", "--verify", "HEAD"]);
+        const result = manager.integrateSubagentBranch({
+            controllerWorkspacePath: controller.worktreePath,
+            node: {
+                goalId: "goal-abcdef12",
+                nodeId: "post-merge-fail",
+                slug: "post-merge-fail",
+                objective: "Integrate feature",
+                dependencyNodeIds: [],
+                expectedOutputs: ["feature.txt"],
+                validators: ["test -f missing-post-merge.txt"],
+                completionGates: ["controller-validation", "native-git-integration"],
+                status: "controllerValidating",
+                createdAt: "2026-06-02T00:00:00.000Z",
+                updatedAt: "2026-06-02T00:00:00.000Z",
+            },
+            subagent: {
+                goalId: "goal-abcdef12",
+                nodeId: "post-merge-fail",
+                subagentId: allocation.subagentId,
+                harnessAdapterId: "fake",
+                workspacePath: allocation.worktreePath,
+                branch: allocation.branch,
+                status: "controllerValidating",
+                prompts: [],
+                createdAt: "2026-06-02T00:00:00.000Z",
+                updatedAt: "2026-06-02T00:00:00.000Z",
+            },
+        });
+        assert.equal(result.status, "failed");
+        assert.match(result.summary, /post-merge validation failed/);
+        assert.match(result.followupPrompt ?? "", /POST_MERGE_VALIDATION/);
+        assert.match(result.validationSignals?.join("\n") ?? "", /post-merge validator failed: test -f missing-post-merge\.txt/);
+        assert.equal(git(controller.worktreePath, ["rev-parse", "--verify", "HEAD"]), controllerHead);
+        assert.equal(existsSync(join(controller.worktreePath, "feature.txt")), false);
+        assert.equal(git(controller.worktreePath, ["status", "--porcelain=v1"]), "");
+        manager.cleanupWorkspace({ repoRoot: repo, worktreePath: allocation.worktreePath, branch: allocation.branch, force: true });
+        manager.cleanupWorkspace({ repoRoot: repo, worktreePath: controller.worktreePath, branch: controller.branch, force: true });
+    }
+    finally {
+        rmSync(repo, { recursive: true, force: true });
+    }
+});
 test("native git integrator rejects dirty subagent worktrees with follow-up prompt", () => {
     const repo = createRepo();
     try {

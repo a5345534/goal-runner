@@ -173,37 +173,54 @@ export class NativeGitWorkspaceManager {
         if (!controllerHead)
             return nativeGitIntegrationFailure(request, "controller workspace has no HEAD", { sourceBranch, sourceRef, sourceHead });
         if (sourceHead === controllerHead) {
+            const postMergeValidation = runPostMergeValidationIfNeeded(request, controllerWorkspacePath);
+            if (!postMergeValidation.ok) {
+                return nativeGitIntegrationFailure(request, postMergeValidation.summary, { sourceBranch, sourceRef, sourceHead }, buildPostMergeValidationFollowupPrompt(request, postMergeValidation.summary), postMergeValidation.validationSignals);
+            }
             return {
                 status: "notRequired",
-                summary: `subagent branch already matches controller HEAD ${shortSha(controllerHead)}`,
+                summary: appendIntegrationSummary(`subagent branch already matches controller HEAD ${shortSha(controllerHead)}`, postMergeValidation.summary),
                 sourceBranch,
                 sourceRef,
                 sourceHead,
                 integrationCommitSha: controllerHead,
+                validationSignals: postMergeValidation.validationSignals,
                 completedAt: new Date().toISOString(),
             };
         }
         if (gitIsAncestor(controllerWorkspacePath, sourceHead, controllerHead)) {
+            const postMergeValidation = runPostMergeValidationIfNeeded(request, controllerWorkspacePath);
+            if (!postMergeValidation.ok) {
+                return nativeGitIntegrationFailure(request, postMergeValidation.summary, { sourceBranch, sourceRef, sourceHead }, buildPostMergeValidationFollowupPrompt(request, postMergeValidation.summary), postMergeValidation.validationSignals);
+            }
             return {
                 status: "complete",
-                summary: `subagent commit ${shortSha(sourceHead)} is already integrated in controller HEAD ${shortSha(controllerHead)}`,
+                summary: appendIntegrationSummary(`subagent commit ${shortSha(sourceHead)} is already integrated in controller HEAD ${shortSha(controllerHead)}`, postMergeValidation.summary),
                 sourceBranch,
                 sourceRef,
                 sourceHead,
                 integrationCommitSha: controllerHead,
+                validationSignals: postMergeValidation.validationSignals,
                 completedAt: new Date().toISOString(),
             };
         }
         try {
-            git(controllerWorkspacePath, ["merge", "--no-ff", "--no-edit", sourceHead]);
+            git(controllerWorkspacePath, ["merge", "--no-ff", "--no-commit", sourceHead]);
+            const postMergeValidation = runPostMergeValidationIfNeeded(request, controllerWorkspacePath);
+            if (!postMergeValidation.ok) {
+                safeGit(controllerWorkspacePath, ["merge", "--abort"]);
+                return nativeGitIntegrationFailure(request, postMergeValidation.summary, { sourceBranch, sourceRef, sourceHead }, buildPostMergeValidationFollowupPrompt(request, postMergeValidation.summary), postMergeValidation.validationSignals);
+            }
+            git(controllerWorkspacePath, ["commit", "--no-edit"]);
             const integrationCommitSha = git(controllerWorkspacePath, ["rev-parse", "--verify", "HEAD"]);
             return {
                 status: "complete",
-                summary: `merged subagent ${request.subagent.subagentId} ${shortSha(sourceHead)} into controller ${shortSha(integrationCommitSha)}`,
+                summary: appendIntegrationSummary(`merged subagent ${request.subagent.subagentId} ${shortSha(sourceHead)} into controller ${shortSha(integrationCommitSha)}`, postMergeValidation.summary),
                 sourceBranch,
                 sourceRef,
                 sourceHead,
                 integrationCommitSha,
+                validationSignals: postMergeValidation.validationSignals,
                 completedAt: new Date().toISOString(),
             };
         }
@@ -351,6 +368,7 @@ export function createNativeGitSubagentBranchIntegrator(manager, options) {
             node: request.node,
             subagent: request.subagent,
             strategy: options.strategy,
+            postMergeValidation: options.postMergeValidation,
         });
         return {
             status: result.status === "notRequired" ? "notRequired" : result.status,
@@ -361,6 +379,7 @@ export function createNativeGitSubagentBranchIntegrator(manager, options) {
             sourceHead: result.sourceHead,
             integrationCommitSha: result.integrationCommitSha,
             error: result.error,
+            validationSignals: result.validationSignals,
             completedAt: result.completedAt,
         };
     };
@@ -462,16 +481,69 @@ function resolveSubagentIntegrationSource(controllerWorkspacePath, subagent) {
         return { ok: false, error: `cannot resolve subagent integration ref ${sourceRef}` };
     return { ok: true, branch: subagent.branch, ref: sourceRef, head };
 }
-function nativeGitIntegrationFailure(request, error, source = {}, followupPrompt) {
+function nativeGitIntegrationFailure(request, error, source = {}, followupPrompt, validationSignals) {
     return {
         status: "failed",
         summary: error,
         error,
         followupPrompt,
+        validationSignals,
         sourceBranch: source.sourceBranch,
         sourceRef: source.sourceRef,
         sourceHead: source.sourceHead,
     };
+}
+function runPostMergeValidationIfNeeded(request, controllerWorkspacePath) {
+    if (request.postMergeValidation === false)
+        return { ok: true, summary: "", validationSignals: [] };
+    const validators = request.node?.validators ?? [];
+    if (request.node && validators.length === 0) {
+        return { ok: true, summary: "post-merge validation skipped: no node validators configured", validationSignals: [] };
+    }
+    if (!request.node || validators.length === 0)
+        return { ok: true, summary: "", validationSignals: [] };
+    const results = validators.map((command) => runPostMergeValidatorCommand(command, controllerWorkspacePath));
+    const validationSignals = results.map((result) => result.ok
+        ? `post-merge validator passed: ${result.command}`
+        : `post-merge validator failed: ${result.command}${result.output ? `\n${result.output}` : ""}`);
+    const failed = results.filter((result) => !result.ok);
+    if (failed.length === 0) {
+        return { ok: true, summary: `post-merge validation passed (${results.length} validator(s))`, validationSignals };
+    }
+    return {
+        ok: false,
+        summary: `post-merge validation failed (${failed.length}/${results.length} validator(s)): ${failed.map((result) => result.command).join(", ")}`,
+        validationSignals,
+    };
+}
+function runPostMergeValidatorCommand(command, cwd) {
+    try {
+        const output = execFileSync("sh", ["-lc", command], {
+            cwd,
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+        });
+        return { command, ok: true, output: truncateForIntegration(output) };
+    }
+    catch (error) {
+        const record = error;
+        const output = `${toText(record.stdout)}${toText(record.stderr)}`.trim();
+        return { command, ok: false, output: truncateForIntegration(output), error: record.message ?? String(error) };
+    }
+}
+function buildPostMergeValidationFollowupPrompt(request, failureSummary) {
+    return [
+        `[SYSTEM FOLLOW-UP: POST_MERGE_VALIDATION]`,
+        `Controller validation passed for node "${request.node?.nodeId ?? request.subagent.nodeId}" and the subagent branch merged cleanly in a temporary controller workspace state, but post-merge validation failed before the controller committed the merge.`,
+        failureSummary,
+        `Fix the issue on your assigned branch (${request.subagent.branch ?? "current branch"}), rerun the relevant validators, commit the result, and report again with SUBAGENT_RESULT: <summary including verification>.`,
+    ].join("\n");
+}
+function appendIntegrationSummary(left, right) {
+    return right ? `${left}; ${right}` : left;
+}
+function truncateForIntegration(value, maxChars = 4000) {
+    return value.length <= maxChars ? value : `${value.slice(0, maxChars)}\n...[truncated ${value.length - maxChars} chars]`;
 }
 function resolveControllerPromotionTarget(controllerWorkspacePath, requestedTargetRef, controllerBranch, branchPrefix) {
     const worktrees = listGitWorktrees(controllerWorkspacePath);

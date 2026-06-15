@@ -213,6 +213,8 @@ For high-risk `kind=implementation` nodes, controller validation fails if the no
 
 For `workspaceStrategy: "native-git-worktree"`, Pi/OpenCode allocate a controller worktree and per-node subagent worktrees/branches. After a subagent reports `SUBAGENT_RESULT:` and controller validation passes, the runtime attempts to integrate the committed subagent branch head into the controller workspace before marking the node `complete`.
 
+When a node declares `validators`, native Git integration re-runs those validators in the controller workspace after applying the subagent branch and before recording the integration commit. The merge is staged with `--no-commit`; if post-merge validation fails, the controller aborts the merge, leaves the node incomplete, and sends a `POST_MERGE_VALIDATION` follow-up to the subagent. This catches integration-only failures without introducing a second DAG or execution-state model.
+
 `outputs` for native-git nodes are always relative to the subagent workspace root. Do not include `.worktrees/<name>/` in output paths. The runtime rejects native-git DAG nodes that declare `.worktrees/...` outputs because that couples validation to a parent checkout layout and causes the controller to look for nested worktrees.
 
 A node can optionally bind its subagent workspace deterministically:
