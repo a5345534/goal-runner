@@ -126,6 +126,8 @@ function cloneDagNode(node) {
                 artifactLocks: node.validation.artifactLocks?.map((lock) => ({ ...lock })),
                 requiredEvidence: node.validation.requiredEvidence ? [...node.validation.requiredEvidence] : undefined,
                 auditReportPaths: node.validation.auditReportPaths ? [...node.validation.auditReportPaths] : undefined,
+                allowedPaths: node.validation.allowedPaths ? [...node.validation.allowedPaths] : undefined,
+                forbiddenPaths: node.validation.forbiddenPaths ? [...node.validation.forbiddenPaths] : undefined,
             }
             : undefined,
         dependencyNodeIds: [...node.dependencyNodeIds],

@@ -82,7 +82,9 @@
         "requiredEvidence": { "$ref": "#/$defs/stringList" },
         "onAuditTestGap": { "type": "string", "minLength": 1 },
         "diffBaseRef": { "type": "string", "minLength": 1 },
-        "auditReportPaths": { "$ref": "#/$defs/stringList" }
+        "auditReportPaths": { "$ref": "#/$defs/stringList" },
+        "allowedPaths": { "$ref": "#/$defs/stringList" },
+        "forbiddenPaths": { "$ref": "#/$defs/stringList" }
       }
     },
     "scenarioId": {

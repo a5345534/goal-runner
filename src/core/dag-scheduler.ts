@@ -308,6 +308,8 @@ function cloneValidationContract(contract: GoalDagNode["validation"]): GoalDagNo
     artifactLocks: contract.artifactLocks?.map((lock) => ({ ...lock })),
     requiredEvidence: contract.requiredEvidence ? [...contract.requiredEvidence] : undefined,
     auditReportPaths: contract.auditReportPaths ? [...contract.auditReportPaths] : undefined,
+    allowedPaths: contract.allowedPaths ? [...contract.allowedPaths] : undefined,
+    forbiddenPaths: contract.forbiddenPaths ? [...contract.forbiddenPaths] : undefined,
   };
 }
 

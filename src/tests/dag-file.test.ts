@@ -150,6 +150,8 @@ test("goal DAG file parser preserves validation contract metadata", () => {
           artifactLocks: [{ path: "tests/feature.test.js", sha256: "a".repeat(64), sourceNodeId: "write-tests" }],
           requiredEvidence: ["validators-ran", "locked-artifacts-unchanged"],
           diffBaseRef: "main",
+          allowedPaths: ["src/**", "tests/**"],
+          forbiddenPaths: ["package-lock.json", "infra/**"],
         },
       },
     ],
@@ -161,5 +163,23 @@ test("goal DAG file parser preserves validation contract metadata", () => {
   assert.equal(node?.validation?.profile, "code-change");
   assert.equal(node?.validation?.testSpecNodeId, "write-tests");
   assert.deepEqual(node?.validation?.requiredEvidence, ["validators-ran", "locked-artifacts-unchanged"]);
+  assert.deepEqual(node?.validation?.allowedPaths, ["src/**", "tests/**"]);
+  assert.deepEqual(node?.validation?.forbiddenPaths, ["package-lock.json", "infra/**"]);
   assert.equal(node?.validation?.artifactLocks?.[0]?.sha256, "a".repeat(64));
+});
+
+test("goal DAG file parser rejects non-string-array validation scope policies", () => {
+  const base = {
+    version: 1,
+    objective: "Bad scope policy",
+    nodes: [{ id: "node-a", objective: "Do work", validation: {} }],
+  };
+  assert.throws(
+    () => parseGoalDagFileContent(JSON.stringify({ ...base, nodes: [{ ...base.nodes[0], validation: { allowedPaths: "src/**" } }] })),
+    /validation\.allowedPaths must be an array/,
+  );
+  assert.throws(
+    () => parseGoalDagFileContent(JSON.stringify({ ...base, nodes: [{ ...base.nodes[0], validation: { forbiddenPaths: ["src/**", 42] } }] })),
+    /validation\.forbiddenPaths\[1\] must be a non-empty string/,
+  );
 });

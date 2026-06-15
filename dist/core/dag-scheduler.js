@@ -249,6 +249,8 @@ function cloneValidationContract(contract) {
         artifactLocks: contract.artifactLocks?.map((lock) => ({ ...lock })),
         requiredEvidence: contract.requiredEvidence ? [...contract.requiredEvidence] : undefined,
         auditReportPaths: contract.auditReportPaths ? [...contract.auditReportPaths] : undefined,
+        allowedPaths: contract.allowedPaths ? [...contract.allowedPaths] : undefined,
+        forbiddenPaths: contract.forbiddenPaths ? [...contract.forbiddenPaths] : undefined,
     };
 }
 function validateNodeWorkspaceBinding(node) {

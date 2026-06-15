@@ -419,6 +419,10 @@ export interface GoalDagValidationContract {
   diffBaseRef?: string;
   /** Optional report paths used by audit-report-present evidence checks. */
   auditReportPaths?: string[];
+  /** Optional path policy: when set, every changed file must match at least one allowed path/prefix. */
+  allowedPaths?: string[];
+  /** Optional path policy: changed files must not match any forbidden path/prefix. */
+  forbiddenPaths?: string[];
 }
 
 export interface GoalDagNodeWorkspaceBinding {

@@ -206,6 +206,8 @@ function parseValidationContract(input: unknown, path: string): GoalDagValidatio
   if (input.onAuditTestGap !== undefined) contract.onAuditTestGap = requireNonEmptyString(input.onAuditTestGap, `${path}.onAuditTestGap`);
   if (input.diffBaseRef !== undefined) contract.diffBaseRef = requireNonEmptyString(input.diffBaseRef, `${path}.diffBaseRef`);
   if (input.auditReportPaths !== undefined) contract.auditReportPaths = parseStringArray(input.auditReportPaths, `${path}.auditReportPaths`);
+  if (input.allowedPaths !== undefined) contract.allowedPaths = parseStringArray(input.allowedPaths, `${path}.allowedPaths`);
+  if (input.forbiddenPaths !== undefined) contract.forbiddenPaths = parseStringArray(input.forbiddenPaths, `${path}.forbiddenPaths`);
   return contract;
 }
 
@@ -351,5 +353,7 @@ function cloneValidationContract(contract: GoalDagValidationContract | undefined
     artifactLocks: contract.artifactLocks?.map((lock) => ({ ...lock })),
     requiredEvidence: contract.requiredEvidence ? [...contract.requiredEvidence] : undefined,
     auditReportPaths: contract.auditReportPaths ? [...contract.auditReportPaths] : undefined,
+    allowedPaths: contract.allowedPaths ? [...contract.allowedPaths] : undefined,
+    forbiddenPaths: contract.forbiddenPaths ? [...contract.forbiddenPaths] : undefined,
   };
 }

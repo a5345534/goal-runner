@@ -194,10 +194,14 @@ A node can declare a generic validation contract. Runtime persists this metadata
       "implementation-diff-present"
     ],
     "diffBaseRef": "main",
+    "allowedPaths": ["src/**", "tests/**"],
+    "forbiddenPaths": ["package-lock.json", "infra/**"],
     "onAuditTestGap": "reopen-test-spec"
   }
 }
 ```
+
+`validation.allowedPaths` and `validation.forbiddenPaths` define a controller-side scope policy for changed files. Paths are repository/workspace-relative strings. Exact paths match that file or directory prefix, and simple `/**` suffixes match everything below that prefix (for example `src/**` matches `src/feature.ts`). When `allowedPaths` is absent, changed files are not restricted by allow-list. When `allowedPaths` is present, every changed file must match at least one allowed path. `forbiddenPaths` always has priority: any changed file matching a forbidden path fails validation even if it also matches an allowed path. Nodes without a scope policy keep existing behavior, but subagents are still instructed not to make unrelated changes.
 
 Supported built-in evidence labels include `validators-ran`, `locked-artifacts-unchanged`, `implementation-diff-present`, `non-test-diff-present`, `post-merge-validation-ran`, and `audit-report-present`. `audit-report-present` requires a readable report file and fails if the report explicitly says violations remain (for example `9 violation paths / 98 files remain`). Unknown labels fail closed until a planner/runtime adapter teaches the controller how to satisfy them.
 
