@@ -100,9 +100,8 @@ Nodes with no `after` dependencies are immediately schedulable, subject to contr
   "nodes": [
     {
       "id": "attendance-parity",
-      "objective": "Create an OpenSpec change and add attendance parity fixtures for People Frappe.",
+      "objective": "Implement the approved OpenSpec change implement-people-attendance-parity slice for attendance parity fixtures.",
       "outputs": [
-        "openspec/changes/implement-people-attendance-parity/tasks.md",
         "projects/backend/module/people-frappe-module/tests/test_attendance_parity.py"
       ],
       "conflicts": {
@@ -114,9 +113,9 @@ Nodes with no `after` dependencies are immediately schedulable, subject to contr
     },
     {
       "id": "payroll-doctypes",
-      "objective": "Create an OpenSpec change and add People Payroll DocType skeletons.",
+      "objective": "Implement the approved OpenSpec change implement-people-payroll-doctypes slice for People Payroll DocType skeletons.",
       "outputs": [
-        "openspec/changes/implement-people-payroll-doctypes/tasks.md"
+        "projects/backend/module/people-frappe-module/beyourself_people/payroll"
       ],
       "conflicts": {
         "files": [
@@ -135,7 +134,7 @@ Nodes with no `after` dependencies are immediately schedulable, subject to contr
     },
     {
       "id": "integration-validation",
-      "objective": "Run integrated validation and archive completed OpenSpec changes.",
+      "objective": "Run integrated validation for the approved OpenSpec change deliverables.",
       "after": [
         "attendance-parity",
         "payroll-doctypes",

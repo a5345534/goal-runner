@@ -41,6 +41,7 @@ import {
   createNativeGitSubagentWorkspaceAllocator,
   parseGoalCommand,
   parseGoalDagFileContent,
+  parseTokenBudget,
   renderActiveGoalReminderPrompt,
   type BlockedAuditEvidence,
   type CompletionAuditRequest,
@@ -65,7 +66,7 @@ import {
   type OpencodeGoalContinuationMetadata,
 } from "./hidden-continuation.js";
 import { OpencodeHarnessSubagentAdapter, createOpencodeHarnessSubagentAdapter } from "./subagent-adapter.js";
-import { parseGoalWorkspaceFlags, resolveWorkspaceBinding, validateExecutionWorkspace, type ResolvedWorkspaceBinding, type WorkspaceValidationResult } from "./workspace.js";
+import { parseGoalWorkspaceFlags, resolveWorkspaceBinding, tokenize, validateExecutionWorkspace, type ResolvedWorkspaceBinding, type WorkspaceValidationResult } from "./workspace.js";
 import { isOpencodeCompletionAuditEnabled, opencodeHeuristicCompletionAudit } from "./completion-audit.js";
 import { buildOpencodeBlockedAuditEvidence } from "./blocked-audit.js";
 import { parseOpencodeGoalCommand, formatOpencodeGoalToolDescription, stripSlashPrefix, OPENCODE_GOAL_TOOL, OPENCODE_GOAL_SLASH, type OpencodeGoalSlashParse } from "./slash-command.js";
@@ -527,8 +528,14 @@ async function runOpencodeGoalStart(
 
   const objectiveText = dagDocument ? dagDocument.objective : parsed.remaining.trim();
   if (!objectiveText) return "/goal requires a non-empty objective.";
-  const commandInput = dagDocument ? `${objectiveText} ${flags.remainingArgs}`.trim() : parsed.remaining;
-  const command = parseGoalCommand(commandInput);
+  let command: ReturnType<typeof parseGoalCommand>;
+  try {
+    command = dagDocument
+      ? { kind: "start", objective: dagDocument.objective, tokenBudget: parseOpencodeDagStartTokenBudget(flags.remainingArgs) }
+      : parseGoalCommand(parsed.remaining);
+  } catch (error) {
+    return `/goal rejected: ${error instanceof Error ? error.message : String(error)}`;
+  }
   if (command.kind !== "start") return `/goal ${command.kind} requires the explicit command form.`;
 
   const binding = flags.workspace
@@ -538,18 +545,18 @@ async function runOpencodeGoalStart(
   if (!validation.ok) return `/goal rejected: ${validation.message ?? "execution workspace validation failed"}`;
   if (!validation.isGit) return "/goal orchestration requires a git workspace";
 
-  if (dagDocument && parsed.remaining.trim() && !flags.remainingArgs.includes("--tokens")) {
-    // /goal --dag accepts only --tokens as an additional start flag.
-    // If the user supplied extra text, we reject here so the file stays
-    // the single source of truth for the objective.
-    return "/goal --dag accepts only --tokens as an additional start flag; objective must come from the DAG file";
-  }
-
   return startOpencodeOrchestratedGoal(ctx, input, sessionID, command, binding, validation, {
     dagDocument: dagDocument as GoalDagFileDocument | undefined,
     dagSourceFile,
     modelRouting: modelRouting as GoalModelRoutingConfig | undefined,
   });
+}
+
+function parseOpencodeDagStartTokenBudget(args: string): number | undefined {
+  const tokens = tokenize(args);
+  if (tokens.length === 0) return undefined;
+  if (tokens.length === 2 && tokens[0] === "--tokens") return parseTokenBudget(tokens[1] ?? "");
+  throw new Error("/goal --dag accepts only --tokens as an additional start flag; objective must come from the DAG file");
 }
 
 async function startOpencodeOrchestratedGoal(

@@ -348,20 +348,41 @@ test("opencode adapter /goal --dag loads the file and plans from it", async () =
   );
   const client = makeClient();
   setOpencodeClientForTests(client);
-  setOpencodeBackgroundSessionLauncherForTests((async () => ({
-    sessionID: "ses_bg",
-    sessionTitle: "test",
-    serverUrl: "http://127.0.0.1:0",
-    setSessionTitle: async () => undefined,
-    sendPrompt: async () => undefined,
-    stop: () => undefined,
-  })) as OpencodeBackgroundSessionLauncher);
+  const launched: OpencodeBackgroundSessionLaunchRequest[] = [];
+  setOpencodeBackgroundSessionLauncherForTests((async (request: OpencodeBackgroundSessionLaunchRequest) => {
+    launched.push(request);
+    return {
+      sessionID: `ses_bg_${launched.length}`,
+      sessionTitle: "test",
+      serverUrl: "http://127.0.0.1:0",
+      setSessionTitle: async () => undefined,
+      sendPrompt: async () => undefined,
+      stop: () => undefined,
+    };
+  }) as OpencodeBackgroundSessionLauncher);
   try {
     const hooks = await opencodeGoalPlugin(makePluginInput(workspace, client));
     const goalTool = hooks.tool?.goal_command as { execute(args: { command: string }, ctx: { sessionID?: string }): Promise<string> };
     assert.ok(goalTool, "expected goal_command tool to be registered");
+    const extraText = await goalTool.execute(
+      { command: `--workspace ${workspace} --branch main --dag people-frappe.dag.json extra text` },
+      { sessionID: "ses_dag" },
+    );
+    assert.match(extraText, /objective must come from the DAG file/);
+    const extraTokenText = await goalTool.execute(
+      { command: `--workspace ${workspace} --branch main --dag people-frappe.dag.json --tokens 100k extra` },
+      { sessionID: "ses_dag" },
+    );
+    assert.match(extraTokenText, /objective must come from the DAG file/);
+    const missingBudgetText = await goalTool.execute(
+      { command: `--workspace ${workspace} --branch main --dag people-frappe.dag.json --tokens` },
+      { sessionID: "ses_dag" },
+    );
+    assert.match(missingBudgetText, /objective must come from the DAG file/);
+    assert.equal(launched.length, 0);
+
     const text = await goalTool.execute(
-      { command: `--workspace ${workspace} --branch main --dag people-frappe.dag.json` },
+      { command: `--workspace ${workspace} --branch main --dag people-frappe.dag.json --tokens 100k` },
       { sessionID: "ses_dag" },
     );
     assert.match(text, /planned 3 DAG node/i);
@@ -369,6 +390,7 @@ test("opencode adapter /goal --dag loads the file and plans from it", async () =
     const goalList = await store.listGoalSummaries();
     const dagGoal = goalList.find((goal) => goal.objective.includes("people frappe backend"));
     assert.ok(dagGoal, "expected the DAG objective to be persisted");
+    assert.equal(dagGoal.tokenBudget, 100_000);
     store.close?.();
   } finally {
     resetOpencodeClientForTests();
