@@ -1,26 +1,28 @@
 # Project Responsibility
 
-Status: authoritative project-boundary document for `goal-runner`.
+Status: authoritative project-boundary document for this repository.
 
-This document defines what this repository owns, what it must not own, and how it consumes work from the three-stage goal execution pipeline.
+This document defines what this repository owns, what it must not own, and which artifact contracts it must honor. The repository should not need to know which concrete repository implements an upstream stage.
 
-## Pipeline position
+## Pipeline contract
 
 ```text
-Stage 1: goal-spec   user goal -> OpenSpec change package
-Stage 2: goal-dag    OpenSpec/PRD/design/ticket -> validated Goal DAG JSON + optional trace
-Stage 3: goal-runner Goal DAG JSON -> runtime execution
+Stage 1: Specification Authoring   user intent -> governed specification package
+Stage 2: Execution Planning        specification/development document -> runtime DAG JSON + optional planning trace
+Stage 3: Runtime Execution         runtime DAG JSON or single objective -> durable execution state
 ```
 
-`goal-runner` is Stage 3 only. Its job is to execute a single objective or an explicit runtime DAG JSON file through the portable `/goal` runtime and harness adapters.
+This repository implements **Stage 3: Runtime Execution**.
+
+It must know the runtime DAG JSON contract. It must not depend on, call into, or name a concrete specification-authoring or execution-planning repository.
 
 ## Owns
 
-`goal-runner` owns:
+This repository owns:
 
-- `/goal` command behavior;
-- single-objective goal execution through `/goal <objective>`;
-- explicit multi-node DAG execution through `/goal --dag <path>`;
+- runtime command behavior;
+- single-objective execution through a runtime objective command;
+- explicit multi-node DAG execution through a runtime DAG file command;
 - runtime DAG JSON schema;
 - runtime DAG parser;
 - graph validation;
@@ -29,8 +31,7 @@ Stage 3: goal-runner Goal DAG JSON -> runtime execution
 - DAG node and subagent records;
 - controller orchestration loop;
 - harness-neutral subagent adapter contract;
-- Pi adapter behavior;
-- OpenCode adapter behavior;
+- supported harness adapter behavior;
 - native Git workspace allocation strategy;
 - validator execution;
 - controller validation results;
@@ -40,50 +41,50 @@ Stage 3: goal-runner Goal DAG JSON -> runtime execution
 
 ## Does not own
 
-`goal-runner` must not own or perform:
+This repository must not own or perform:
 
 - user-goal value challenge;
-- OpenSpec authoring;
-- OpenSpec change package creation or modification;
+- governed specification authoring;
+- specification package creation or modification;
 - development-document-to-DAG planning;
-- `GoalDagSpec` producer parsing;
+- producer-side planning spec parsing;
 - planning trace sidecar generation;
-- dependency inference from PRDs, OpenSpec, tickets, or markdown task lists;
+- dependency inference from PRDs, specification packages, tickets, or markdown task lists;
 - automatic multi-node planning from prose;
-- treating `change-explainer.html`, `source-manifest.json`, or `.trace.json` as runtime source of truth.
+- treating human-readable explainers, source manifests, or planning traces as runtime source of truth.
 
 ## Inputs
 
 Valid Stage 3 inputs are:
 
 ```text
-/goal <objective>
-/goal --dag <path>
+single objective command
+runtime DAG JSON file command
 ```
 
-`/goal <objective>` creates exactly one execution node. It must not parse markdown lists, headings, bullets, or informal task descriptions into multiple DAG nodes.
+A single objective command creates exactly one execution node. It must not parse markdown lists, headings, bullets, or informal task descriptions into multiple DAG nodes.
 
-`/goal --dag <path>` loads a runtime DAG JSON file matching `schemas/goal-dag.schema.json`. The objective and nodes come from the DAG file. Additional objective text is not accepted.
+A runtime DAG JSON file command loads a file matching `schemas/goal-dag.schema.json`. The objective and nodes come from the DAG file. Additional objective text is not accepted.
 
 ## Does not consume
 
-`goal-runner` must not consume these as runtime input:
+This repository must not consume these as runtime input:
 
-- `GoalDagSpec` producer documents;
-- `.trace.json` planning sidecars;
-- OpenSpec change directories;
-- `source-manifest.json`;
-- `change-explainer.html`;
+- producer-side planning spec documents;
+- planning trace sidecars;
+- governed specification package directories;
+- source manifests;
+- human-readable explainers;
 - PRDs;
 - design docs;
 - ticket descriptions;
 - markdown task lists.
 
-Those inputs belong to `goal-spec` or `goal-dag` before runtime execution begins.
+Those inputs belong to earlier stages before runtime execution begins.
 
 ## Outputs
 
-`goal-runner` produces durable runtime state, including:
+This repository produces durable runtime state, including:
 
 - goal records;
 - DAG node records;
@@ -94,11 +95,11 @@ Those inputs belong to `goal-spec` or `goal-dag` before runtime execution begins
 - lifecycle ledger entries;
 - status and monitor views.
 
-It does not produce OpenSpec packages, `GoalDagSpec`, `.dag.json`, or `.trace.json` files.
+It does not produce governed specification packages, producer-side planning specs, `.dag.json`, or `.trace.json` files.
 
 ## Runtime DAG contract
 
-`goal-runner` is the source of truth for runtime DAG JSON. The parser and schema define accepted fields and validation rules.
+This repository is the source of truth for runtime DAG JSON. The parser and schema define accepted fields and validation rules.
 
 Runtime DAG JSON may include:
 
@@ -117,39 +118,37 @@ Producer-only metadata must be rejected by the runtime parser, including:
 - node `acceptanceCriteria`;
 - node `decompositionRationale`.
 
-## Handoff from `goal-dag`
+## Handoff contract
 
-`goal-runner` receives only the runtime DAG JSON:
+This repository receives only the runtime DAG JSON file as multi-node runtime input.
 
-```text
-/goal --dag <name>.dag.json
-```
-
-If a producer also created `<name>.trace.json`, that file remains a review/audit artifact for humans and producer workflows. It must not affect runtime scheduling, validation, model routing, workspace allocation, validator execution, or completion.
+If an upstream stage also created a planning trace sidecar, that file remains a review/audit artifact for humans and producer workflows. It must not affect runtime scheduling, validation, model routing, workspace allocation, validator execution, or completion.
 
 ## Drift prevention rules
 
 A change to this repository is suspicious and requires boundary review if it:
 
-- parses PRDs, OpenSpec, tickets, or markdown task lists into DAG nodes;
-- introduces `GoalDagSpec` as runtime input;
-- reads `.trace.json` as runtime input;
-- reads `source-manifest.json` as runtime input;
-- treats `change-explainer.html` as runtime source of truth;
-- creates or modifies OpenSpec source packages;
+- parses PRDs, specification packages, tickets, or markdown task lists into DAG nodes;
+- introduces producer-side planning specs as runtime input;
+- reads planning traces as runtime input;
+- reads source manifests as runtime input;
+- treats human-readable explainers as runtime source of truth;
+- creates or modifies governed specification source packages;
 - emits `.dag.json` or `.trace.json` as producer output;
 - moves producer-side planning logic into runtime adapters;
-- weakens rejection of producer-only metadata in runtime DAG JSON.
+- weakens rejection of producer-only metadata in runtime DAG JSON;
+- requires a concrete upstream repository name to function.
 
 ## Reviewer checklist
 
-Before merging a change to `goal-runner`, verify:
+Before merging a change to this repository, verify:
 
-- `/goal <objective>` still creates exactly one execution node;
-- `/goal --dag <path>` still requires explicit runtime DAG JSON;
-- additional objective text after `--dag` is rejected;
-- trace sidecars are not runtime input;
-- OpenSpec packages are not runtime input;
+- single-objective execution still creates exactly one execution node;
+- runtime DAG execution still requires explicit runtime DAG JSON;
+- additional objective text after a DAG file input is rejected;
+- planning trace sidecars are not runtime input;
+- governed specification packages are not runtime input;
 - producer-only fields are rejected by the runtime parser;
-- schema, parser, docs, source, and committed `dist/` artifacts agree;
-- Pi and OpenCode adapters preserve the same core `/goal` semantics.
+- schema, parser, docs, source, and committed build artifacts agree;
+- supported harness adapters preserve the same core runtime semantics;
+- the repository does not need to know the concrete repository names of earlier stages.
