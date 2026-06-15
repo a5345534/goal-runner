@@ -9,3 +9,5 @@ dist/
 .worktree/
 .worktrees/
 openspec/
+.writer-workflow/
+.goal-spec/
