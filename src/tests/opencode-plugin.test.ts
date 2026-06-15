@@ -382,7 +382,7 @@ test("opencode adapter /goal --dag loads the file and plans from it", async () =
     assert.equal(launched.length, 0);
 
     const text = await goalTool.execute(
-      { command: `--workspace ${workspace} --branch main --dag people-frappe.dag.json --tokens 100k` },
+      { command: `--workspace ${workspace} --branch main --dag ${dagFile} --tokens 100k` },
       { sessionID: "ses_dag" },
     );
     assert.match(text, /planned 3 DAG node/i);

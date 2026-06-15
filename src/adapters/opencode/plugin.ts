@@ -29,7 +29,7 @@
 
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { z } from "zod";
 import {
   GoalRuntime,
@@ -517,7 +517,7 @@ async function runOpencodeGoalStart(
 ): Promise<string> {
   const sessionKey = sessionKeyForID(sessionID);
   const flags = parsed.workspace;
-  const dagSourceFile = flags.dagFile ? join(ctx.activeCwd, flags.dagFile) : undefined;
+  const dagSourceFile = flags.dagFile ? resolve(ctx.activeCwd, flags.dagFile) : undefined;
   const dagDocument = dagSourceFile ? parseGoalDagFileContent(fs.readFileSync(dagSourceFile, "utf8")) : undefined;
   const inlineModelRouting = flags.modelRoutingJson
     ? readOpencodeModelRoutingConfig({ inlineJson: flags.modelRoutingJson, cwd: ctx.activeCwd })
