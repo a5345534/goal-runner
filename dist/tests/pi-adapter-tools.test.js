@@ -1008,9 +1008,9 @@ test("Pi DAG model routing selects controller and subagent models", async () => 
         objective: "Route model scenarios",
         modelRouting: {
             scenarios: {
-                controller: { model: "openai-codex.gpt-5.5" },
+                controller: { model: "openai-codex/gpt-5.5" },
                 implementation: { model: "implementation/model" },
-                docs: { model: "deepseek.deepseek-v4-pro" },
+                docs: { model: "deepseek/deepseek-v4-pro" },
             },
             controllerScenario: "controller",
             defaultSubagentScenario: "implementation",

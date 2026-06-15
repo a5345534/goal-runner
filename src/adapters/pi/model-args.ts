@@ -21,6 +21,11 @@ const KNOWN_PI_MODEL_PROVIDERS = new Set([
 
 const PI_THINKING_SUFFIX_PATTERN = /:(off|minimal|low|medium|high|xhigh)$/;
 
+/**
+ * Pi already accepts goal-runner's canonical `provider/model` model id.
+ * This adapter keeps slash-form unchanged and only normalizes legacy
+ * dotted provider prefixes seen in older persisted/routing data.
+ */
 export function normalizePiModelArg(modelArg: string | undefined): string | undefined {
   const trimmed = modelArg?.trim();
   if (!trimmed) return undefined;

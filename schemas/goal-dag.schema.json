@@ -103,7 +103,7 @@
             "additionalProperties": false,
             "required": ["model"],
             "properties": {
-              "model": { "type": "string", "minLength": 1 },
+              "model": { "type": "string", "minLength": 1, "description": "Canonical adapter-neutral model id in provider/model form; harness adapters translate it as needed." },
               "description": { "type": "string", "minLength": 1 }
             }
           }

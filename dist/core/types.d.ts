@@ -159,7 +159,7 @@ export interface GoalSessionMetadata {
     sessionName?: string;
     /** Model-routing scenario selected for the controller session. */
     controllerModelScenario?: string;
-    /** Harness-native model argument selected for the controller session. */
+    /** Canonical provider/model id selected for the controller session. */
     controllerModelArg?: string;
     legacySessionBound?: boolean;
     createdAt: string;
@@ -312,7 +312,7 @@ export interface GoalDagNode {
     risk?: "low" | "medium" | "high";
     /** Model-routing scenario selected for this node, resolved by DAG defaults/rules or explicit node config. */
     modelScenario?: string;
-    /** Harness-native model argument selected for this node, persisted for restart-safe scheduling. */
+    /** Canonical provider/model id selected for this node, persisted for restart-safe scheduling. */
     modelArg?: string;
     /** Pi thinking level (off|minimal|low|medium|high|xhigh) selected for this node. */
     thinkingLevel?: string;

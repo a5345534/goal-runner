@@ -8,7 +8,7 @@ export interface GoalModelRoutingConfig {
 }
 
 export interface GoalModelScenario {
-  /** Harness-native model argument, for example "openai-codex/gpt-5.5". */
+  /** Adapter-neutral canonical model id, for example "openai-codex/gpt-5.5". Adapters translate this into harness-native shapes. */
   model: string;
   description?: string;
 }

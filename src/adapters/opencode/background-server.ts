@@ -13,6 +13,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { toOpencodeBodyModel } from "./model-args.js";
 import { isAbortError, isUnavailableError, type OpencodeClient } from "./opencode-client.js";
 
 
@@ -23,7 +24,7 @@ export interface OpencodeBackgroundSessionLaunchRequest {
   sessionID?: string;
   /** Initial session title. */
   sessionTitle: string;
-  /** Optional model id in the form `providerID/modelID`. */
+  /** Optional canonical goal-runner model id in the form `provider/model`. */
   modelArg?: string;
   /** Path to the opencode binary. Defaults to `opencode` on PATH. */
   opencodeBin?: string;
@@ -122,7 +123,7 @@ async function launch(
           if (!isAbortError(error) && !isUnavailableError(error)) throw error;
         }
       }
-      const model = request.modelArg ? modelArgToBodyModel(request.modelArg) : undefined;
+      const model = toOpencodeBodyModel(request.modelArg);
       const response = await client.session.prompt?.({
         sessionID,
         body: {
@@ -242,13 +243,6 @@ function stringifyError(value: unknown): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function modelArgToBodyModel(modelArg: string): { providerID: string; modelID: string } {
-  const [providerID, ...rest] = modelArg.split("/");
-  const modelID = rest.join("/");
-  if (!providerID || !modelID) return { providerID: modelArg, modelID: modelArg };
-  return { providerID, modelID };
 }
 
 // Re-export a tiny helper for tests: write a `goal-session.jsonl` next to
