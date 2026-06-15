@@ -163,7 +163,7 @@ Nodes with no `after` dependencies are immediately schedulable, subject to contr
 | `workspaceStrategy` | no | string | Workspace allocation strategy. Defaults to native Git worktree in Pi. |
 | `workspace` | no | object | Optional deterministic workspace binding hints for adapters. For native-git nodes, `worktreeSlug`, `branch`, and `baseRef` control the subagent worktree/branch the controller creates or reuses. |
 | `risk` | no | `low` / `medium` / `high` | Risk label for scheduling/model-routing/review policy. |
-| `completionGates` | no | string array | Completion gates. Defaults to `controller-validation`. Integration gate names such as `subagent-integration`, `subagent-branch-integration`, `branch-integration`, or `native-git-integration` explicitly require branch integration before completion. |
+| `completionGates` | no | string array | Completion gates. Defaults to `controller-validation`. Integration gate names such as `subagent-integration`, `subagent-branch-integration`, `branch-integration`, or `native-git-integration` explicitly require branch integration before completion. `post-merge-validation` additionally requires post-merge validators in the controller workspace. |
 | `modelScenario` | no | scenario id | Explicit model-routing scenario for this node. Overrides defaults and rules. |
 
 ## Validation contract
@@ -205,7 +205,7 @@ A node can declare a generic validation contract. Runtime persists this metadata
 
 Every subagent launch includes a controller execution policy in the executor prompt. The policy restates the assigned node boundary, allowed/forbidden paths when configured, the exact completion markers, and the requirement to inspect diff/status plus run or explain validators before `SUBAGENT_RESULT`. This is prompt-time guidance only; controller validation remains authoritative and fails closed on scope/policy violations.
 
-Supported built-in evidence labels include `validators-ran`, `locked-artifacts-unchanged`, `implementation-diff-present`, `non-test-diff-present`, `post-merge-validation-ran`, and `audit-report-present`. `audit-report-present` requires a readable report file and fails if the report explicitly says violations remain (for example `9 violation paths / 98 files remain`). Unknown labels fail closed until a planner/runtime adapter teaches the controller how to satisfy them.
+Supported built-in evidence labels include `validators-ran`, `locked-artifacts-unchanged`, `implementation-diff-present`, `non-test-diff-present`, `post-merge-validation-ran`, and `audit-report-present`. `post-merge-validation-ran` is deferred to native Git integration and is only satisfied by the post-merge validation gate, not by ordinary pre-integration validator execution. `audit-report-present` requires a readable report file and fails if the report explicitly says violations remain (for example `9 violation paths / 98 files remain`). Unknown labels fail closed until a planner/runtime adapter teaches the controller how to satisfy them.
 
 For high-risk `kind=implementation` nodes, controller validation fails if the node has no validators, outputs, validation profile, approved test-spec reference, artifact locks, or required evidence. This prevents high-risk work from completing on self-report alone.
 
@@ -213,7 +213,7 @@ For high-risk `kind=implementation` nodes, controller validation fails if the no
 
 For `workspaceStrategy: "native-git-worktree"`, Pi/OpenCode allocate a controller worktree and per-node subagent worktrees/branches. After a subagent reports `SUBAGENT_RESULT:` and controller validation passes, the runtime attempts to integrate the committed subagent branch head into the controller workspace before marking the node `complete`.
 
-When a node declares `validators`, native Git integration re-runs those validators in the controller workspace after applying the subagent branch and before recording the integration commit. The merge is staged with `--no-commit`; if post-merge validation fails, the controller aborts the merge, leaves the node incomplete, and sends a `POST_MERGE_VALIDATION` follow-up to the subagent. This catches integration-only failures without introducing a second DAG or execution-state model.
+Post-merge validation is opt-in. Add `post-merge-validation` (or legacy alias `post-merge-validation-ran`) to `completionGates`, or include `"post-merge-validation-ran"` in `validation.requiredEvidence`, to require native Git integration to re-run node `validators` in the controller workspace after applying the subagent branch and before recording the integration commit. The merge is staged with `--no-commit`; if post-merge validation fails or a validator mutates the controller workspace, the controller aborts the merge, cleans validator side effects, leaves the node incomplete, and sends a `POST_MERGE_VALIDATION` follow-up to the subagent. Nodes without this gate keep existing integration behavior.
 
 `outputs` for native-git nodes are always relative to the subagent workspace root. Do not include `.worktrees/<name>/` in output paths. The runtime rejects native-git DAG nodes that declare `.worktrees/...` outputs because that couples validation to a parent checkout layout and causes the controller to look for nested worktrees.
 

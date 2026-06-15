@@ -4,6 +4,8 @@ const INTEGRATION_COMPLETION_GATES = new Set([
     "branch-integration",
     "native-git-integration",
     "worktree-merged-pr",
+    "post-merge-validation",
+    "post-merge-validation-ran",
 ]);
 /**
  * Returns true when a subagent's output must be integrated into the
@@ -16,6 +18,8 @@ const INTEGRATION_COMPLETION_GATES = new Set([
  */
 export function nodeRequiresSubagentIntegration(node, subagent) {
     if (node.completionGates.some((gate) => INTEGRATION_COMPLETION_GATES.has(normalizeGateName(gate))))
+        return true;
+    if (node.validation?.requiredEvidence?.includes("post-merge-validation-ran"))
         return true;
     if (!subagent)
         return false;

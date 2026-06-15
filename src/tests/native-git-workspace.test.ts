@@ -35,6 +35,23 @@ function createRepo(): string {
   return repo;
 }
 
+function integrationNode(overrides: Partial<GoalDagNode> = {}): GoalDagNode {
+  return {
+    goalId: "goal-abcdef12",
+    nodeId: "post-merge",
+    slug: "post-merge",
+    objective: "Integrate feature",
+    dependencyNodeIds: [],
+    expectedOutputs: ["feature.txt"],
+    validators: ["test -f feature.txt"],
+    completionGates: ["controller-validation", "native-git-integration"],
+    status: "controllerValidating",
+    createdAt: "2026-06-02T00:00:00.000Z",
+    updatedAt: "2026-06-02T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
 test("native git manager auto-allocates a controller worktree and branch", () => {
   const repo = createRepo();
   try {
@@ -567,19 +584,7 @@ test("native git integrator runs post-merge validators before committing integra
 
     const result = manager.integrateSubagentBranch({
       controllerWorkspacePath: controller.worktreePath,
-      node: {
-        goalId: "goal-abcdef12",
-        nodeId: "post-merge",
-        slug: "post-merge",
-        objective: "Integrate feature",
-        dependencyNodeIds: [],
-        expectedOutputs: ["feature.txt"],
-        validators: ["test -f feature.txt"],
-        completionGates: ["controller-validation", "native-git-integration"],
-        status: "controllerValidating",
-        createdAt: "2026-06-02T00:00:00.000Z",
-        updatedAt: "2026-06-02T00:00:00.000Z",
-      },
+      node: integrationNode({ completionGates: ["controller-validation", "native-git-integration", "post-merge-validation"] }),
       subagent: {
         goalId: "goal-abcdef12",
         nodeId: "post-merge",
@@ -606,6 +611,93 @@ test("native git integrator runs post-merge validators before committing integra
   }
 });
 
+test("native git integrator treats post-merge required evidence as a post-merge validation gate", () => {
+  const repo = createRepo();
+  try {
+    const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+    const controller = manager.allocateControllerWorkspace({ invocationCwd: repo, goalId: "goal-abcdef12", objective: "Controller" });
+    const allocation = manager.allocateSubagentWorkspace({ invocationCwd: repo, controllerWorkspacePath: controller.worktreePath, goalId: "goal-abcdef12", nodeId: "post-merge-evidence" });
+    writeFileSync(join(allocation.worktreePath, "feature.txt"), "implemented\n");
+    git(allocation.worktreePath, ["add", "feature.txt"]);
+    git(allocation.worktreePath, ["commit", "-m", "implement feature"]);
+
+    const result = manager.integrateSubagentBranch({
+      controllerWorkspacePath: controller.worktreePath,
+      node: integrationNode({
+        nodeId: "post-merge-evidence",
+        slug: "post-merge-evidence",
+        completionGates: ["controller-validation", "native-git-integration"],
+        validation: { requiredEvidence: ["post-merge-validation-ran"] },
+      }),
+      subagent: {
+        goalId: "goal-abcdef12",
+        nodeId: "post-merge-evidence",
+        subagentId: allocation.subagentId,
+        harnessAdapterId: "fake",
+        workspacePath: allocation.worktreePath,
+        branch: allocation.branch,
+        status: "controllerValidating",
+        prompts: [],
+        createdAt: "2026-06-02T00:00:00.000Z",
+        updatedAt: "2026-06-02T00:00:00.000Z",
+      },
+    });
+
+    assert.equal(result.status, "complete");
+    assert.match(result.summary, /post-merge validation passed/);
+    assert.match(result.validationSignals?.join("\n") ?? "", /post-merge validator passed/);
+
+    manager.cleanupWorkspace({ repoRoot: repo, worktreePath: allocation.worktreePath, branch: allocation.branch, force: true });
+    manager.cleanupWorkspace({ repoRoot: repo, worktreePath: controller.worktreePath, branch: controller.branch, force: true });
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("native git integrator skips post-merge validators without a post-merge gate", () => {
+  const repo = createRepo();
+  try {
+    const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+    const controller = manager.allocateControllerWorkspace({ invocationCwd: repo, goalId: "goal-abcdef12", objective: "Controller" });
+    const allocation = manager.allocateSubagentWorkspace({ invocationCwd: repo, controllerWorkspacePath: controller.worktreePath, goalId: "goal-abcdef12", nodeId: "no-post-merge" });
+    writeFileSync(join(allocation.worktreePath, "feature.txt"), "implemented\n");
+    git(allocation.worktreePath, ["add", "feature.txt"]);
+    git(allocation.worktreePath, ["commit", "-m", "implement feature"]);
+
+    const result = manager.integrateSubagentBranch({
+      controllerWorkspacePath: controller.worktreePath,
+      node: integrationNode({
+        nodeId: "no-post-merge",
+        slug: "no-post-merge",
+        validators: ["test -f missing-post-merge.txt"],
+        completionGates: ["controller-validation", "native-git-integration"],
+      }),
+      subagent: {
+        goalId: "goal-abcdef12",
+        nodeId: "no-post-merge",
+        subagentId: allocation.subagentId,
+        harnessAdapterId: "fake",
+        workspacePath: allocation.worktreePath,
+        branch: allocation.branch,
+        status: "controllerValidating",
+        prompts: [],
+        createdAt: "2026-06-02T00:00:00.000Z",
+        updatedAt: "2026-06-02T00:00:00.000Z",
+      },
+    });
+
+    assert.equal(result.status, "complete");
+    assert.doesNotMatch(result.summary, /post-merge validation/);
+    assert.equal(result.validationSignals?.length ?? 0, 0);
+    assert.equal(git(controller.worktreePath, ["show", "HEAD:feature.txt"]), "implemented");
+
+    manager.cleanupWorkspace({ repoRoot: repo, worktreePath: allocation.worktreePath, branch: allocation.branch, force: true });
+    manager.cleanupWorkspace({ repoRoot: repo, worktreePath: controller.worktreePath, branch: controller.branch, force: true });
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("native git integrator aborts merge when post-merge validation fails", () => {
   const repo = createRepo();
   try {
@@ -619,19 +711,12 @@ test("native git integrator aborts merge when post-merge validation fails", () =
 
     const result = manager.integrateSubagentBranch({
       controllerWorkspacePath: controller.worktreePath,
-      node: {
-        goalId: "goal-abcdef12",
+      node: integrationNode({
         nodeId: "post-merge-fail",
         slug: "post-merge-fail",
-        objective: "Integrate feature",
-        dependencyNodeIds: [],
-        expectedOutputs: ["feature.txt"],
         validators: ["test -f missing-post-merge.txt"],
-        completionGates: ["controller-validation", "native-git-integration"],
-        status: "controllerValidating",
-        createdAt: "2026-06-02T00:00:00.000Z",
-        updatedAt: "2026-06-02T00:00:00.000Z",
-      },
+        completionGates: ["controller-validation", "native-git-integration", "post-merge-validation"],
+      }),
       subagent: {
         goalId: "goal-abcdef12",
         nodeId: "post-merge-fail",
@@ -652,6 +737,54 @@ test("native git integrator aborts merge when post-merge validation fails", () =
     assert.match(result.validationSignals?.join("\n") ?? "", /post-merge validator failed: test -f missing-post-merge\.txt/);
     assert.equal(git(controller.worktreePath, ["rev-parse", "--verify", "HEAD"]), controllerHead);
     assert.equal(existsSync(join(controller.worktreePath, "feature.txt")), false);
+    assert.equal(git(controller.worktreePath, ["status", "--porcelain=v1"]), "");
+
+    manager.cleanupWorkspace({ repoRoot: repo, worktreePath: allocation.worktreePath, branch: allocation.branch, force: true });
+    manager.cleanupWorkspace({ repoRoot: repo, worktreePath: controller.worktreePath, branch: controller.branch, force: true });
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("native git integrator aborts and cleans when post-merge validators mutate the controller workspace", () => {
+  const repo = createRepo();
+  try {
+    const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+    const controller = manager.allocateControllerWorkspace({ invocationCwd: repo, goalId: "goal-abcdef12", objective: "Controller" });
+    const allocation = manager.allocateSubagentWorkspace({ invocationCwd: repo, controllerWorkspacePath: controller.worktreePath, goalId: "goal-abcdef12", nodeId: "post-merge-mutates" });
+    writeFileSync(join(allocation.worktreePath, "feature.txt"), "implemented\n");
+    git(allocation.worktreePath, ["add", "feature.txt"]);
+    git(allocation.worktreePath, ["commit", "-m", "implement feature"]);
+    const controllerHead = git(controller.worktreePath, ["rev-parse", "--verify", "HEAD"]);
+
+    const result = manager.integrateSubagentBranch({
+      controllerWorkspacePath: controller.worktreePath,
+      node: integrationNode({
+        nodeId: "post-merge-mutates",
+        slug: "post-merge-mutates",
+        validators: ["printf 'validator mutation\\n' > feature.txt", "printf 'generated\\n' > generated.txt"],
+        completionGates: ["controller-validation", "native-git-integration", "post-merge-validation"],
+      }),
+      subagent: {
+        goalId: "goal-abcdef12",
+        nodeId: "post-merge-mutates",
+        subagentId: allocation.subagentId,
+        harnessAdapterId: "fake",
+        workspacePath: allocation.worktreePath,
+        branch: allocation.branch,
+        status: "controllerValidating",
+        prompts: [],
+        createdAt: "2026-06-02T00:00:00.000Z",
+        updatedAt: "2026-06-02T00:00:00.000Z",
+      },
+    });
+
+    assert.equal(result.status, "failed");
+    assert.match(result.summary, /mutated controller workspace/);
+    assert.match(result.validationSignals?.join("\n") ?? "", /post-merge validator mutated controller workspace/);
+    assert.equal(git(controller.worktreePath, ["rev-parse", "--verify", "HEAD"]), controllerHead);
+    assert.equal(existsSync(join(controller.worktreePath, "feature.txt")), false);
+    assert.equal(existsSync(join(controller.worktreePath, "generated.txt")), false);
     assert.equal(git(controller.worktreePath, ["status", "--porcelain=v1"]), "");
 
     manager.cleanupWorkspace({ repoRoot: repo, worktreePath: allocation.worktreePath, branch: allocation.branch, force: true });

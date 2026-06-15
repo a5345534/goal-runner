@@ -252,6 +252,7 @@ function evaluateRequiredEvidence(
   const satisfied: string[] = [];
   const missing: string[] = [];
   for (const item of required) {
+    if (item === "post-merge-validation-ran") continue;
     if (isEvidenceSatisfied(item, request, result)) satisfied.push(item);
     else missing.push(item);
   }
@@ -273,7 +274,7 @@ function isEvidenceSatisfied(
     case "non-test-diff-present":
       return changedPaths(request).some((path) => !isTestOrValidationArtifactPath(path, request));
     case "post-merge-validation-ran":
-      return request.node.validators.length > 0 && result.commandResults.length === request.node.validators.length && result.skippedValidators.length === 0;
+      return false;
     case "audit-report-present":
       return auditReportPaths(request).some((path) => auditReportExistsAndAcceptsCompletion(path));
     default:
@@ -285,22 +286,56 @@ function changedPaths(request: GoalControllerValidationRequest): string[] {
   const cwd = request.subagent.workspacePath;
   if (!cwd) return [];
   const paths = new Set<string>();
-  const baseRef = request.node.validation?.diffBaseRef;
-  if (baseRef) {
-    const diff = safeExec("git", ["diff", "--name-only", `${baseRef}...HEAD`], cwd);
-    for (const line of diff.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) paths.add(normalizeGitChangedPath(line));
-  }
-  const status = safeExec("git", ["status", "--short", "--untracked-files=all"], cwd);
-  for (const line of status.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
-    const path = line.length > 3 ? line.slice(3).trim() : line;
-    if (path) paths.add(normalizeGitChangedPath(path));
-  }
-  return [...paths].filter(Boolean);
+  const add = (path: string | undefined) => {
+    const normalized = path ? normalizeWorkspacePath(path) : "";
+    if (normalized) paths.add(normalized);
+  };
+
+  const baseRef = diffBaseRefForChangedPaths(request);
+  if (baseRef) addNameStatusPaths(safeExec("git", ["diff", "--name-status", "-z", `${baseRef}...HEAD`], cwd), add);
+  addNameStatusPaths(safeExec("git", ["diff", "--cached", "--name-status", "-z"], cwd), add);
+  addNameStatusPaths(safeExec("git", ["diff", "--name-status", "-z"], cwd), add);
+  for (const path of nulSplit(safeExec("git", ["ls-files", "--others", "--exclude-standard", "-z"], cwd))) add(path);
+  return [...paths];
 }
 
-function normalizeGitChangedPath(path: string): string {
-  const renamed = path.includes(" -> ") ? path.split(" -> ").pop() ?? path : path;
-  return normalizeWorkspacePath(renamed);
+function diffBaseRefForChangedPaths(request: GoalControllerValidationRequest): string | undefined {
+  return firstNonEmptyString(
+    request.node.validation?.diffBaseRef,
+    request.node.workspace?.baseRef,
+    metadataString(request.node.preparedResources?.metadata?.nativeGitWorkspace, "baseRef"),
+    request.node.preparedResources?.ref,
+    request.subagent.ref,
+  );
+}
+
+function addNameStatusPaths(output: string, add: (path: string | undefined) => void): void {
+  const parts = nulSplit(output);
+  for (let index = 0; index < parts.length;) {
+    const status = parts[index++] ?? "";
+    if (!status) continue;
+    const code = status[0];
+    if (code === "R" || code === "C") {
+      add(parts[index++]);
+      add(parts[index++]);
+      continue;
+    }
+    add(parts[index++]);
+  }
+}
+
+function nulSplit(output: string): string[] {
+  return output.split("\0").filter((item) => item.length > 0);
+}
+
+function firstNonEmptyString(...values: Array<string | undefined>): string | undefined {
+  return values.map((value) => value?.trim()).find((value): value is string => Boolean(value));
+}
+
+function metadataString(value: unknown, key: string): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const item = (value as Record<string, unknown>)[key];
+  return typeof item === "string" && item.trim() ? item.trim() : undefined;
 }
 
 function isTestOrValidationArtifactPath(path: string, request: GoalControllerValidationRequest): boolean {

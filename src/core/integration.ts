@@ -6,7 +6,8 @@ export type GoalSubagentIntegrationGateName =
   | "branch-integration"
   | "native-git-integration"
   | "worktree-merged-pr"
-  | "post-merge-validation";
+  | "post-merge-validation"
+  | "post-merge-validation-ran";
 
 export interface RequiredSubagentIntegrationIssue {
   goalId: string;
@@ -23,6 +24,8 @@ const INTEGRATION_COMPLETION_GATES = new Set<string>([
   "branch-integration",
   "native-git-integration",
   "worktree-merged-pr",
+  "post-merge-validation",
+  "post-merge-validation-ran",
 ]);
 
 /**
@@ -36,6 +39,7 @@ const INTEGRATION_COMPLETION_GATES = new Set<string>([
  */
 export function nodeRequiresSubagentIntegration(node: GoalDagNode, subagent?: GoalSubagentRecord): boolean {
   if (node.completionGates.some((gate) => INTEGRATION_COMPLETION_GATES.has(normalizeGateName(gate)))) return true;
+  if (node.validation?.requiredEvidence?.includes("post-merge-validation-ran")) return true;
   if (!subagent) return false;
   const strategy = node.workspaceStrategy?.toLowerCase() ?? "";
   return strategy.includes("native-git") && hasSubagentBranchOrWorkspaceEvidence(subagent);

@@ -103,7 +103,7 @@ export interface NativeGitSubagentBranchIntegrationRequest {
   subagent: GoalSubagentRecord;
   /** Reserved for future strategy selection. Current implementation uses git merge. */
   strategy?: "merge";
-  /** Re-run node validators in the controller workspace after subagent integration. Defaults true. */
+  /** Host policy for post-merge validation. Required gates fail closed when this is false. */
   postMergeValidation?: boolean;
 }
 
@@ -125,7 +125,7 @@ export interface NativeGitSubagentBranchIntegrationResult {
 export interface NativeGitSubagentBranchIntegratorOptions {
   controllerWorkspacePath: string;
   strategy?: "merge";
-  /** Re-run node validators in the controller workspace after subagent integration. Defaults true. */
+  /** Host policy for post-merge validation. Required gates fail closed when this is false. */
   postMergeValidation?: boolean;
 }
 
@@ -365,6 +365,7 @@ export class NativeGitWorkspaceManager {
     if (sourceHead === controllerHead) {
       const postMergeValidation = runPostMergeValidationIfNeeded(request, controllerWorkspacePath);
       if (!postMergeValidation.ok) {
+        if (postMergeValidation.workspaceMutated) cleanPostMergeValidationArtifacts(controllerWorkspacePath);
         return nativeGitIntegrationFailure(
           request,
           postMergeValidation.summary,
@@ -388,6 +389,7 @@ export class NativeGitWorkspaceManager {
     if (gitIsAncestor(controllerWorkspacePath, sourceHead, controllerHead)) {
       const postMergeValidation = runPostMergeValidationIfNeeded(request, controllerWorkspacePath);
       if (!postMergeValidation.ok) {
+        if (postMergeValidation.workspaceMutated) cleanPostMergeValidationArtifacts(controllerWorkspacePath);
         return nativeGitIntegrationFailure(
           request,
           postMergeValidation.summary,
@@ -412,7 +414,7 @@ export class NativeGitWorkspaceManager {
       git(controllerWorkspacePath, ["merge", "--no-ff", "--no-commit", sourceHead]);
       const postMergeValidation = runPostMergeValidationIfNeeded(request, controllerWorkspacePath);
       if (!postMergeValidation.ok) {
-        safeGit(controllerWorkspacePath, ["merge", "--abort"]);
+        abortMergeAndCleanPostMergeValidationArtifacts(controllerWorkspacePath);
         return nativeGitIntegrationFailure(
           request,
           postMergeValidation.summary,
@@ -750,24 +752,52 @@ interface NativeGitPostMergeValidationResult {
   ok: boolean;
   summary: string;
   validationSignals: string[];
+  workspaceMutated?: boolean;
 }
 
 function runPostMergeValidationIfNeeded(
   request: NativeGitSubagentBranchIntegrationRequest,
   controllerWorkspacePath: string,
 ): NativeGitPostMergeValidationResult {
-  if (request.postMergeValidation === false) return { ok: true, summary: "", validationSignals: [] };
-  const validators = request.node?.validators ?? [];
-  if (request.node && validators.length === 0) {
-    return { ok: true, summary: "post-merge validation skipped: no node validators configured", validationSignals: [] };
+  const required = nodeRequiresPostMergeValidation(request.node);
+  if (!required) return { ok: true, summary: "", validationSignals: [] };
+  if (request.postMergeValidation === false) {
+    return {
+      ok: false,
+      summary: "post-merge validation required but disabled by host policy",
+      validationSignals: ["post-merge validation required but disabled by host policy"],
+    };
   }
-  if (!request.node || validators.length === 0) return { ok: true, summary: "", validationSignals: [] };
+  const validators = request.node?.validators ?? [];
+  if (validators.length === 0) {
+    return {
+      ok: false,
+      summary: "post-merge validation required but no node validators are configured",
+      validationSignals: ["post-merge validation required but no node validators are configured"],
+    };
+  }
 
+  const beforeStatus = gitStatusPorcelain(controllerWorkspacePath, { ignoreWorktreeRoot: true });
+  const beforeIndexTree = safeGit(controllerWorkspacePath, ["write-tree"]);
   const results = validators.map((command) => runPostMergeValidatorCommand(command, controllerWorkspacePath));
+  const afterStatus = gitStatusPorcelain(controllerWorkspacePath, { ignoreWorktreeRoot: true });
+  const afterIndexTree = safeGit(controllerWorkspacePath, ["write-tree"]);
+  const statusChanged = afterStatus !== beforeStatus;
+  const indexChanged = Boolean(beforeIndexTree && afterIndexTree && beforeIndexTree !== afterIndexTree);
+  const workspaceMutated = statusChanged || indexChanged;
   const validationSignals = results.map((result) => result.ok
     ? `post-merge validator passed: ${result.command}`
     : `post-merge validator failed: ${result.command}${result.output ? `\n${result.output}` : ""}`);
   const failed = results.filter((result) => !result.ok);
+  if (workspaceMutated) {
+    validationSignals.push(`post-merge validator mutated controller workspace: ${statusDeltaSummary(beforeStatus, afterStatus, indexChanged)}`);
+    return {
+      ok: false,
+      summary: `post-merge validation mutated controller workspace${failed.length ? ` and failed ${failed.length}/${results.length} validator(s)` : ""}: ${statusDeltaSummary(beforeStatus, afterStatus, indexChanged)}`,
+      validationSignals,
+      workspaceMutated: true,
+    };
+  }
   if (failed.length === 0) {
     return { ok: true, summary: `post-merge validation passed (${results.length} validator(s))`, validationSignals };
   }
@@ -776,6 +806,13 @@ function runPostMergeValidationIfNeeded(
     summary: `post-merge validation failed (${failed.length}/${results.length} validator(s)): ${failed.map((result) => result.command).join(", ")}`,
     validationSignals,
   };
+}
+
+function nodeRequiresPostMergeValidation(node: GoalDagNode | undefined): boolean {
+  if (!node) return false;
+  return node.completionGates.includes("post-merge-validation") ||
+    node.completionGates.includes("post-merge-validation-ran") ||
+    Boolean(node.validation?.requiredEvidence?.includes("post-merge-validation-ran"));
 }
 
 function runPostMergeValidatorCommand(command: string, cwd: string): { command: string; ok: boolean; output?: string; error?: string } {
@@ -791,6 +828,25 @@ function runPostMergeValidatorCommand(command: string, cwd: string): { command: 
     const output = `${toText(record.stdout)}${toText(record.stderr)}`.trim();
     return { command, ok: false, output: truncateForIntegration(output), error: record.message ?? String(error) };
   }
+}
+
+function statusDeltaSummary(beforeStatus: string, afterStatus: string, indexChanged: boolean): string {
+  const parts = [
+    indexChanged ? "index tree changed" : undefined,
+    beforeStatus ? `before validators:\n${truncateForIntegration(beforeStatus, 1000)}` : "before validators: <clean>",
+    afterStatus ? `after validators:\n${truncateForIntegration(afterStatus, 1000)}` : "after validators: <clean>",
+  ];
+  return parts.filter((part): part is string => Boolean(part)).join("; ");
+}
+
+function abortMergeAndCleanPostMergeValidationArtifacts(cwd: string): void {
+  safeGit(cwd, ["merge", "--abort"]);
+  cleanPostMergeValidationArtifacts(cwd);
+}
+
+function cleanPostMergeValidationArtifacts(cwd: string): void {
+  safeGit(cwd, ["reset", "--hard", "HEAD"]);
+  safeGit(cwd, ["clean", "-fd"]);
 }
 
 function buildPostMergeValidationFollowupPrompt(request: NativeGitSubagentBranchIntegrationRequest, failureSummary: string): string {

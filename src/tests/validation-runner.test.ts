@@ -293,6 +293,53 @@ test("controller validation runner enforces validation allowed paths", () => {
   }
 });
 
+test("controller validation runner enforces validation scope for committed native-git diffs without validation diffBaseRef", () => {
+  const dir = mkdtempSync(join(tmpdir(), "goal-validation-scope-committed-"));
+  try {
+    initGitWorkspace(dir);
+    mkdirSync(join(dir, "infra"), { recursive: true });
+    writeFileSync(join(dir, "infra", "deploy.yml"), "bad: true\n");
+    execFileSync("git", ["add", "infra/deploy.yml"], { cwd: dir });
+    execFileSync("git", ["commit", "-m", "commit forbidden file"], { cwd: dir, stdio: "ignore" });
+
+    const result = runControllerValidation(
+      request({
+        node: { ...request().node, workspace: { baseRef: "HEAD~1" }, validation: { allowedPaths: ["src/**"], forbiddenPaths: ["infra/**"] } },
+        subagent: { ...request().subagent, workspacePath: dir },
+      }),
+    );
+    assert.equal(result.status, "failed");
+    assert.match(result.summary ?? "", /changed files touched forbidden paths: infra\/deploy\.yml/);
+    assert.equal(execFileSync("git", ["status", "--porcelain=v1"], { cwd: dir, encoding: "utf8" }).trim(), "");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("controller validation runner treats rename sources as touched paths", () => {
+  const dir = mkdtempSync(join(tmpdir(), "goal-validation-scope-rename-"));
+  try {
+    initGitWorkspace(dir);
+    mkdirSync(join(dir, "src", "secrets"), { recursive: true });
+    writeFileSync(join(dir, "src", "secrets", "key.ts"), "export const secret = true;\n");
+    execFileSync("git", ["add", "src/secrets/key.ts"], { cwd: dir });
+    execFileSync("git", ["commit", "-m", "add secret"], { cwd: dir, stdio: "ignore" });
+    mkdirSync(join(dir, "src", "public"), { recursive: true });
+    execFileSync("git", ["mv", "src/secrets/key.ts", "src/public/key.ts"], { cwd: dir });
+
+    const result = runControllerValidation(
+      request({
+        node: { ...request().node, validation: { allowedPaths: ["src/**"], forbiddenPaths: ["src/secrets/**"] } },
+        subagent: { ...request().subagent, workspacePath: dir },
+      }),
+    );
+    assert.equal(result.status, "failed");
+    assert.match(result.summary ?? "", /changed files touched forbidden paths: src\/secrets\/key\.ts/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("controller validation runner enforces validation forbidden paths before allowed paths", () => {
   const dir = mkdtempSync(join(tmpdir(), "goal-validation-scope-forbidden-"));
   try {
@@ -332,6 +379,24 @@ test("controller validation runner preserves behavior without validation scope p
     );
     assert.equal(result.status, "passed");
     assert.doesNotMatch(result.validationSignals?.join("\n") ?? "", /scope policy passed|policy failure/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("controller validation runner defers post-merge evidence to integration", () => {
+  const dir = mkdtempSync(join(tmpdir(), "goal-validation-post-merge-evidence-"));
+  try {
+    initGitWorkspace(dir);
+    const result = runControllerValidation(
+      request({
+        node: { ...request().node, validators: ["true"], validation: { requiredEvidence: ["post-merge-validation-ran"] } },
+        subagent: { ...request().subagent, workspacePath: dir },
+      }),
+    );
+    assert.equal(result.status, "passed");
+    assert.doesNotMatch(result.validationSignals?.join("\n") ?? "", /satisfied evidence: post-merge-validation-ran/);
+    assert.doesNotMatch(result.validationSignals?.join("\n") ?? "", /missing evidence: post-merge-validation-ran/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
