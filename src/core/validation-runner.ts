@@ -54,7 +54,7 @@ export function runControllerValidation(
     artifactLockResults: checkArtifactLocks(request),
     satisfiedEvidence: [],
     missingEvidence: [],
-    policyFailures: highRiskValidationPolicyFailures(request),
+    policyFailures: [...highRiskValidationPolicyFailures(request), ...scopePolicyFailures(request)],
   };
 
   const executeValidators = options.executeValidators !== false;
@@ -70,7 +70,7 @@ export function runControllerValidation(
 
   const failedCommands = result.commandResults.filter((item) => !item.ok);
   const failedLocks = result.artifactLockResults.filter((item) => !item.ok);
-  const validationSignals = buildValidationSignals(result);
+  const validationSignals = buildValidationSignals(request, result);
   const skippedValidatorsBlockPass = result.skippedValidators.length > 0;
   const ok =
     result.missingOutputs.length === 0 &&
@@ -196,6 +196,54 @@ function highRiskValidationPolicyFailures(request: GoalControllerValidationReque
   return hasValidation ? [] : ["high-risk implementation nodes require validators, outputs, a validation profile, or an approved test contract"];
 }
 
+function scopePolicyFailures(request: GoalControllerValidationRequest): string[] {
+  const contract = request.node.validation;
+  const allowed = contract?.allowedPaths ?? [];
+  const forbidden = contract?.forbiddenPaths ?? [];
+  if (allowed.length === 0 && forbidden.length === 0) return [];
+
+  const changed = changedPaths(request);
+  const forbiddenHits = changed.filter((path) => matchesAnyPathPolicy(path, forbidden));
+  const allowedMisses = allowed.length > 0
+    ? changed.filter((path) => !forbiddenHits.includes(path) && !matchesAnyPathPolicy(path, allowed))
+    : [];
+  return [
+    allowedMisses.length > 0 ? `changed files outside allowed paths: ${allowedMisses.join(", ")}` : undefined,
+    forbiddenHits.length > 0 ? `changed files touched forbidden paths: ${forbiddenHits.join(", ")}` : undefined,
+  ].filter((item): item is string => Boolean(item));
+}
+
+function matchesAnyPathPolicy(path: string, patterns: string[]): boolean {
+  return patterns.some((pattern) => matchesPathPolicy(path, pattern));
+}
+
+function matchesPathPolicy(path: string, pattern: string): boolean {
+  const candidate = normalizeWorkspacePath(path);
+  const normalizedPattern = normalizeWorkspacePath(pattern);
+  if (!candidate || !normalizedPattern) return false;
+  if (normalizedPattern.endsWith("/**")) {
+    const prefix = normalizedPattern.slice(0, -3).replace(/\/$/, "");
+    return candidate === prefix || candidate.startsWith(`${prefix}/`);
+  }
+  if (normalizedPattern.endsWith("/")) return candidate.startsWith(normalizedPattern);
+  return candidate === normalizedPattern;
+}
+
+function normalizeWorkspacePath(value: string): string {
+  return value
+    .trim()
+    .replace(/^"|"$/g, "")
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "")
+    .replace(/\/+/g, "/")
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "");
+}
+
+function scopePolicyConfigured(request: GoalControllerValidationRequest): boolean {
+  return Boolean(request.node.validation?.allowedPaths?.length || request.node.validation?.forbiddenPaths?.length);
+}
+
 function evaluateRequiredEvidence(
   request: GoalControllerValidationRequest,
   result: ControllerValidationRunResult,
@@ -240,14 +288,19 @@ function changedPaths(request: GoalControllerValidationRequest): string[] {
   const baseRef = request.node.validation?.diffBaseRef;
   if (baseRef) {
     const diff = safeExec("git", ["diff", "--name-only", `${baseRef}...HEAD`], cwd);
-    for (const line of diff.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) paths.add(line);
+    for (const line of diff.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) paths.add(normalizeGitChangedPath(line));
   }
   const status = safeExec("git", ["status", "--short", "--untracked-files=all"], cwd);
   for (const line of status.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
     const path = line.length > 3 ? line.slice(3).trim() : line;
-    if (path) paths.add(path.replace(/^"|"$/g, ""));
+    if (path) paths.add(normalizeGitChangedPath(path));
   }
-  return [...paths];
+  return [...paths].filter(Boolean);
+}
+
+function normalizeGitChangedPath(path: string): string {
+  const renamed = path.includes(" -> ") ? path.split(" -> ").pop() ?? path : path;
+  return normalizeWorkspacePath(renamed);
 }
 
 function isTestOrValidationArtifactPath(path: string, request: GoalControllerValidationRequest): boolean {
@@ -279,7 +332,7 @@ function auditReportPaths(request: GoalControllerValidationRequest): string[] {
     .map((path) => isAbsolute(path) ? path : cwd ? resolve(cwd, path) : path);
 }
 
-function buildValidationSignals(result: ControllerValidationRunResult): string[] {
+function buildValidationSignals(request: GoalControllerValidationRequest, result: ControllerValidationRunResult): string[] {
   const signals: string[] = [];
   for (const output of result.missingOutputs) signals.push(`missing output: ${output}`);
   for (const lock of result.artifactLockResults) {
@@ -292,8 +345,13 @@ function buildValidationSignals(result: ControllerValidationRunResult): string[]
   for (const evidence of result.satisfiedEvidence) signals.push(`satisfied evidence: ${evidence}`);
   for (const evidence of result.missingEvidence) signals.push(`missing evidence: ${evidence}`);
   for (const failure of result.policyFailures) signals.push(`policy failure: ${failure}`);
-  if (signals.length === 0) signals.push("self-report accepted; no expected outputs, executable validators, artifact locks, or required evidence configured");
+  if (result.policyFailures.length === 0 && scopePolicyConfigured(request)) signals.push("scope policy passed");
+  if (signals.length === 0) signals.push("self-report accepted; no expected outputs, executable validators, artifact locks, required evidence, or scope policy configured");
   return signals;
+}
+
+function scopePolicyFailed(result: ControllerValidationRunResult): boolean {
+  return result.policyFailures.some((failure) => /allowed paths|forbidden paths/.test(failure));
 }
 
 function defaultFollowupPrompt(request: GoalControllerValidationRequest, result: ControllerValidationRunResult): string {
@@ -306,6 +364,7 @@ function defaultFollowupPrompt(request: GoalControllerValidationRequest, result:
     failedLocks.length ? `Restore or explicitly revise the locked validation artifacts: ${failedLocks.map((item) => item.path).join(", ")}.` : undefined,
     result.missingEvidence.length ? `Provide the missing validation evidence: ${result.missingEvidence.join(", ")}.` : undefined,
     result.policyFailures.length ? `Resolve validation policy failures: ${result.policyFailures.join(", ")}.` : undefined,
+    scopePolicyFailed(result) ? "Do not expand scope. Revert or move out-of-scope changes, or stop and ask the controller/user for an explicit plan change if the scope policy is wrong." : undefined,
     result.skippedValidators.length ? "Controller validators were configured but explicitly skipped by host policy; enable validator execution before accepting completion." : undefined,
     "After addressing the issues, report again with SUBAGENT_RESULT: <summary>.",
   ].filter((line): line is string => Boolean(line)).join("\n");

@@ -9,6 +9,15 @@ import { createControllerValidationRunner, runControllerValidation, type GoalCon
 
 const now = "2026-06-02T00:00:00.000Z";
 
+function initGitWorkspace(dir: string): void {
+  execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: dir });
+  writeFileSync(join(dir, "README.md"), "base\n");
+  execFileSync("git", ["add", "README.md"], { cwd: dir });
+  execFileSync("git", ["commit", "-m", "base"], { cwd: dir, stdio: "ignore" });
+}
+
 function request(overrides: Partial<GoalControllerValidationRequest> = {}): GoalControllerValidationRequest {
   return {
     goalId: "goal-1",
@@ -249,6 +258,83 @@ test("controller validation runner blocks high-risk implementation nodes without
 
   assert.equal(result.status, "failed");
   assert.match(result.summary ?? "", /high-risk implementation nodes require/);
+});
+
+test("controller validation runner enforces validation allowed paths", () => {
+  const dir = mkdtempSync(join(tmpdir(), "goal-validation-scope-allowed-"));
+  try {
+    initGitWorkspace(dir);
+    mkdirSync(join(dir, "src"), { recursive: true });
+    writeFileSync(join(dir, "src", "feature.ts"), "export const ok = true;\n");
+
+    const passing = runControllerValidation(
+      request({
+        node: { ...request().node, validation: { allowedPaths: ["src/**"] } },
+        subagent: { ...request().subagent, workspacePath: dir },
+      }),
+    );
+    assert.equal(passing.status, "passed");
+    assert.match(passing.validationSignals?.join("\n") ?? "", /scope policy passed/);
+
+    mkdirSync(join(dir, "infra"), { recursive: true });
+    writeFileSync(join(dir, "infra", "deploy.yml"), "bad: true\n");
+    const failing = runControllerValidation(
+      request({
+        node: { ...request().node, validation: { allowedPaths: ["src/**"] } },
+        subagent: { ...request().subagent, workspacePath: dir },
+      }),
+    );
+    assert.equal(failing.status, "failed");
+    assert.match(failing.summary ?? "", /changed files outside allowed paths: infra\/deploy\.yml/);
+    assert.match(failing.followupPrompt ?? "", /Do not expand scope/);
+    assert.match(failing.followupPrompt ?? "", /infra\/deploy\.yml/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("controller validation runner enforces validation forbidden paths before allowed paths", () => {
+  const dir = mkdtempSync(join(tmpdir(), "goal-validation-scope-forbidden-"));
+  try {
+    initGitWorkspace(dir);
+    mkdirSync(join(dir, "src", "secrets"), { recursive: true });
+    writeFileSync(join(dir, "src", "secrets", "key.ts"), "export const secret = true;\n");
+    writeFileSync(join(dir, "package-lock.json"), "{}\n");
+
+    const result = runControllerValidation(
+      request({
+        node: { ...request().node, validation: { allowedPaths: ["src/**"], forbiddenPaths: ["src/secrets/**", "package-lock.json"] } },
+        subagent: { ...request().subagent, workspacePath: dir },
+      }),
+    );
+    assert.equal(result.status, "failed");
+    assert.match(result.summary ?? "", /changed files touched forbidden paths: .*package-lock\.json/);
+    assert.match(result.summary ?? "", /src\/secrets\/key\.ts/);
+    assert.doesNotMatch(result.summary ?? "", /changed files outside allowed paths: src\/secrets\/key\.ts/);
+    assert.match(result.followupPrompt ?? "", /package-lock\.json/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("controller validation runner preserves behavior without validation scope policy", () => {
+  const dir = mkdtempSync(join(tmpdir(), "goal-validation-no-scope-"));
+  try {
+    initGitWorkspace(dir);
+    mkdirSync(join(dir, "infra"), { recursive: true });
+    writeFileSync(join(dir, "infra", "deploy.yml"), "allowed by absence of policy\n");
+
+    const result = runControllerValidation(
+      request({
+        node: { ...request().node, validation: { profile: "code-change" } },
+        subagent: { ...request().subagent, workspacePath: dir },
+      }),
+    );
+    assert.equal(result.status, "passed");
+    assert.doesNotMatch(result.validationSignals?.join("\n") ?? "", /scope policy passed|policy failure/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("controller validation runner checks required implementation diff evidence", () => {
