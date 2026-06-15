@@ -22,6 +22,7 @@ function node(overrides: Partial<GoalDagNode> = {}): GoalDagNode {
     dependencyNodeIds: [],
     expectedOutputs: ["attendance.json"],
     validators: ["npm test"],
+    validation: { allowedPaths: ["apps/attendance/**"], forbiddenPaths: ["package-lock.json"] },
     completionGates: ["controller-validation"],
     status: "ready",
     createdAt: now,
@@ -96,6 +97,9 @@ test("Opencode harness subagent adapter starts a detached opencode session and s
     assert.equal(prompts.length, 1);
     assert.match(prompts[0] ?? "", /system guardrails/);
     assert.match(prompts[0] ?? "", /SUBAGENT_RESULT/);
+    assert.match(prompts[0] ?? "", /CONTROLLER EXECUTION POLICY/);
+    assert.match(prompts[0] ?? "", /Allowed changed paths: apps\/attendance\/\*\*/);
+    assert.match(prompts[0] ?? "", /Forbidden changed paths: package-lock\.json/);
     assert.match(prompts[0] ?? "", /create attendance doctypes/);
   } finally {
     setOpencodeBackgroundSessionLauncherForTests();
@@ -220,6 +224,7 @@ test("renderOpencodeSubagentInitialPrompt renders the SUBAGENT_RESULT/BLOCKED ma
   assert.match(prompt, /system guardrails/);
   assert.match(prompt, /SUBAGENT_RESULT/);
   assert.match(prompt, /SUBAGENT_BLOCKED/);
+  assert.match(prompt, /CONTROLLER EXECUTION POLICY/);
   assert.match(prompt, /create attendance doctypes/);
   assert.match(prompt, /attendance DocTypes/);
 });

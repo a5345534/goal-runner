@@ -25,6 +25,7 @@ function node(overrides: Partial<GoalDagNode> = {}): GoalDagNode {
     dependencyNodeIds: [],
     expectedOutputs: ["attendance.json"],
     validators: ["npm test"],
+    validation: { allowedPaths: ["apps/attendance/**"], forbiddenPaths: ["package-lock.json"] },
     completionGates: ["controller-validation"],
     status: "ready",
     createdAt: now,
@@ -104,6 +105,9 @@ test("Pi harness subagent adapter starts a detached Pi session and sends the ini
   assert.equal(result.workspacePath, "/repo/.worktrees/attendance");
   assert.match(prompts[0] ?? "", /system guardrails/);
   assert.match(prompts[0] ?? "", /SUBAGENT_RESULT/);
+  assert.match(prompts[0] ?? "", /CONTROLLER EXECUTION POLICY/);
+  assert.match(prompts[0] ?? "", /Allowed changed paths: apps\/attendance\/\*\*/);
+  assert.match(prompts[0] ?? "", /Forbidden changed paths: package-lock\.json/);
   assert.match(prompts[0] ?? "", /create attendance doctypes/);
 });
 

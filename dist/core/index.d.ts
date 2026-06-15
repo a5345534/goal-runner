@@ -6,6 +6,7 @@ export * from "./state-root.js";
 export * from "./memory-store.js";
 export * from "./sqlite-store.js";
 export * from "./prompts.js";
+export * from "./executor-prompt.js";
 export * from "./runtime.js";
 export * from "./git-workspace.js";
 export * from "./controller-loop.js";

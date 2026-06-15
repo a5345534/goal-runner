@@ -1,4 +1,5 @@
 import { normalizeExceptionSignature } from "./exception-handler.js";
+import { renderExecutorGuardrailLines } from "./executor-prompt.js";
 import { nodeRequiresSubagentIntegration, requiredSubagentIntegrationTerminalSuccess } from "./integration.js";
 import { attachPreparedResourcesToNode, recordAdapterObservationOnNode, recordRecoveryDecisionOnNode, supersedePreparedResourcesOnNode, withGoalDagNodeLifecyclePhase } from "./lifecycle.js";
 const SYNCABLE_SUBAGENT_STATUSES = new Set(["sessionStarted", "running", "idle", "blocked"]);
@@ -2025,6 +2026,8 @@ function renderDefaultInitialPrompt(node) {
         node.scope ? `Scope: ${node.scope}` : undefined,
         node.expectedOutputs.length ? `Expected outputs: ${node.expectedOutputs.join(", ")}` : undefined,
         node.validators.length ? `Validators: ${node.validators.join(", ")}` : undefined,
+        "",
+        ...renderExecutorGuardrailLines(node),
     ].filter((line) => Boolean(line)).join("\n");
 }
 function resolveNow(now) {

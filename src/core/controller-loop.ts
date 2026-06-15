@@ -1,6 +1,7 @@
 import type { GoalDagSchedulingPolicy } from "./dag-scheduler.js";
 import type { ControllerExceptionHandler } from "./exception-handler.js";
 import { normalizeExceptionSignature } from "./exception-handler.js";
+import { renderExecutorGuardrailLines } from "./executor-prompt.js";
 import { nodeRequiresSubagentIntegration, requiredSubagentIntegrationTerminalSuccess } from "./integration.js";
 import { attachPreparedResourcesToNode, recordAdapterObservationOnNode, recordRecoveryDecisionOnNode, supersedePreparedResourcesOnNode, withGoalDagNodeLifecyclePhase } from "./lifecycle.js";
 import type { HarnessSubagentAdapter, StartGoalSubagentOptions } from "./subagent-adapter.js";
@@ -2468,6 +2469,8 @@ function renderDefaultInitialPrompt(node: GoalDagNode): string {
     node.scope ? `Scope: ${node.scope}` : undefined,
     node.expectedOutputs.length ? `Expected outputs: ${node.expectedOutputs.join(", ")}` : undefined,
     node.validators.length ? `Validators: ${node.validators.join(", ")}` : undefined,
+    "",
+    ...renderExecutorGuardrailLines(node),
   ].filter((line): line is string => Boolean(line)).join("\n");
 }
 

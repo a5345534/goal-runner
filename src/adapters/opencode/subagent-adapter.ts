@@ -12,6 +12,7 @@
 // future Pi or Claude Code adapter can correlate subagent records
 // from the same goal.
 
+import { promptIncludesExecutorGuardrails, renderExecutorGuardrailLines } from "../../core/executor-prompt.js";
 import type {
   GoalSubagentRecord,
   HarnessSubagentAbortRequest,
@@ -154,6 +155,8 @@ export function renderOpencodeSubagentInitialPrompt(request: HarnessSubagentStar
     request.cwd && request.branch ? "If you change repository files, commit the intended changes on this branch before reporting SUBAGENT_RESULT; uncommitted work cannot be integrated by the controller." : undefined,
     request.node.expectedOutputs.length ? `Expected outputs: ${request.node.expectedOutputs.join(", ")}` : undefined,
     request.node.validators.length ? `Validators: ${request.node.validators.join(", ")}` : undefined,
+    "",
+    ...(promptIncludesExecutorGuardrails(request.initialPrompt) ? [] : renderExecutorGuardrailLines(request.node)),
     "",
     request.initialPrompt,
   ];

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, openSync, readSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
+import { promptIncludesExecutorGuardrails, renderExecutorGuardrailLines } from "../../core/executor-prompt.js";
 import { launchPiRpcBackgroundGoalSession, } from "./background-session.js";
 import { normalizePiModelArg } from "./model-args.js";
 import { readPiBackgroundRunnerInventory } from "./runner-ops.js";
@@ -123,6 +124,8 @@ export function renderPiSubagentInitialPrompt(request) {
         request.cwd && request.branch ? "If you change repository files, commit the intended changes on this branch before reporting SUBAGENT_RESULT; uncommitted work cannot be integrated by the controller." : undefined,
         request.node.expectedOutputs.length ? `Expected outputs: ${request.node.expectedOutputs.join(", ")}` : undefined,
         request.node.validators.length ? `Validators: ${request.node.validators.join(", ")}` : undefined,
+        "",
+        ...(promptIncludesExecutorGuardrails(request.initialPrompt) ? [] : renderExecutorGuardrailLines(request.node)),
         "",
         request.initialPrompt,
     ];

@@ -47,7 +47,7 @@ function subagent(overrides = {}) {
     };
 }
 test("controller tick starts ready DAG nodes through the subagent adapter", async () => {
-    const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", validators: ["npm test"] }]);
+    const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", validators: ["npm test"], validation: { allowedPaths: ["src/**"], forbiddenPaths: ["infra/**"] } }]);
     const adapter = new FakeSubagentAdapter();
     const tick = await runtime.runGoalControllerTick("goal-1", {
         adapter,
@@ -59,6 +59,9 @@ test("controller tick starts ready DAG nodes through the subagent adapter", asyn
     assert.equal(adapter.starts[0]?.cwd, "/repo/.worktrees/build-feature");
     assert.equal(adapter.starts[0]?.branch, "feat/build-feature");
     assert.match(adapter.starts[0]?.initialPrompt ?? "", /Build feature/);
+    assert.match(adapter.starts[0]?.initialPrompt ?? "", /CONTROLLER EXECUTION POLICY/);
+    assert.match(adapter.starts[0]?.initialPrompt ?? "", /Allowed changed paths: src\/\*\*/);
+    assert.match(adapter.starts[0]?.initialPrompt ?? "", /Forbidden changed paths: infra\/\*\*/);
     assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "running");
     assert.equal((await runtime.getGoalSubagent("goal-1", tick.started[0]?.subagentId ?? ""))?.workspacePath, "/repo/.worktrees/build-feature");
 });
