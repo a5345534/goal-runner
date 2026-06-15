@@ -549,9 +549,13 @@ function runPostMergeValidationIfNeeded(request, controllerWorkspacePath) {
 function nodeRequiresPostMergeValidation(node) {
     if (!node)
         return false;
-    return node.completionGates.includes("post-merge-validation") ||
-        node.completionGates.includes("post-merge-validation-ran") ||
+    const gates = node.completionGates.map(normalizeCompletionGateName);
+    return gates.includes("post-merge-validation") ||
+        gates.includes("post-merge-validation-ran") ||
         Boolean(node.validation?.requiredEvidence?.includes("post-merge-validation-ran"));
+}
+function normalizeCompletionGateName(value) {
+    return value.trim().toLowerCase().replace(/_/g, "-");
 }
 function runPostMergeValidatorCommand(command, cwd) {
     try {
@@ -582,7 +586,7 @@ function abortMergeAndCleanPostMergeValidationArtifacts(cwd) {
 }
 function cleanPostMergeValidationArtifacts(cwd) {
     safeGit(cwd, ["reset", "--hard", "HEAD"]);
-    safeGit(cwd, ["clean", "-fd"]);
+    safeGit(cwd, ["clean", "-fd", "-e", ".worktrees/"]);
 }
 function buildPostMergeValidationFollowupPrompt(request, failureSummary) {
     return [

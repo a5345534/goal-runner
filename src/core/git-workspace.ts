@@ -810,9 +810,14 @@ function runPostMergeValidationIfNeeded(
 
 function nodeRequiresPostMergeValidation(node: GoalDagNode | undefined): boolean {
   if (!node) return false;
-  return node.completionGates.includes("post-merge-validation") ||
-    node.completionGates.includes("post-merge-validation-ran") ||
+  const gates = node.completionGates.map(normalizeCompletionGateName);
+  return gates.includes("post-merge-validation") ||
+    gates.includes("post-merge-validation-ran") ||
     Boolean(node.validation?.requiredEvidence?.includes("post-merge-validation-ran"));
+}
+
+function normalizeCompletionGateName(value: string): string {
+  return value.trim().toLowerCase().replace(/_/g, "-");
 }
 
 function runPostMergeValidatorCommand(command: string, cwd: string): { command: string; ok: boolean; output?: string; error?: string } {
@@ -846,7 +851,7 @@ function abortMergeAndCleanPostMergeValidationArtifacts(cwd: string): void {
 
 function cleanPostMergeValidationArtifacts(cwd: string): void {
   safeGit(cwd, ["reset", "--hard", "HEAD"]);
-  safeGit(cwd, ["clean", "-fd"]);
+  safeGit(cwd, ["clean", "-fd", "-e", ".worktrees/"]);
 }
 
 function buildPostMergeValidationFollowupPrompt(request: NativeGitSubagentBranchIntegrationRequest, failureSummary: string): string {
