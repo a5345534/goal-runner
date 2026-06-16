@@ -39,7 +39,7 @@ test("model routing selects explicit, rule, then default scenarios", () => {
       expectedOutputs: [],
       modelScenario: "review",
     }, config),
-    { scenario: "review", model: "anthropic/claude-opus", reason: "node.modelScenario:review" },
+    { scenario: "review", model: "anthropic/claude-opus", reason: "explicit node modelScenario review" },
   );
   assert.deepEqual(
     selectModelScenarioForNode({
@@ -50,7 +50,7 @@ test("model routing selects explicit, rule, then default scenarios", () => {
       validators: [],
       expectedOutputs: [],
     }, config),
-    { scenario: "docs", model: "openai/gpt-5-mini", reason: "rule:docs" },
+    { scenario: "docs", model: "openai/gpt-5-mini", reason: "routing rule docs" },
   );
   assert.deepEqual(
     selectModelScenarioForNode({
@@ -59,7 +59,7 @@ test("model routing selects explicit, rule, then default scenarios", () => {
       validators: [],
       expectedOutputs: [],
     }, config),
-    { scenario: "implementation", model: "openai-codex/gpt-5.5", reason: "defaultSubagentScenario:implementation" },
+    { scenario: "implementation", model: "openai-codex/gpt-5.5", reason: "default subagent scenario implementation" },
   );
 });
 

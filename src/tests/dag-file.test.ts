@@ -144,7 +144,7 @@ test("goal DAG file parser rejects invalid validation locks and unknown model sc
       modelRouting: { scenarios: { docs: { model: "openai/gpt" } } },
       nodes: [{ id: "a", objective: "x", modelScenario: "missing" }],
     })),
-    /modelScenario references unknown scenario missing/,
+    /unknown model scenario "missing"/,
   );
 });
 
@@ -277,7 +277,7 @@ test("goal DAG file parser rejects unsupported required evidence with clear reme
         validation: { requiredEvidence: ["pnpm test passes"] },
       }],
     })),
-    /unsupported required evidence.*pnpm test passes/i,
+    /Invalid requiredEvidence.*pnpm test passes/,
   );
 
   // The error must list the supported evidence tokens
@@ -291,7 +291,7 @@ test("goal DAG file parser rejects unsupported required evidence with clear reme
         validation: { requiredEvidence: ["manual review passed"] },
       }],
     })),
-    /supported evidence tokens.*validators-ran/i,
+    /Supported values are.*validators-ran/,
   );
 
   // Natural-language checks should get remediation guidance
@@ -305,7 +305,7 @@ test("goal DAG file parser rejects unsupported required evidence with clear reme
         validation: { requiredEvidence: ["pnpm test passes"] },
       }],
     })),
-    /natural-language acceptance checks/i,
+    /Invalid requiredEvidence token/,
   );
 });
 
@@ -320,7 +320,7 @@ test("goal DAG file parser rejects duplicate required evidence", () => {
         validation: { requiredEvidence: ["validators-ran", "validators-ran"] },
       }],
     })),
-    /duplicate required evidence: validators-ran/,
+    /contains duplicate required evidence/,
   );
 
   // Multiple duplicates should be caught (first duplicate errors first)
@@ -334,7 +334,7 @@ test("goal DAG file parser rejects duplicate required evidence", () => {
         validation: { requiredEvidence: ["validators-ran", "locked-artifacts-unchanged", "locked-artifacts-unchanged"] },
       }],
     })),
-    /duplicate required evidence: locked-artifacts-unchanged/,
+    /contains duplicate required evidence/,
   );
 });
 

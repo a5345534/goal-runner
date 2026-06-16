@@ -107,7 +107,7 @@ test("goal DAG file parser rejects invalid validation locks and unknown model sc
         objective: "x",
         modelRouting: { scenarios: { docs: { model: "openai/gpt" } } },
         nodes: [{ id: "a", objective: "x", modelScenario: "missing" }],
-    })), /modelScenario references unknown scenario missing/);
+    })), /unknown model scenario "missing"/);
 });
 test("goal DAG file documentation full examples pass parser validation", () => {
     const docs = readFileSync(new URL("../../docs/goal-dag-format.md", import.meta.url), "utf8");
@@ -219,7 +219,7 @@ test("goal DAG file parser rejects unsupported required evidence with clear reme
                 objective: "Bad",
                 validation: { requiredEvidence: ["pnpm test passes"] },
             }],
-    })), /unsupported required evidence.*pnpm test passes/i);
+    })), /Invalid requiredEvidence.*pnpm test passes/);
     // The error must list the supported evidence tokens
     assert.throws(() => parseGoalDagFileContent(JSON.stringify({
         version: 1,
@@ -229,7 +229,7 @@ test("goal DAG file parser rejects unsupported required evidence with clear reme
                 objective: "Bad",
                 validation: { requiredEvidence: ["manual review passed"] },
             }],
-    })), /supported evidence tokens.*validators-ran/i);
+    })), /Supported values are.*validators-ran/);
     // Natural-language checks should get remediation guidance
     assert.throws(() => parseGoalDagFileContent(JSON.stringify({
         version: 1,
@@ -239,7 +239,7 @@ test("goal DAG file parser rejects unsupported required evidence with clear reme
                 objective: "Bad",
                 validation: { requiredEvidence: ["pnpm test passes"] },
             }],
-    })), /natural-language acceptance checks/i);
+    })), /Invalid requiredEvidence token/);
 });
 test("goal DAG file parser rejects duplicate required evidence", () => {
     assert.throws(() => parseGoalDagFileContent(JSON.stringify({
@@ -250,7 +250,7 @@ test("goal DAG file parser rejects duplicate required evidence", () => {
                 objective: "Dupe",
                 validation: { requiredEvidence: ["validators-ran", "validators-ran"] },
             }],
-    })), /duplicate required evidence: validators-ran/);
+    })), /contains duplicate required evidence/);
     // Multiple duplicates should be caught (first duplicate errors first)
     assert.throws(() => parseGoalDagFileContent(JSON.stringify({
         version: 1,
@@ -260,7 +260,7 @@ test("goal DAG file parser rejects duplicate required evidence", () => {
                 objective: "Dupe",
                 validation: { requiredEvidence: ["validators-ran", "locked-artifacts-unchanged", "locked-artifacts-unchanged"] },
             }],
-    })), /duplicate required evidence: locked-artifacts-unchanged/);
+    })), /contains duplicate required evidence/);
 });
 test("goal DAG file documentation examples use only supported evidence tokens", () => {
     const docs = readFileSync(new URL("../../docs/goal-dag-format.md", import.meta.url), "utf8");
