@@ -25,6 +25,15 @@ import type {
   GoalSubagentRecord,
   GoalSummary,
 } from "../../core/index.js";
+import {
+  buildGoalMonitorRuntimeSummary,
+  deriveMonitorHealth,
+  type GoalMonitorRuntimeSummary,
+  type MonitorHealth,
+  SESSION_STATE_LABELS,
+  HIDDEN_CONTINUATION_STATE_LABELS,
+  CONTROLLER_POLL_STATE_LABELS,
+} from "../pi/monitor-ui.js";
 
 export interface OpencodeMonitorSnapshot {
   lines: string[];
@@ -62,22 +71,53 @@ export function renderOpencodeMonitorLines(
   const maxLineWidth = options.maxLineWidth ?? DEFAULT_MAX_LINE_WIDTH;
   const now = options.now ?? (() => new Date());
   const lines: string[] = [];
+
+  // ── STATUS section ──
+  lines.push(`── STATUS ──`);
   lines.push(`Goal ${goal.shortGoalId} monitor — refreshed ${now().toISOString()}`);
   lines.push(`Status: ${goal.status}  Tokens: ${formatTokens(goal)}  Elapsed: ${formatSeconds(goal.timeUsedSeconds)}`);
   lines.push(`Objective: ${truncate(goal.objective ?? goal.objectiveSummary ?? "", maxLineWidth)}`);
   if (goal.executionWorkspace) lines.push(`Workspace: ${goal.executionWorkspace}`);
   if (goal.sessionFile) lines.push(`Session: ${goal.sessionFile}`);
+  if (goal.activityState) lines.push(`Activity: ${goal.activityState}`);
 
   // Surface latest controller audit summary when available.
   const auditSummary = extractLatestAuditSummary(options.ledgerEvents);
   if (auditSummary) lines.push(`Audit: ${auditSummary}`);
 
+  // ── RUNTIME section ──
+  const runtimeSummary = buildGoalMonitorRuntimeSummary(
+    goal,
+    state.subagents,
+    { ledgerEvents: options.ledgerEvents },
+  );
+  lines.push("");
+  lines.push(`── RUNTIME ──`);
+  lines.push(formatOpencodeRuntimeSummary(runtimeSummary));
+
+  // ── Health line within RUNTIME ──
+  const health = deriveMonitorHealth(runtimeSummary, goal, state.subagents);
+  lines.push(`Health: ${health.health}`);
+
+  // ── PROGRESS section ──
+  lines.push("");
+  lines.push(`── PROGRESS ──`);
+
   if (state.nodes.length === 0 && state.subagents.length === 0) {
     lines.push("(no DAG nodes or subagents yet)");
+    // ── NEXT ACTION section ──
+    lines.push("");
+    lines.push(`── NEXT ACTION ──`);
+    lines.push(truncate(health.nextAction, maxLineWidth));
     return lines;
   }
 
   const subagentsByNode = groupSubagentsByNode(state.subagents);
+  // Show runner summary before per-runner details.
+  const runnerSummaryLine = formatOpencodeRunnerSummary(runtimeSummary.runners);
+  lines.push(`Runners: ${runnerSummaryLine}`);
+  lines.push(`Nodes: ${state.nodes.length}  Subagents: ${state.subagents.length}`);
+
   state.nodes.forEach((node, index) => {
     lines.push("");
     lines.push(
@@ -134,6 +174,12 @@ export function renderOpencodeMonitorLines(
       if (note) lines.push(`      note: ${truncate(note, maxLineWidth - 6)}`);
     }
   });
+
+  // ── NEXT ACTION section ──
+  lines.push("");
+  lines.push(`── NEXT ACTION ──`);
+  lines.push(truncate(health.nextAction, maxLineWidth));
+
   return lines;
 }
 
@@ -182,6 +228,37 @@ function truncate(text: string, maxWidth: number): string {
   if (text.length <= maxWidth) return text;
   if (maxWidth <= 4) return text.slice(0, maxWidth);
   return `${text.slice(0, maxWidth - 3)}...`;
+}
+
+/** Format the runtime summary as a compact multi-line block for OpenCode text output. */
+function formatOpencodeRuntimeSummary(summary: GoalMonitorRuntimeSummary): string {
+  const sessionLabel = SESSION_STATE_LABELS[summary.session.state];
+  const hiddenLabel = HIDDEN_CONTINUATION_STATE_LABELS[summary.hiddenContinuation.state];
+  const pollLabel = CONTROLLER_POLL_STATE_LABELS[summary.controllerPoll.state];
+
+  const lines = [
+    `Session=${sessionLabel}  Hidden=${hiddenLabel}${summary.hiddenContinuation.reason ? ` (${summary.hiddenContinuation.reason})` : ""}  Poll=${pollLabel}${summary.controllerPoll.reason ? ` (${summary.controllerPoll.reason})` : ""}`,
+    `Runners: ${formatOpencodeRunnerSummary(summary.runners)}`,
+  ];
+
+  if (summary.controllerPoll.lastPollAt) {
+    lines.push(`Last poll: ${summary.controllerPoll.lastPollAt}`);
+  }
+  if (summary.hiddenContinuation.attemptId) {
+    lines.push(`Continuation attempt: ${summary.hiddenContinuation.attemptId}`);
+  }
+
+  return lines.join("\n");
+}
+
+function formatOpencodeRunnerSummary(runners: GoalMonitorRuntimeSummary["runners"]): string {
+  const parts: string[] = [];
+  if (runners.running > 0) parts.push(`${runners.running} running`);
+  if (runners.stopped > 0) parts.push(`${runners.stopped} stopped`);
+  if (runners.duplicateStopped > 0) parts.push(`${runners.duplicateStopped} duplicate`);
+  if (runners.archived > 0) parts.push(`${runners.archived} archived`);
+  if (runners.failed > 0) parts.push(`${runners.failed} failed`);
+  return parts.length > 0 ? parts.join(", ") : "none";
 }
 
 /**
