@@ -5,7 +5,19 @@ import { renderExecutorGuardrailLines } from "./executor-prompt.js";
 import { nodeRequiresSubagentIntegration, requiredSubagentIntegrationTerminalSuccess } from "./integration.js";
 import { attachPreparedResourcesToNode, recordAdapterObservationOnNode, recordRecoveryDecisionOnNode, supersedePreparedResourcesOnNode, withGoalDagNodeLifecyclePhase } from "./lifecycle.js";
 import type { HarnessSubagentAdapter, StartGoalSubagentOptions } from "./subagent-adapter.js";
-import type { GoalAdapterObservationRecord, GoalControllerActionAttemptRecord, GoalControllerTypedEventCategory, GoalDagNode, GoalNodePreparedResources, GoalOrchestrationState, GoalRecoveryDecisionRecord, GoalSubagentRecord } from "./types.js";
+import type { GoalAdapterObservationRecord, GoalControllerActionAttemptRecord, GoalControllerTypedEventCategory, GoalDagNode, GoalLedgerEvent, GoalNodePreparedResources, GoalOrchestrationState, GoalRecord, GoalRecoveryDecisionRecord, GoalSubagentRecord } from "./types.js";
+import {
+  applyAuditActions,
+  buildControllerAuditSnapshot,
+  formatAuditSummary,
+  isAuditDue,
+  recordAuditActionEvents,
+  validateControllerAuditDecision,
+  type AuditActionPolicyResult,
+  type GoalControllerAuditDecision,
+  type GoalControllerAuditOptions,
+  type GoalControllerAuditSnapshot,
+} from "./controller-audit.js";
 
 export interface GoalControllerRuntimePort {
   getGoalOrchestrationState(goalId: string): Promise<GoalOrchestrationState>;
@@ -21,6 +33,13 @@ export interface GoalControllerRuntimePort {
   ): Promise<GoalSubagentRecord>;
   syncGoalSubagent(adapter: HarnessSubagentAdapter, subagent: GoalSubagentRecord): Promise<GoalSubagentRecord>;
   recordControllerEvent?(goalId: string, details: Record<string, unknown>, options?: { at?: Date | string }): Promise<void>;
+  // --- Audit support (optional) ---
+  /** Resolve goal record for the given goalId. Required for controller audit snapshots. */
+  getGoalRecord?(goalId: string): Promise<GoalRecord>;
+  /** List ledger events for the given goalId. Required for controller audit snapshots. */
+  listGoalLedgerEvents?(goalId: string): Promise<GoalLedgerEvent[]>;
+  /** Pause the goal with the given reason. Called when audit auto-pauses a goal. */
+  auditPauseGoal?(goalId: string, reason: string): Promise<void>;
 }
 
 export interface GoalControllerWorkspaceAllocation {
@@ -123,6 +142,13 @@ export interface GoalControllerTickOptions {
   systemPrompt?: string;
   metadata?: Record<string, unknown>;
   now?: Date | string | (() => Date | string);
+  /** Periodic controller audit configuration. When enabled, each tick checks
+   * whether an audit is due and runs one if the interval has elapsed. */
+  audit?: GoalControllerAuditOptions;
+  /** Invokes the configured audit model with a structured snapshot. The model
+   * should return a JSON-parseable {@link GoalControllerAuditDecision}.
+   * Called by the controller tick when an audit is due. */
+  auditModel?: (snapshot: GoalControllerAuditSnapshot) => Promise<unknown>;
 }
 
 export interface GoalControllerTickResult {
@@ -137,6 +163,12 @@ export interface GoalControllerTickResult {
   ready: GoalDagNode[];
   queueBlocked: Array<{ node: GoalDagNode; reasons: string[] }>;
   changed: boolean;
+  /** Whether a controller audit ran during this tick. */
+  auditRun?: boolean;
+  /** Compact audit summary when an audit ran. */
+  auditSummary?: string;
+  /** Whether the audit auto-paused the goal. */
+  auditPausedGoal?: boolean;
 }
 
 export interface GoalControllerLoopOptions extends GoalControllerTickOptions {
@@ -884,6 +916,7 @@ export async function runGoalControllerTick(
     ready: result.ready.length,
     queueBlocked: result.queueBlocked.length,
   }, tickStartedAt);
+  await runControllerAuditGate(runtime, goalId, options, result, tickStartedAt);
   return result;
 }
 
@@ -906,6 +939,260 @@ export async function runGoalControllerLoop(
   }
 
   return { goalId, ticks };
+}
+
+// ---------------------------------------------------------------------------
+// Controller audit gate
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs the periodic controller audit gate at the end of a tick.
+ *
+ * When {@link GoalControllerTickOptions.audit} is enabled and the configured
+ * interval has elapsed, this function:
+ *
+ * 1. Builds a structured {@link GoalControllerAuditSnapshot}
+ * 2. Passes the snapshot to the configured audit model
+ * 3. Validates the returned decision against the schema
+ * 4. Applies safe actions (currently only `pause-goal` on critical risk)
+ * 5. Records lifecycle events in the controller ledger
+ * 6. Sets audit-related fields on the tick result
+ *
+ * The function is resilient: missing optional port methods, audit model
+ * failures, or invalid model output are all handled gracefully with
+ * ledger event recording and no crash.
+ */
+async function runControllerAuditGate(
+  runtime: GoalControllerRuntimePort,
+  goalId: string,
+  options: GoalControllerTickOptions,
+  result: GoalControllerTickResult,
+  tickStartedAt: string,
+): Promise<void> {
+  // Quick guard: audit not configured or disabled.
+  if (!options.audit?.enabled) return;
+  if (!options.auditModel) return;
+
+  // Require optional port methods for audit data access.
+  if (!runtime.getGoalRecord || !runtime.listGoalLedgerEvents) return;
+
+  const auditOptions = options.audit;
+  let goal: GoalRecord;
+  let events: GoalLedgerEvent[];
+
+  try {
+    goal = await runtime.getGoalRecord(goalId);
+    events = await runtime.listGoalLedgerEvents(goalId);
+  } catch {
+    // Data fetch failed — skip audit this tick.
+    await recordControllerEvent(runtime, goalId, "controller_audit_started", {
+      error: "Failed to fetch goal record or ledger events for audit snapshot.",
+    }, tickStartedAt);
+    return;
+  }
+
+  // Only audit active goals.
+  if (goal.status !== "active") return;
+
+  // Determine last audit timestamp from ledger events.
+  const lastAuditAt = lastAuditAtFromEvents(events);
+  if (!isAuditDue(auditOptions, lastAuditAt, new Date(tickStartedAt))) return;
+
+  // --- Audit is due: build snapshot and invoke model ---
+
+  await recordControllerEvent(runtime, goalId, "controller_audit_started", {
+    lastAuditAt: lastAuditAt ?? null,
+    nodes: result.ready.length + result.started.length + result.synced.length,
+  }, tickStartedAt);
+
+  // Re-fetch orchestration state for a fresh snapshot.
+  let state: GoalOrchestrationState;
+  try {
+    state = await runtime.getGoalOrchestrationState(goalId);
+  } catch {
+    await recordControllerEvent(runtime, goalId, "controller_audit_finished", {
+      error: "Failed to fetch orchestration state for audit snapshot.",
+    }, tickStartedAt);
+    return;
+  }
+
+  const snapshot = buildControllerAuditSnapshot({
+    state,
+    goal,
+    recentEvents: events,
+    options: auditOptions,
+    now: new Date(tickStartedAt),
+  });
+
+  // --- Invoke audit model ---
+  let rawOutput: unknown;
+  try {
+    rawOutput = await options.auditModel(snapshot);
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    await recordControllerEvent(runtime, goalId, "controller_audit_invalid_output", {
+      error: `Audit model invocation failed: ${errorMessage}`,
+    }, tickStartedAt);
+    await recordControllerEvent(runtime, goalId, "controller_audit_finished", {
+      outcome: "model_error",
+      error: errorMessage,
+    }, tickStartedAt);
+    return;
+  }
+
+  // --- Parse model output as JSON decision ---
+  let candidate: unknown;
+  try {
+    candidate = extractJsonFromModelOutput(rawOutput);
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    await recordControllerEvent(runtime, goalId, "controller_audit_invalid_output", {
+      error: `Failed to parse audit model output as JSON: ${errorMessage}`,
+      rawOutput: typeof rawOutput === "string" ? rawOutput.slice(0, 500) : String(rawOutput).slice(0, 500),
+    }, tickStartedAt);
+    await recordControllerEvent(runtime, goalId, "controller_audit_finished", {
+      outcome: "parse_error",
+      error: errorMessage,
+    }, tickStartedAt);
+    return;
+  }
+
+  // --- Validate decision against schema ---
+  const validation = validateControllerAuditDecision(candidate);
+  if (!validation.valid) {
+    await recordControllerEvent(runtime, goalId, "controller_audit_invalid_output", {
+      errors: validation.errors,
+      candidate: safeTruncate(JSON.stringify(candidate), 500),
+    }, tickStartedAt);
+    await recordControllerEvent(runtime, goalId, "controller_audit_finished", {
+      outcome: "invalid_decision",
+      errors: validation.errors,
+    }, tickStartedAt);
+    return;
+  }
+
+  const decision: GoalControllerAuditDecision = validation.decision;
+
+  // --- Apply safe actions ---
+  const policyResult: AuditActionPolicyResult = applyAuditActions(decision, auditOptions);
+
+  // --- Record action events ---
+  const auditEventRecorder = async (
+    eventType: string,
+    details: Record<string, unknown>,
+    at?: Date | string,
+  ): Promise<void> => {
+    await recordControllerEvent(runtime, goalId, eventType, details, at ?? tickStartedAt);
+  };
+  await recordAuditActionEvents(policyResult, decision, auditEventRecorder, tickStartedAt);
+
+  // --- Apply auto-pause if indicated ---
+  if (policyResult.shouldPauseGoal) {
+    if (runtime.auditPauseGoal) {
+      try {
+        await runtime.auditPauseGoal(goalId, policyResult.pauseReason ?? "Controller audit auto-pause");
+        result.auditPausedGoal = true;
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        await recordControllerEvent(runtime, goalId, "controller_audit_finished", {
+          outcome: "paused",
+          pauseError: errorMessage,
+          summary: decision.summary,
+          risk: decision.risk,
+        }, tickStartedAt);
+        // Still mark audit as run even if pause failed.
+        result.auditRun = true;
+        result.auditSummary = formatAuditSummary(decision, policyResult.applied);
+        return;
+      }
+    }
+    // auditPauseGoal not available: still record that we would have paused.
+    result.auditPausedGoal = policyResult.shouldPauseGoal;
+  }
+
+  // --- Record audit finished ---
+  await recordControllerEvent(runtime, goalId, "controller_audit_finished", {
+    outcome: policyResult.shouldPauseGoal ? "paused" : "completed",
+    risk: decision.risk,
+    summary: decision.summary,
+    findingKinds: decision.findings.map((finding) => finding.kind),
+    actionsApplied: policyResult.applied.map((entry) => entry.action.action),
+    actionsSkipped: policyResult.skipped.map((entry) => entry.action.action),
+  }, tickStartedAt);
+
+  result.auditRun = true;
+  result.auditSummary = formatAuditSummary(decision, policyResult.applied);
+}
+
+/**
+ * Derives the last audit timestamp from ledger events by scanning for
+ * the most recent `controller_audit_finished` event.
+ *
+ * Controller events are stored with `type: "controller_event"` and the
+ * specific event name in `details.event`, so we check both the primary
+ * type and the nested event field.
+ */
+function lastAuditAtFromEvents(events: GoalLedgerEvent[]): string | undefined {
+  let latest: string | undefined;
+  for (const event of events) {
+    const isAuditFinished =
+      event.type === "controller_audit_finished" ||
+      (event.type === "controller_event" && event.details?.event === "controller_audit_finished");
+    if (isAuditFinished) {
+      if (!latest || event.at > latest) {
+        latest = event.at;
+      }
+    }
+  }
+  return latest;
+}
+
+/**
+ * Attempts to extract a JSON object from model output that may be
+ * wrapped in markdown code fences or prefixed with explanatory text.
+ */
+function extractJsonFromModelOutput(raw: unknown): unknown {
+  if (raw === null || raw === undefined) {
+    throw new Error("Audit model returned null or undefined");
+  }
+  if (typeof raw === "object") {
+    // Already an object — assume it is the decision directly.
+    return raw;
+  }
+  if (typeof raw !== "string") {
+    throw new Error(`Audit model returned non-string, non-object: ${typeof raw}`);
+  }
+
+  let text = raw.trim();
+
+  // Try to extract JSON from markdown code fences.
+  const fenceMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
+  if (fenceMatch) {
+    text = fenceMatch[1].trim();
+  }
+
+  // If the text starts with a non-`{`/`[` character, try to find the
+  // first JSON object/array boundary and take from there.
+  if (text.length > 0 && text[0] !== "{" && text[0] !== "[") {
+    const objStart = text.indexOf("{");
+    const arrStart = text.indexOf("[");
+    let start = -1;
+    if (objStart >= 0 && (arrStart < 0 || objStart < arrStart)) {
+      start = objStart;
+    } else if (arrStart >= 0) {
+      start = arrStart;
+    }
+    if (start >= 0) {
+      text = text.slice(start);
+    }
+  }
+
+  return JSON.parse(text);
+}
+
+function safeTruncate(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return value.slice(0, maxLength) + "…";
 }
 
 async function syncSubagents(
