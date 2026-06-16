@@ -5,17 +5,32 @@
   "description": "Stage 3 goal-runner runtime DAG JSON. This is the only multi-node runtime input for /goal --dag; producer trace sidecars, OpenSpec packages, PRDs, and markdown plans are not valid runtime inputs.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "objective", "nodes"],
+  "required": [
+    "version",
+    "objective",
+    "nodes"
+  ],
   "properties": {
-    "version": { "const": 1 },
-    "objective": { "type": "string", "minLength": 1 },
-    "defaults": { "$ref": "#/$defs/defaults" },
-    "modelRouting": { "$ref": "#/$defs/modelRouting" },
+    "version": {
+      "const": 1
+    },
+    "objective": {
+      "type": "string",
+      "minLength": 1
+    },
+    "defaults": {
+      "$ref": "#/$defs/defaults"
+    },
+    "modelRouting": {
+      "$ref": "#/$defs/modelRouting"
+    },
     "nodes": {
       "type": "array",
       "minItems": 1,
       "maxItems": 20,
-      "items": { "$ref": "#/$defs/node" }
+      "items": {
+        "$ref": "#/$defs/node"
+      }
     }
   },
   "$defs": {
@@ -25,7 +40,10 @@
     },
     "stringList": {
       "type": "array",
-      "items": { "type": "string", "minLength": 1 }
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
     },
     "workspace": {
       "type": "object",
@@ -35,22 +53,46 @@
           "type": "string",
           "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
         },
-        "branch": { "type": "string", "minLength": 1 },
-        "baseRef": { "type": "string", "minLength": 1 }
+        "branch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "baseRef": {
+          "type": "string",
+          "minLength": 1
+        }
       },
       "anyOf": [
-        { "required": ["worktreeSlug"] },
-        { "required": ["branch"] },
-        { "required": ["baseRef"] }
+        {
+          "required": [
+            "worktreeSlug"
+          ]
+        },
+        {
+          "required": [
+            "branch"
+          ]
+        },
+        {
+          "required": [
+            "baseRef"
+          ]
+        }
       ]
     },
     "conflicts": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "files": { "$ref": "#/$defs/stringList" },
-        "modules": { "$ref": "#/$defs/stringList" },
-        "capabilities": { "$ref": "#/$defs/stringList" }
+        "files": {
+          "$ref": "#/$defs/stringList"
+        },
+        "modules": {
+          "$ref": "#/$defs/stringList"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/stringList"
+        }
       }
     },
     "sha256": {
@@ -60,13 +102,28 @@
     "artifactLock": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "sha256"],
+      "required": [
+        "path",
+        "sha256"
+      ],
       "properties": {
-        "path": { "type": "string", "minLength": 1 },
-        "sha256": { "$ref": "#/$defs/sha256" },
-        "sourceNodeId": { "$ref": "#/$defs/kebabId" },
-        "approvedByNodeId": { "$ref": "#/$defs/kebabId" },
-        "approvedAt": { "type": "string", "minLength": 1 }
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sourceNodeId": {
+          "$ref": "#/$defs/kebabId"
+        },
+        "approvedByNodeId": {
+          "$ref": "#/$defs/kebabId"
+        },
+        "approvedAt": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "validation": {
@@ -74,12 +131,21 @@
       "description": "Generic controller validation contract. High-risk implementation nodes without validators, outputs, profile, approved test-spec references, artifact locks, or required evidence fail closed during controller validation.",
       "additionalProperties": false,
       "properties": {
-        "profile": { "type": "string", "minLength": 1 },
-        "testSpecNodeId": { "$ref": "#/$defs/kebabId" },
-        "approvedByNodeId": { "$ref": "#/$defs/kebabId" },
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "testSpecNodeId": {
+          "$ref": "#/$defs/kebabId"
+        },
+        "approvedByNodeId": {
+          "$ref": "#/$defs/kebabId"
+        },
         "artifactLocks": {
           "type": "array",
-          "items": { "$ref": "#/$defs/artifactLock" }
+          "items": {
+            "$ref": "#/$defs/artifactLock"
+          }
         },
         "requiredEvidence": {
           "type": "array",
@@ -96,11 +162,23 @@
             ]
           }
         },
-        "onAuditTestGap": { "type": "string", "minLength": 1 },
-        "diffBaseRef": { "type": "string", "minLength": 1 },
-        "auditReportPaths": { "$ref": "#/$defs/stringList" },
-        "allowedPaths": { "$ref": "#/$defs/stringList" },
-        "forbiddenPaths": { "$ref": "#/$defs/stringList" }
+        "onAuditTestGap": {
+          "type": "string",
+          "minLength": 1
+        },
+        "diffBaseRef": {
+          "type": "string",
+          "minLength": 1
+        },
+        "auditReportPaths": {
+          "$ref": "#/$defs/stringList"
+        },
+        "allowedPaths": {
+          "$ref": "#/$defs/stringList"
+        },
+        "forbiddenPaths": {
+          "$ref": "#/$defs/stringList"
+        }
       }
     },
     "scenarioId": {
@@ -110,52 +188,95 @@
     "modelRouting": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["scenarios"],
+      "required": [
+        "scenarios"
+      ],
       "properties": {
         "scenarios": {
           "type": "object",
           "minProperties": 1,
-          "propertyNames": { "$ref": "#/$defs/scenarioId" },
+          "propertyNames": {
+            "$ref": "#/$defs/scenarioId"
+          },
           "additionalProperties": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["model"],
+            "required": [
+              "model"
+            ],
             "properties": {
-              "model": { "type": "string", "minLength": 1, "description": "Canonical adapter-neutral model id in provider/model form; harness adapters translate it as needed." },
-              "description": { "type": "string", "minLength": 1 }
+              "model": {
+                "$ref": "#/$defs/model"
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1
+              }
             }
           }
         },
-        "controllerScenario": { "$ref": "#/$defs/scenarioId" },
-        "defaultSubagentScenario": { "$ref": "#/$defs/scenarioId" },
+        "controllerScenario": {
+          "$ref": "#/$defs/scenarioId"
+        },
+        "defaultSubagentScenario": {
+          "$ref": "#/$defs/scenarioId"
+        },
         "rules": {
           "type": "array",
-          "items": { "$ref": "#/$defs/modelRoutingRule" }
+          "items": {
+            "$ref": "#/$defs/modelRoutingRule"
+          }
         }
       }
     },
     "modelRoutingRule": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["scenario"],
+      "required": [
+        "scenario"
+      ],
       "properties": {
-        "scenario": { "$ref": "#/$defs/scenarioId" },
+        "scenario": {
+          "$ref": "#/$defs/scenarioId"
+        },
         "when": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "nodeIds": { "$ref": "#/$defs/stringList" },
-            "scopes": { "$ref": "#/$defs/stringList" },
+            "nodeIds": {
+              "$ref": "#/$defs/stringList"
+            },
+            "scopes": {
+              "$ref": "#/$defs/stringList"
+            },
             "risks": {
               "type": "array",
-              "items": { "enum": ["low", "medium", "high"] }
+              "items": {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
             },
-            "modules": { "$ref": "#/$defs/stringList" },
-            "capabilities": { "$ref": "#/$defs/stringList" },
-            "files": { "$ref": "#/$defs/stringList" },
-            "objectiveIncludes": { "$ref": "#/$defs/stringList" },
-            "hasValidators": { "type": "boolean" },
-            "hasOutputs": { "type": "boolean" }
+            "modules": {
+              "$ref": "#/$defs/stringList"
+            },
+            "capabilities": {
+              "$ref": "#/$defs/stringList"
+            },
+            "files": {
+              "$ref": "#/$defs/stringList"
+            },
+            "objectiveIncludes": {
+              "$ref": "#/$defs/stringList"
+            },
+            "hasValidators": {
+              "type": "boolean"
+            },
+            "hasOutputs": {
+              "type": "boolean"
+            }
           }
         }
       }
@@ -164,39 +285,105 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "outputs": { "$ref": "#/$defs/stringList" },
-        "validators": { "$ref": "#/$defs/stringList" },
-        "workspaceStrategy": { "type": "string", "minLength": 1 },
-        "completionGates": { "$ref": "#/$defs/stringList" },
-        "conflicts": { "$ref": "#/$defs/conflicts" },
-        "modelScenario": { "$ref": "#/$defs/scenarioId" },
-        "thinkingLevel": { "type": "string", "minLength": 1, "description": "Default Pi thinking level for nodes that do not override thinkingLevel." }
+        "outputs": {
+          "$ref": "#/$defs/stringList"
+        },
+        "validators": {
+          "$ref": "#/$defs/stringList"
+        },
+        "workspaceStrategy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "completionGates": {
+          "$ref": "#/$defs/stringList"
+        },
+        "conflicts": {
+          "$ref": "#/$defs/conflicts"
+        },
+        "modelScenario": {
+          "$ref": "#/$defs/scenarioId"
+        },
+        "thinkingLevel": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Default Pi thinking level for nodes that do not override thinkingLevel."
+        }
       }
     },
     "node": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "objective"],
+      "required": [
+        "id",
+        "objective"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/kebabId" },
-        "objective": { "type": "string", "minLength": 1 },
+        "id": {
+          "$ref": "#/$defs/kebabId"
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1
+        },
         "after": {
           "type": "array",
-          "items": { "$ref": "#/$defs/kebabId" }
+          "items": {
+            "$ref": "#/$defs/kebabId"
+          }
         },
-        "outputs": { "$ref": "#/$defs/stringList" },
-        "validators": { "$ref": "#/$defs/stringList" },
-        "conflicts": { "$ref": "#/$defs/conflicts" },
-        "scope": { "type": "string", "minLength": 1 },
-        "kind": { "type": "string", "minLength": 1, "description": "Optional workflow role label such as test-spec, test-review, implementation, or audit. Runtime treats unknown values as labels, while validation policy may enforce known high-risk combinations." },
-        "validation": { "$ref": "#/$defs/validation", "description": "Controller validation contract enforced by goal-runner; producer trace metadata is not consulted at runtime." },
-        "workspaceStrategy": { "type": "string", "minLength": 1 },
-        "workspace": { "$ref": "#/$defs/workspace" },
-        "risk": { "enum": ["low", "medium", "high"] },
-        "completionGates": { "$ref": "#/$defs/stringList" },
-        "modelScenario": { "$ref": "#/$defs/scenarioId" },
-        "thinkingLevel": { "type": "string", "minLength": 1, "description": "Pi thinking level for this node; overrides defaults.thinkingLevel." }
+        "outputs": {
+          "$ref": "#/$defs/stringList"
+        },
+        "validators": {
+          "$ref": "#/$defs/stringList"
+        },
+        "conflicts": {
+          "$ref": "#/$defs/conflicts"
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional workflow role label such as test-spec, test-review, implementation, or audit. Runtime treats unknown values as labels, while validation policy may enforce known high-risk combinations."
+        },
+        "validation": {
+          "$ref": "#/$defs/validation",
+          "description": "Controller validation contract enforced by goal-runner; producer trace metadata is not consulted at runtime."
+        },
+        "workspaceStrategy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workspace": {
+          "$ref": "#/$defs/workspace"
+        },
+        "risk": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "completionGates": {
+          "$ref": "#/$defs/stringList"
+        },
+        "modelScenario": {
+          "$ref": "#/$defs/scenarioId"
+        },
+        "thinkingLevel": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Pi thinking level for this node; overrides defaults.thinkingLevel."
+        }
       }
+    },
+    "model": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[-_.][a-z][a-z0-9]*)*\\/[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$"
     }
   }
 }
