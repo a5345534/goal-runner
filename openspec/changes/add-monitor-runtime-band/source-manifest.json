@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1.0",
+  "changeName": "add-monitor-runtime-band",
+  "generatedAt": "2026-06-16T07:22:17.656320+00:00",
+  "sources": [
+    {
+      "path": "proposal.md",
+      "kind": "proposal",
+      "sha256": "42f378c0d73650a2cd8cd80b2ac569b06ee72ee64735588c2dd083c79b7bf655"
+    },
+    {
+      "path": "design.md",
+      "kind": "design",
+      "sha256": "ffcc3cdb78cdf5d5b116f6ddc2352f386ebd13a8a9cbf1c968687346c59c6d48"
+    },
+    {
+      "path": "tasks.md",
+      "kind": "tasks",
+      "sha256": "90db81cef6b7b3bc44e816182536c1a67e8254234fbb99ac7d2d8b137a422982"
+    },
+    {
+      "path": "specs/goal-monitor-runtime-band/spec.md",
+      "kind": "spec-delta",
+      "sha256": "ba12c9f046899bdf743c9fd0e83faa35ec47b6798bcd5efce0ad54e770c4b69c"
+    }
+  ]
+}

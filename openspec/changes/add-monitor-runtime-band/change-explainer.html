@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="openspec-explainer-mode" content="decision-review">
+  <title>add-monitor-runtime-band 決策審查</title>
+  <style>
+    :root{color-scheme:light;--bg:#f7f8fb;--card:#fff;--ink:#172033;--muted:#5b667a;--line:#d8deea;--accent:#3157d5;--danger:#b42318;--ok:#027a48;--warn:#b54708}
+    *{box-sizing:border-box}body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--ink);line-height:1.6}
+    header{padding:32px clamp(16px,4vw,56px);background:linear-gradient(135deg,#172033,#3157d5);color:white}
+    header p{max-width:980px;color:#e6ebff}
+    nav{position:sticky;top:0;z-index:10;display:flex;gap:8px;overflow:auto;padding:10px clamp(12px,3vw,40px);background:#ffffffee;border-bottom:1px solid var(--line);backdrop-filter:blur(10px)}
+    nav a{white-space:nowrap;color:var(--accent);text-decoration:none;font-weight:700;padding:8px 10px;border-radius:999px}
+    nav a:hover{background:#eef2ff}
+    main{width:min(1180px,100%);margin:0 auto;padding:24px clamp(14px,3vw,32px) 56px}
+    section{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px;margin:18px 0;box-shadow:0 8px 28px rgba(23,32,51,.06)}
+    h1{margin:0 0 8px;font-size:clamp(1.8rem,4vw,3.2rem)}h2{margin-top:0;color:#101828}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .card{border:1px solid var(--line);border-radius:14px;padding:16px;background:#fbfcff}
+    .tag{display:inline-block;border-radius:999px;padding:3px 9px;font-size:.84rem;font-weight:700;background:#eef2ff;color:#3157d5;margin:2px}
+    .risk-high{border-left:5px solid var(--danger)}.risk-medium{border-left:5px solid var(--warn)}.risk-low{border-left:5px solid var(--ok)}
+    table{width:100%;border-collapse:collapse}th,td{text-align:left;vertical-align:top;border-bottom:1px solid var(--line);padding:10px}th{background:#f2f4f7}
+    button.copy-button{border:0;border-radius:10px;padding:8px 10px;background:var(--accent);color:white;font-weight:700;cursor:pointer}
+    .svg-wrap{overflow:auto}svg{max-width:100%;height:auto}
+    @media(max-width:1023px){nav{flex-wrap:wrap;overflow:visible}nav a{white-space:normal}}
+    @media(max-width:760px){.grid,.three{grid-template-columns:1fr}section{padding:16px}nav{position:static;font-size:.92rem}table,thead,tbody,tr,th,td{display:block;width:100%}thead{border:0}th{margin-top:6px}td{border-bottom:0}tr{border-bottom:1px solid var(--line);padding:6px 0}}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>add-monitor-runtime-band</h1>
+    <p>決策審查版：為 /goal monitor 第一屏新增 runtime-state 摘要，清楚分離 Session / Hidden Continuation / Controller Poll / Runners 三層執行狀態，避免健康 active goal 被誤判為 stuck。</p>
+    <p><span class="tag">monitor UX</span><span class="tag">presentation only</span><span class="tag">no runtime changes</span></p>
+  </header>
+
+  <nav role="navigation">
+    <a href="#why">Why</a><a href="#what-changes">What Changes</a><a href="#before-after">Before/After</a><a href="#flow">Flow</a><a href="#affected-surfaces">Surfaces</a><a href="#scope-boundaries">Scope</a><a href="#rollout">Rollout</a><a href="#current-status">Status</a><a href="#decision-points">Decisions</a><a href="#implementation-slices">Slices</a><a href="#verification-plan">Verification</a><a href="#risk-register">Risks</a><a href="#agent-prompts">Agent Prompts</a>
+  </nav>
+
+  <main>
+    <section id="why">
+      <h2>Why</h2>
+      <p>目前 /goal monitor 第一屏顯示 raw DAG data，不清除分離 runtime 三層狀態：controller session 活動、hidden continuation 生命週期、controller polling 循環。Active session + 故意 suppressed hidden continuation + running poll 的正常狀態容易被誤判為 stuck。</p>
+    </section>
+
+    <section id="what-changes">
+      <h2>What Changes</h2>
+      <div class="grid three">
+        <div class="card"><h3>Runtime summary</h3><p>新增 GoalMonitorRuntimeSummary 衍生素型，從既有 adapter state 計算，不引入新持久層。</p></div>
+        <div class="card"><h3>Pi TUI runtime band</h3><p>Controller live pane 上方新增 Session / Hidden / Poll / Runners 摘要行。</p></div>
+        <div class="card"><h3>OpenCode sections</h3><p>輸出改為 STATUS / RUNTIME / PROGRESS / NEXT ACTION 群組區段。</p></div>
+      </div>
+    </section>
+
+    <section id="before-after">
+      <h2>Before / After</h2>
+      <div class="grid">
+        <div class="card risk-high"><h3>變更前</h3><p>Monitor 直接顯示 controller events / node list / subagent records。使用者無法從第一屏判斷 goal 是否正常執行中。</p></div>
+        <div class="card risk-low"><h3>變更後</h3><p>Runtime band 顯示 Session=idle, Hidden=SUPPRESSED(active turn running), Poll=ACTIVE, Runners=2 running。Active session + suppressed continuation 明確不是 failure。</p></div>
+      </div>
+    </section>
+
+    <section id="flow">
+      <h2>Architecture / Flow</h2>
+      <div class="svg-wrap">
+        <svg viewBox="0 0 860 180" role="img">
+          <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#3157d5"/></marker></defs>
+          <rect x="10" y="30" width="160" height="55" rx="14" fill="#eef2ff" stroke="#3157d5"/><text x="90" y="55" text-anchor="middle" font-size="14">Harness state</text><text x="90" y="72" text-anchor="middle" font-size="12">+ reservations</text>
+          <line x1="170" y1="57" x2="240" y2="57" stroke="#3157d5" stroke-width="3" marker-end="url(#arrow)"/>
+          <rect x="240" y="30" width="180" height="55" rx="14" fill="#ecfdf3" stroke="#027a48"/><text x="330" y="55" text-anchor="middle" font-size="14">buildSummary()</text><text x="330" y="72" text-anchor="middle" font-size="12">derived snapshot</text>
+          <line x1="420" y1="57" x2="490" y2="57" stroke="#3157d5" stroke-width="3" marker-end="url(#arrow)"/>
+          <rect x="490" y="30" width="160" height="55" rx="14" fill="#fff7ed" stroke="#b54708"/><text x="570" y="55" text-anchor="middle" font-size="14">Pi TUI band</text><text x="570" y="72" text-anchor="middle" font-size="12">2-3 compact lines</text>
+          <line x1="650" y1="57" x2="720" y2="57" stroke="#3157d5" stroke-width="3" marker-end="url(#arrow)"/>
+          <rect x="720" y="30" width="120" height="55" rx="14" fill="#f8fafc" stroke="#98a2b3"/><text x="780" y="55" text-anchor="middle" font-size="14">OpenCode</text><text x="780" y="72" text-anchor="middle" font-size="12">sections</text>
+          <rect x="240" y="110" width="430" height="45" rx="14" fill="#f0f9ff" stroke="#0284c7"/><text x="455" y="130" text-anchor="middle" font-size="14">Shared rendering constants → consistent terminology</text><text x="455" y="148" text-anchor="middle" font-size="12">No new persistence. No runtime semantics change.</text>
+        </svg>
+      </div>
+    </section>
+
+        <section id="affected-surfaces">
+      <h2>Affected Surfaces</h2>
+      <ul>
+        <li><strong>Pi monitor:</strong> <code>src/adapters/pi/monitor-ui.ts</code></li>
+        <li><strong>OpenCode monitor:</strong> <code>src/adapters/opencode/monitor-ui.ts</code></li>
+        <li><strong>Runtime data:</strong> derived from existing state; no new persistence</li>
+      </ul>
+    </section>
+
+<section id="scope-boundaries">
+      <h2>Scope Boundaries</h2>
+      <p>只改 monitor UI presentation layer。不改 controller scheduling、hidden continuation launch、subagent lifecycle。不影響 goal-contract / goal-dag / goal-spec。</p>
+    </section>
+
+    <section id="rollout"><h2>Rollout</h2><p>不需要 migration。Display-only change。既有的 row actions（pause/resume/clear/openSession/stop/kill/archive）保持不變。</p></section>
+
+        <section id="current-status">
+      <h2>Current Status</h2>
+      <p>OpenSpec change 已建立為 draft。待實作 Pi/OpenCode monitor 的 runtime band 展示。</p>
+    </section>
+
+<section id="decision-points">
+      <h2>Decision Points</h2>
+      <table>
+        <thead><tr><th>決策</th><th>選擇</th><th>取捨</th><th>信心</th></tr></thead>
+        <tbody>
+          <tr><td>View model</td><td>Derived, no new state</td><td>不算慢；不引入新 persistence。</td><td>High</td></tr>
+          <tr><td>Health scoring</td><td>Conservative, defer engine</td><td>先做 basic health line；full engine 另案。</td><td>High</td></tr>
+          <tr><td>Terminology</td><td>Shared constants</td><td>Pi/OpenCode 用同樣標籤。</td><td>High</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="implementation-slices">
+      <h2>Implementation Slices</h2>
+      <ol>
+        <li>Runtime summary type + builder</li>
+        <li>Shared rendering constants</li>
+        <li>Pi TUI runtime band</li>
+        <li>OpenCode structured sections</li>
+        <li>Health line + next-action derivation</li>
+        <li>Tests + docs</li>
+      </ol>
+    </section>
+
+    <section id="verification-plan">
+      <h2>Verification Plan</h2>
+      <ul>
+        <li>Pi: active session + suppressed = not failure</li>
+        <li>Pi: blocked node → Needs attention + next action</li>
+        <li>Pi: narrow width rendering</li>
+        <li>OpenCode: sections present and correct</li>
+        <li><code>npm run check</code></li>
+      </ul>
+    </section>
+
+    <section id="risk-register">
+      <h2>Risk Register</h2>
+      <p><strong>High-risk filter：</strong><span data-filter="high-risk">誤導使用者的健康判斷標為高風險。</span></p>
+      <div class="grid">
+        <div class="card risk-medium"><h3>衍生狀態誤判</h3><p>緩解：從既有 trusted state 建立；default 設為 unknown。</p></div>
+        <div class="card risk-low"><h3>窄終端截斷</h3><p>緩解：2-3 compact lines；80 欄測試。</p></div>
+      </div>
+    </section>
+
+    <section id="copy-controls">
+      <h2>Copy Controls</h2>
+      <button class="copy-button" data-copy="#decision-summary">複製決策摘要</button>
+      <button class="copy-button" data-copy="#task-json">複製任務 JSON</button>
+      <pre id="decision-summary">Decision: add a derived GoalMonitorRuntimeSummary view model and surface it as a compact runtime band in Pi TUI and structured sections in OpenCode monitor. Do not change controller/scheduler/continuation semantics. Keep health scoring conservative.</pre>
+      <script id="task-json" type="application/json">{"change":"add-monitor-runtime-band","tasks":["runtime-summary-type","shared-constants","pi-tui-band","opencode-sections","health-line","tests"]}</script>
+    </section>
+
+    <section id="agent-prompts">
+      <h2>Agent Prompts</h2>
+      <div class="grid three">
+        <div class="card"><h3>Implementation agent prompt</h3><p>Implement the GoalMonitorRuntimeSummary view model and render it in Pi TUI (runtime band above execution plan) and OpenCode (structured sections). Do not change controller/scheduler/continuation semantics.</p></div>
+        <div class="card"><h3>Review agent prompt</h3><p>Review that the runtime summary is derived, not persisted; active+suppressed shows as normal, not failure; both adapters use identical terminology; row actions are unchanged.</p></div>
+        <div class="card"><h3>Verification agent prompt</h3><p>Run monitor unit tests for both adapters. Confirm active-session+suppressed renders correctly, blocked node shows needs-attention, and npm run check passes.</p></div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    for(const b of document.querySelectorAll('[data-copy]'))b.addEventListener('click',async()=>{const t=document.querySelector(b.getAttribute('data-copy')),x=t?t.textContent.trim():'';navigator.clipboard&&await navigator.clipboard.writeText(x);b.textContent='已複製';setTimeout(()=>{b.textContent=b.getAttribute('data-copy').includes('task')?'複製任務 JSON':'複製決策摘要'},1200)});
+  </script>
+</body>
+</html>
