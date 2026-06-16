@@ -1348,11 +1348,13 @@ async function runGoalMonitorRunnerOperation(runtime, ctx, goal, operation, suba
 }
 async function readGoalMonitorDagSnapshot(runtime, goal) {
     const state = await runtime.getGoalOrchestrationState(goal.goalId);
-    const [ledgerEvents] = await Promise.all([
+    const [ledgerEvents, harnessState, reservation] = await Promise.all([
         runtime.listLedgerEvents(goal.sessionKey, goal.goalId),
+        runtime.readHarnessState(goal.sessionKey).catch(() => undefined),
+        runtime.getReservation(goal.sessionKey).catch(() => undefined),
     ]);
     const runners = readPiBackgroundRunnerInventory(goal.goalId, state.subagents);
-    return { ...state, runners, ledgerEvents, refreshedAt: new Date().toISOString() };
+    return { ...state, runners, ledgerEvents, harnessState, reservation, refreshedAt: new Date().toISOString() };
 }
 async function runTargetGoalLifecycleCommand(runtime, ctx, action, reference, controllerDefaults = {}) {
     const goal = await resolveGoalReferenceOrThrow(runtime, reference);

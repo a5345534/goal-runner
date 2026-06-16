@@ -527,6 +527,10 @@ export class GoalRuntime {
     };
   }
 
+  async getReservation(sessionKey: string): Promise<ContinuationReservation | undefined> {
+    return this.store.getReservation(sessionKey);
+  }
+
   async clearGoal(sessionKey: string): Promise<GoalToolResult> {
     const existing = await this.store.getCurrentGoal(sessionKey);
     await this.store.clearGoal(sessionKey);
@@ -892,7 +896,7 @@ export class GoalRuntime {
     return tokenDelta;
   }
 
-  private async readHarnessState(sessionKey: string): Promise<HarnessState> {
+  async readHarnessState(sessionKey: string): Promise<HarnessState> {
     if (this.activeTurns.has(sessionKey)) {
       return {
         materialized: true,

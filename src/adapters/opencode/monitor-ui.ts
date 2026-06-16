@@ -19,11 +19,13 @@ import {
   type GoalControllerAuditDecision,
 } from "../../core/index.js";
 import type {
+  ContinuationReservation,
   GoalDagNode,
   GoalLedgerEvent,
   GoalRuntime,
   GoalSubagentRecord,
   GoalSummary,
+  HarnessState,
 } from "../../core/index.js";
 import {
   buildGoalMonitorRuntimeSummary,
@@ -47,6 +49,10 @@ export interface OpencodeMonitorRendererOptions {
   now?: () => Date;
   /** Ledger events for audit summary extraction. */
   ledgerEvents?: GoalLedgerEvent[];
+  /** Optional harness state for precise session/hidden-continuation display. */
+  harnessState?: HarnessState;
+  /** Optional continuation reservation for hidden-continuation state. */
+  reservation?: ContinuationReservation;
 }
 
 const DEFAULT_MAX_LINE_WIDTH = 96;
@@ -89,14 +95,18 @@ export function renderOpencodeMonitorLines(
   const runtimeSummary = buildGoalMonitorRuntimeSummary(
     goal,
     state.subagents,
-    { ledgerEvents: options.ledgerEvents },
+    {
+      harnessState: options.harnessState,
+      reservation: options.reservation,
+      ledgerEvents: options.ledgerEvents,
+    },
   );
   lines.push("");
   lines.push(`── RUNTIME ──`);
-  lines.push(formatOpencodeRuntimeSummary(runtimeSummary));
+  lines.push(...formatOpencodeRuntimeSummary(runtimeSummary));
 
   // ── Health line within RUNTIME ──
-  const health = deriveMonitorHealth(runtimeSummary, goal, state.subagents);
+  const health = deriveMonitorHealth(runtimeSummary, goal, state.subagents, state.nodes);
   const opencodeNextAction = adaptNextActionForOpenCode(health.nextAction);
   lines.push(`Health: ${health.health}`);
 
@@ -232,24 +242,24 @@ function truncate(text: string, maxWidth: number): string {
 }
 
 /** Format the runtime summary as a compact multi-line block for OpenCode text output. */
-function formatOpencodeRuntimeSummary(summary: GoalMonitorRuntimeSummary): string {
+function formatOpencodeRuntimeSummary(summary: GoalMonitorRuntimeSummary): string[] {
   const sessionLabel = SESSION_STATE_LABELS[summary.session.state];
   const hiddenLabel = HIDDEN_CONTINUATION_STATE_LABELS[summary.hiddenContinuation.state];
   const pollLabel = CONTROLLER_POLL_STATE_LABELS[summary.controllerPoll.state];
 
-  const lines = [
+  const result = [
     `Session=${sessionLabel}  Hidden=${hiddenLabel}${summary.hiddenContinuation.reason ? ` (${summary.hiddenContinuation.reason})` : ""}  Poll=${pollLabel}${summary.controllerPoll.reason ? ` (${summary.controllerPoll.reason})` : ""}`,
     `Runners: ${formatOpencodeRunnerSummary(summary.runners)}`,
   ];
 
   if (summary.controllerPoll.lastPollAt) {
-    lines.push(`Last poll: ${summary.controllerPoll.lastPollAt}`);
+    result.push(`Last poll: ${summary.controllerPoll.lastPollAt}`);
   }
   if (summary.hiddenContinuation.attemptId) {
-    lines.push(`Continuation attempt: ${summary.hiddenContinuation.attemptId}`);
+    result.push(`Continuation attempt: ${summary.hiddenContinuation.attemptId}`);
   }
 
-  return lines.join("\n");
+  return result;
 }
 
 function formatOpencodeRunnerSummary(runners: GoalMonitorRuntimeSummary["runners"]): string {

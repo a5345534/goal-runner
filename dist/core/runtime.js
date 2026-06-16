@@ -390,6 +390,9 @@ export class GoalRuntime {
             message: updated.status === "budgetLimited" ? "Goal token budget is still exhausted." : "Goal resumed.",
         };
     }
+    async getReservation(sessionKey) {
+        return this.store.getReservation(sessionKey);
+    }
     async clearGoal(sessionKey) {
         const existing = await this.store.getCurrentGoal(sessionKey);
         await this.store.clearGoal(sessionKey);

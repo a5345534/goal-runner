@@ -27,6 +27,8 @@ export interface GoalMonitorDagSnapshot {
     subagents: GoalSubagentRecord[];
     runners?: PiBackgroundRunnerRecord[];
     ledgerEvents?: GoalLedgerEvent[];
+    harnessState?: HarnessState;
+    reservation?: ContinuationReservation;
     refreshedAt?: string;
 }
 export type MonitorSessionState = "active-turn" | "idle" | "missing" | "not-materialized" | "unknown";
@@ -77,7 +79,7 @@ export declare function buildGoalMonitorRuntimeSummary(goal: GoalSummary, subage
  * Derive a monitor health status from the runtime summary and DAG state.
  * Returns { health, nextAction } where nextAction is a one-line recommendation.
  */
-export declare function deriveMonitorHealth(summary: GoalMonitorRuntimeSummary, goal: GoalSummary, _subagents: GoalSubagentRecord[]): {
+export declare function deriveMonitorHealth(summary: GoalMonitorRuntimeSummary, goal: GoalSummary, subagents: GoalSubagentRecord[], nodes?: GoalDagNode[]): {
     health: MonitorHealth;
     nextAction: string;
 };

@@ -42,12 +42,16 @@ export function renderOpencodeMonitorLines(goal, state, options = {}) {
     if (auditSummary)
         lines.push(`Audit: ${auditSummary}`);
     // ── RUNTIME section ──
-    const runtimeSummary = buildGoalMonitorRuntimeSummary(goal, state.subagents, { ledgerEvents: options.ledgerEvents });
+    const runtimeSummary = buildGoalMonitorRuntimeSummary(goal, state.subagents, {
+        harnessState: options.harnessState,
+        reservation: options.reservation,
+        ledgerEvents: options.ledgerEvents,
+    });
     lines.push("");
     lines.push(`── RUNTIME ──`);
-    lines.push(formatOpencodeRuntimeSummary(runtimeSummary));
+    lines.push(...formatOpencodeRuntimeSummary(runtimeSummary));
     // ── Health line within RUNTIME ──
-    const health = deriveMonitorHealth(runtimeSummary, goal, state.subagents);
+    const health = deriveMonitorHealth(runtimeSummary, goal, state.subagents, state.nodes);
     const opencodeNextAction = adaptNextActionForOpenCode(health.nextAction);
     lines.push(`Health: ${health.health}`);
     // ── PROGRESS section ──
@@ -185,17 +189,17 @@ function formatOpencodeRuntimeSummary(summary) {
     const sessionLabel = SESSION_STATE_LABELS[summary.session.state];
     const hiddenLabel = HIDDEN_CONTINUATION_STATE_LABELS[summary.hiddenContinuation.state];
     const pollLabel = CONTROLLER_POLL_STATE_LABELS[summary.controllerPoll.state];
-    const lines = [
+    const result = [
         `Session=${sessionLabel}  Hidden=${hiddenLabel}${summary.hiddenContinuation.reason ? ` (${summary.hiddenContinuation.reason})` : ""}  Poll=${pollLabel}${summary.controllerPoll.reason ? ` (${summary.controllerPoll.reason})` : ""}`,
         `Runners: ${formatOpencodeRunnerSummary(summary.runners)}`,
     ];
     if (summary.controllerPoll.lastPollAt) {
-        lines.push(`Last poll: ${summary.controllerPoll.lastPollAt}`);
+        result.push(`Last poll: ${summary.controllerPoll.lastPollAt}`);
     }
     if (summary.hiddenContinuation.attemptId) {
-        lines.push(`Continuation attempt: ${summary.hiddenContinuation.attemptId}`);
+        result.push(`Continuation attempt: ${summary.hiddenContinuation.attemptId}`);
     }
-    return lines.join("\n");
+    return result;
 }
 function formatOpencodeRunnerSummary(runners) {
     const parts = [];

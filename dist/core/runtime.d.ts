@@ -4,7 +4,7 @@ import { type GoalDagFileDocument, type GoalDagFilePlanOptions } from "./dag-fil
 import { type GoalDagPlanNodeInput, type GoalDagPlanOptions, type GoalDagReadyQueue, type GoalDagSchedulingPolicy } from "./dag-scheduler.js";
 import { type GoalCommand } from "./parser.js";
 import { type HarnessSubagentAdapter, type StartGoalSubagentOptions } from "./subagent-adapter.js";
-import type { BlockedAuditEvidence, GoalAdapterCallbacks, GoalDagNode, GoalLedgerEvent, GoalOrchestrationState, GoalRecord, GoalReferenceResolution, GoalRuntimeConfig, GoalSessionMetadata, GoalStatusInput, GoalStore, GoalSubagentRecord, GoalSummary, GoalToolResult, WorkspaceProfile, GoalTurnStop, HiddenGoalTurnResult, TurnContext } from "./types.js";
+import type { BlockedAuditEvidence, ContinuationReservation, GoalAdapterCallbacks, GoalDagNode, GoalLedgerEvent, GoalOrchestrationState, GoalRecord, GoalReferenceResolution, GoalRuntimeConfig, GoalSessionMetadata, GoalStatusInput, GoalStore, GoalSubagentRecord, GoalSummary, GoalToolResult, WorkspaceProfile, GoalTurnStop, HarnessState, HiddenGoalTurnResult, TurnContext } from "./types.js";
 export interface GoalDagTerminalFinalizationResult {
     goalId: string;
     terminal: boolean;
@@ -84,6 +84,7 @@ export declare class GoalRuntime {
     resumeGoal(sessionKey: string, options?: {
         continueIfIdle?: boolean;
     }): Promise<GoalToolResult>;
+    getReservation(sessionKey: string): Promise<ContinuationReservation | undefined>;
     clearGoal(sessionKey: string): Promise<GoalToolResult>;
     toolGetGoal(sessionKey: string): Promise<GoalToolResult>;
     toolCreateGoal(sessionKey: string, objective: string, tokenBudget?: number): Promise<GoalToolResult>;
@@ -103,7 +104,7 @@ export declare class GoalRuntime {
     private requireGoal;
     private setGoalStatus;
     private accountUsage;
-    private readHarnessState;
+    readHarnessState(sessionKey: string): Promise<HarnessState>;
     private runCompletionAuditIfConfigured;
     private markMeaningfulProgress;
     private markTurnStopped;

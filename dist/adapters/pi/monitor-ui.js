@@ -194,11 +194,19 @@ function deriveRunnerCounts(subagents, runners) {
  * Derive a monitor health status from the runtime summary and DAG state.
  * Returns { health, nextAction } where nextAction is a one-line recommendation.
  */
-export function deriveMonitorHealth(summary, goal, _subagents) {
-    const hasBlockedOrFailed = _subagents.some((s) => ["blocked", "failed", "needsFollowup"].includes(s.status));
-    const hasRunning = _subagents.some((s) => s.status === "running");
-    const hasComplete = _subagents.some((s) => s.status === "complete");
-    if (hasBlockedOrFailed) {
+export function deriveMonitorHealth(summary, goal, subagents, nodes) {
+    // DAG node status has priority over subagent status for health.
+    const blockedNode = nodes?.find((n) => ["blocked", "failed"].includes(n.status));
+    const hasBlockedOrFailedSubagent = subagents.some((s) => ["blocked", "failed", "needsFollowup"].includes(s.status));
+    const hasRunning = subagents.some((s) => s.status === "running");
+    const hasComplete = subagents.some((s) => s.status === "complete");
+    if (blockedNode) {
+        if (summary.session.state === "active-turn" || summary.runners.running > 0) {
+            return { health: "Needs attention", nextAction: `inspect blocked node ${blockedNode.nodeId}` };
+        }
+        return { health: "Blocked", nextAction: `inspect blocked node ${blockedNode.nodeId} or pause/clear goal` };
+    }
+    if (hasBlockedOrFailedSubagent) {
         if (summary.session.state === "active-turn" || summary.runners.running > 0) {
             return { health: "Needs attention", nextAction: "inspect blocked/failed nodes via nodeList → runnerList" };
         }
@@ -435,10 +443,12 @@ export class GoalMonitorController {
             this.liveScroll = clampScroll(this.liveScroll, view.liveLines.length, visibleLiveCount);
         // ── Runtime summary band ──
         const runtimeSummary = buildGoalMonitorRuntimeSummary(this.goal, dag.subagents, {
+            harnessState: dag.harnessState,
+            reservation: dag.reservation,
             ledgerEvents: dag.ledgerEvents,
             runners: dag.runners,
         });
-        const health = deriveMonitorHealth(runtimeSummary, this.goal, dag.subagents);
+        const health = deriveMonitorHealth(runtimeSummary, this.goal, dag.subagents, dag.nodes);
         const runtimeBandLines = formatRuntimeBandLines(runtimeSummary, health, width, theme);
         const lines = [
             truncateToWidth(theme.fg("accent", title), width),
