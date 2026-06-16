@@ -97,6 +97,7 @@ export function renderOpencodeMonitorLines(
 
   // ── Health line within RUNTIME ──
   const health = deriveMonitorHealth(runtimeSummary, goal, state.subagents);
+  const opencodeNextAction = adaptNextActionForOpenCode(health.nextAction);
   lines.push(`Health: ${health.health}`);
 
   // ── PROGRESS section ──
@@ -108,7 +109,7 @@ export function renderOpencodeMonitorLines(
     // ── NEXT ACTION section ──
     lines.push("");
     lines.push(`── NEXT ACTION ──`);
-    lines.push(truncate(health.nextAction, maxLineWidth));
+    lines.push(truncate(opencodeNextAction, maxLineWidth));
     return lines;
   }
 
@@ -178,7 +179,7 @@ export function renderOpencodeMonitorLines(
   // ── NEXT ACTION section ──
   lines.push("");
   lines.push(`── NEXT ACTION ──`);
-  lines.push(truncate(health.nextAction, maxLineWidth));
+  lines.push(truncate(opencodeNextAction, maxLineWidth));
 
   return lines;
 }
@@ -317,4 +318,16 @@ function extractLatestAuditSummary(
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Adapt Pi TUI-specific next-action language for the OpenCode text monitor.
+ * Shared `deriveMonitorHealth` returns next-action strings that reference Pi
+ * TUI navigation (nodeList, runnerList) and row actions (pause, clear).  The
+ * OpenCode text monitor rewrites these references to be adapter-agnostic.
+ */
+function adaptNextActionForOpenCode(piNextAction: string): string {
+  return piNextAction
+    .replace(/via nodeList → runnerList/, "and runners in output above")
+    .replace(/or pause\/clear goal/, "or take manual action");
 }
