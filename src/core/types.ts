@@ -1,3 +1,5 @@
+import type { GoalValidationEvidenceRequirement } from "./validation-evidence.js";
+
 export const GOAL_STATUSES = [
   "active",
   "paused",
@@ -391,14 +393,7 @@ export interface GoalDagConflictHints {
 
 export type GoalDagNodeKind = "test-spec" | "test-review" | "implementation" | "audit" | string;
 
-export type GoalValidationEvidenceRequirement =
-  | "validators-ran"
-  | "locked-artifacts-unchanged"
-  | "implementation-diff-present"
-  | "non-test-diff-present"
-  | "post-merge-validation-ran"
-  | "audit-report-present"
-  | string;
+export type { GoalValidationEvidenceRequirement } from "./validation-evidence.js";
 
 export interface GoalValidationArtifactLock {
   path: string;
