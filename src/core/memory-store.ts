@@ -1,3 +1,4 @@
+import type { GoalControllerAuditDecision } from "./controller-audit.js";
 import type {
   ContinuationReservation,
   GoalDagNode,
@@ -9,6 +10,12 @@ import type {
   GoalSummary,
   WorkspaceProfile,
 } from "./types.js";
+
+export interface GoalAuditDecisionRecord {
+  decision: GoalControllerAuditDecision;
+  finishedAt: string;
+  appliedActionNames: string[];
+}
 
 export class MemoryGoalStore implements GoalStore {
   private goals = new Map<string, GoalRecord>();
@@ -137,6 +144,42 @@ export class MemoryGoalStore implements GoalStore {
     const toRemove = new Set(goalEvents.slice(0, excess).map((event) => event.eventId));
     this.ledger = this.ledger.filter((event) => !toRemove.has(event.eventId));
     return excess;
+  }
+
+  /**
+   * Returns the latest controller audit decision and applied action names,
+   * or `undefined` when no audit has completed for this goal.
+   */
+  async getLatestAuditDecision(goalId: string): Promise<GoalAuditDecisionRecord | undefined> {
+    const events = this.ledger.filter(
+      (event) => event.goalId === goalId,
+    );
+
+    // Find the most recent controller_audit_finished event.
+    let latestFinished: GoalLedgerEvent | undefined;
+    for (const event of events) {
+      if (event.type === "controller_audit_finished") {
+        latestFinished = event;
+      }
+    }
+    if (!latestFinished) return undefined;
+
+    const details = (latestFinished.details ?? {}) as Record<string, unknown>;
+    const decision = details as unknown as GoalControllerAuditDecision;
+    if (!decision.risk || !decision.summary) return undefined;
+
+    // Collect applied actions recorded after the finished event.
+    const finishedAt = latestFinished.at;
+    const appliedActionNames: string[] = [];
+    for (const event of events) {
+      if (event.type !== "controller_audit_action_applied") continue;
+      if (event.at < finishedAt) continue;
+      const actionDetails = (event.details ?? {}) as Record<string, unknown>;
+      const actionName = (actionDetails.action as string) ?? "pause-goal";
+      appliedActionNames.push(actionName);
+    }
+
+    return { decision, finishedAt, appliedActionNames };
   }
 }
 

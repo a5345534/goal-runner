@@ -1,5 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import {
+  formatAuditSummary,
+  type AuditActionPolicyResult,
+  type GoalControllerAuditDecision,
+} from "../../core/index.js";
 import type { GoalDagNode, GoalLedgerEvent, GoalSubagentRecord, GoalSummary } from "../../core/index.js";
 import type { PiBackgroundRunnerRecord } from "./runner-ops.js";
 import type { GoalListThemeLike } from "./goal-list-ui.js";
@@ -278,6 +283,8 @@ export class GoalMonitorController {
       truncateToWidth(theme.fg(this.activePane === "live" ? "accent" : "muted", `${this.activePane === "live" ? "▶ " : "  "}LIVE: ${view.liveTitle}`), width),
     ];
 
+    const auditSummary = this.scope.kind === "controller" ? extractLatestAuditSummary(dag.ledgerEvents) : undefined;
+    if (auditSummary) lines.push(truncateToWidth(theme.fg("warning", auditSummary), width));
     if (view.liveDiagnostic) lines.push(truncateToWidth(theme.fg("warning", view.liveDiagnostic), width));
     if (view.liveLines.length === 0) lines.push(truncateToWidth(theme.fg("muted", "No live entries available"), width));
     const liveStart = this.liveScroll;
@@ -560,6 +567,64 @@ function currentControllerBlockerDiagnostic(goal: GoalSummary, dag: GoalMonitorD
   }
   if (["blocked", "failed", "budgetLimited", "usageLimited"].includes(goal.status)) return `Current blocker: goal status=${goal.status}`;
   return undefined;
+}
+
+/**
+ * Extracts the latest controller audit summary from ledger events.
+ * Returns a compact single-line summary suitable for monitor display,
+ * or `undefined` when no controller audit has run.
+ */
+function extractLatestAuditSummary(
+  ledgerEvents: GoalLedgerEvent[] | undefined,
+): string | undefined {
+  if (!ledgerEvents || ledgerEvents.length === 0) return undefined;
+
+  // Find the most recent controller_audit_finished event.
+  let latestFinished: GoalLedgerEvent | undefined;
+  for (const event of ledgerEvents) {
+    if (event.type === "controller_audit_finished") {
+      latestFinished = event;
+    }
+  }
+  if (!latestFinished) return undefined;
+
+  const details = latestFinished.details ?? {};
+  const decision = details as unknown as GoalControllerAuditDecision;
+  if (!decision.risk || !decision.summary) return undefined;
+
+  // Collect applied-action events that occurred at or after the finished event.
+  const finishedAt = latestFinished.at;
+  const appliedActions: AuditActionPolicyResult["applied"] = [];
+  for (const event of ledgerEvents) {
+    if (event.type !== "controller_audit_action_applied") continue;
+    if (event.at < finishedAt) continue;
+    const actionDetails = (event.details ?? {}) as Record<string, unknown>;
+    const actionKind = (actionDetails.action as string) ?? "pause-goal";
+    const findingKind = (actionDetails.matchedFindingKind as string) ?? "unknown";
+    const findingConfidence = (actionDetails.matchedFindingConfidence as "low" | "medium" | "high" | undefined) ?? "high";
+    appliedActions.push({
+      action: {
+        action: actionKind as GoalControllerAuditDecision["recommendedActions"][number]["action"],
+        reason: (actionDetails.reason as string) ?? "",
+        requiresUserApproval: false,
+        nodeId: actionDetails.nodeId as string | undefined,
+        subagentId: actionDetails.subagentId as string | undefined,
+      },
+      matchedFinding: {
+        kind: findingKind as GoalControllerAuditDecision["findings"][number]["kind"],
+        nodeId: actionDetails.nodeId as string | undefined,
+        subagentId: actionDetails.subagentId as string | undefined,
+        evidence: [],
+        confidence: findingConfidence,
+      },
+    });
+  }
+
+  try {
+    return formatAuditSummary(decision, appliedActions);
+  } catch {
+    return undefined;
+  }
 }
 
 function formatControllerHistoryDetails(eventName: string, details: Record<string, unknown>): string {
