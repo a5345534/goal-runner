@@ -81,7 +81,21 @@
           "type": "array",
           "items": { "$ref": "#/$defs/artifactLock" }
         },
-        "requiredEvidence": { "$ref": "#/$defs/stringList" },
+        "requiredEvidence": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "validators-ran",
+              "locked-artifacts-unchanged",
+              "implementation-diff-present",
+              "non-test-diff-present",
+              "post-merge-validation-ran",
+              "audit-report-present"
+            ]
+          }
+        },
         "onAuditTestGap": { "type": "string", "minLength": 1 },
         "diffBaseRef": { "type": "string", "minLength": 1 },
         "auditReportPaths": { "$ref": "#/$defs/stringList" },
