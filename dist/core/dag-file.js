@@ -1,5 +1,6 @@
 import { createGoalDagNodes } from "./dag-scheduler.js";
 import { assertKnownModelScenario, parseGoalModelRoutingConfig, selectModelScenarioForNode } from "./model-routing.js";
+import { isSupportedRequiredEvidence, SUPPORTED_REQUIRED_EVIDENCE } from "./validation-evidence.js";
 const DAG_ID_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const DEFAULT_MAX_NODES = 20;
 export function parseGoalDagFileContent(content) {
@@ -184,7 +185,7 @@ function parseValidationContract(input, path) {
     if (input.artifactLocks !== undefined)
         contract.artifactLocks = parseArtifactLocks(input.artifactLocks, `${path}.artifactLocks`);
     if (input.requiredEvidence !== undefined)
-        contract.requiredEvidence = parseStringArray(input.requiredEvidence, `${path}.requiredEvidence`);
+        contract.requiredEvidence = parseRequiredEvidence(input.requiredEvidence, `${path}.requiredEvidence`);
     if (input.onAuditTestGap !== undefined)
         contract.onAuditTestGap = requireNonEmptyString(input.onAuditTestGap, `${path}.onAuditTestGap`);
     if (input.diffBaseRef !== undefined)
@@ -304,6 +305,22 @@ function parseStringArray(input, path) {
     if (!Array.isArray(input))
         throw new Error(`Invalid goal DAG file: ${path} must be an array`);
     return input.map((item, index) => requireNonEmptyString(item, `${path}[${index}]`));
+}
+function parseRequiredEvidence(input, path) {
+    const values = parseStringArray(input, path);
+    const unsupported = values.filter((v) => !isSupportedRequiredEvidence(v));
+    if (unsupported.length > 0) {
+        throw new Error(`Invalid goal DAG file: ${path} contains unsupported required evidence: ${unsupported.join(", ")}. ` +
+            `Supported evidence tokens: ${SUPPORTED_REQUIRED_EVIDENCE.join(", ")}. ` +
+            `Natural-language acceptance checks belong in validators, audit reports, objective/scope, path policy, or producer trace/review metadata.`);
+    }
+    const seen = new Set();
+    for (const v of values) {
+        if (seen.has(v))
+            throw new Error(`Invalid goal DAG file: ${path} contains duplicate required evidence: ${v}`);
+        seen.add(v);
+    }
+    return values;
 }
 function requireKebabId(input, path) {
     const value = requireNonEmptyString(input, path);
