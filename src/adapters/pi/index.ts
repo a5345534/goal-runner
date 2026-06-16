@@ -860,11 +860,13 @@ async function runPiGoalControllerPoll(
   if (!lease) return;
 
   piGoalControllerPollsInFlight.add(goal.goalId);
+  await recordPiControllerEvent(runtime, goal.goalId, "poll.started", { leaseOwner: String(process.pid) });
   try {
     // If the goal is no longer active, stop polling and release its resources.
     const summary = (await runtime.listGoalSummaries()).find((s) => s.goalId === goal.goalId);
     const notifyInThisContext = summary ? shouldUsePiContextForGoalPoller(ctx, summary) : false;
     if (!summary || summary.status !== "active") {
+      await recordPiControllerEvent(runtime, goal.goalId, "poll.stopped", { reason: "goal not active" });
       stopPiGoalControllerPollingLoop(goal.goalId);
       cleanupPiGoalControllerAdapter(goal.goalId);
       const handle = backgroundGoalSessions.get(goal.goalId);
@@ -880,6 +882,10 @@ async function runPiGoalControllerPoll(
     }
     await runtime.runGoalControllerLoop(goal.goalId, buildPiGoalControllerLoopOptions(ctx, goal, binding, undefined, controllerDefaults));
     if (await finalizeAndCleanupPiGoalIfDagTerminal(runtime, ctx, goal.goalId, binding, { notify: notifyInThisContext })) stopPiGoalControllerPollingLoop(goal.goalId);
+    await recordPiControllerEvent(runtime, goal.goalId, "poll.finished", { leased: true, leaseOwner: String(process.pid) });
+  } catch (error) {
+    await recordPiControllerEvent(runtime, goal.goalId, "poll.finished", { leased: true, leaseOwner: String(process.pid), error: error instanceof Error ? error.message : String(error) });
+    throw error;
   } finally {
     piGoalControllerPollsInFlight.delete(goal.goalId);
     releasePiGoalControllerPollLease(lease);
