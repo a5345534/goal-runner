@@ -686,10 +686,10 @@ export class GoalMonitorController {
 
     // ── KEY BINDS ──
     lines.push(truncateToWidth(theme.fg("dim", `row-action monitor • ←→ select row op • Enter confirm • b/Backspace back • l/v focus • c compact/debug • Tab switch • ↑↓ move/scroll • PgUp/PgDn • Esc close`), width));
-    lines.push(truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width));
 
     // ── DEBUG META + RUNTIME BAND (only in debug mode or LIVE focus) ──
     if (this.controllerHistoryMode === "debug" || this.activePane === "live") {
+      lines.push(truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width));
       const healthLabel = EXTENDED_MONITOR_HEALTH_LABELS[overview.health] ?? overview.health;
       const sessionPart = `Session=${SESSION_STATE_LABELS[runtimeSummary.session.state]}`;
       const hiddenPart = `Hidden=${HIDDEN_CONTINUATION_STATE_LABELS[runtimeSummary.hiddenContinuation.state]}`;
