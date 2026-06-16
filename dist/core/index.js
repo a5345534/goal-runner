@@ -18,5 +18,6 @@ export * from "./model-routing.js";
 export * from "./integration.js";
 export * from "./lifecycle.js";
 export * from "./exception-handler.js";
+export * from "./controller-audit.js";
 export * from "./subagent-adapter.js";
 //# sourceMappingURL=index.js.map

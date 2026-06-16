@@ -7,14 +7,18 @@
 //   * the goal's current status, budget, usage, and elapsed time
 //   * each DAG node's status, validation summary, and last activity
 //   * each subagent's status, branch, workspace, and self-reported note
+//   * the latest controller audit summary, when available
 //
 // The same renderer is reused by the controller poll loop so the opencode
 // session can be sent a refreshed snapshot when a new turn starts.
 import { existsSync } from "node:fs";
+import { formatAuditSummary, } from "../../core/index.js";
 const DEFAULT_MAX_LINE_WIDTH = 96;
 export async function readOpencodeGoalMonitorSnapshot(runtime, goal, options = {}) {
     const state = await runtime.getGoalOrchestrationState(goal.goalId);
-    const lines = renderOpencodeMonitorLines(goal, state, options);
+    // Fetch ledger events for audit summary when not explicitly provided.
+    const ledgerEvents = options.ledgerEvents ?? await runtime.listLedgerEvents(goal.sessionKey, goal.goalId);
+    const lines = renderOpencodeMonitorLines(goal, state, { ...options, ledgerEvents });
     return { lines, refreshedAt: new Date().toISOString() };
 }
 export function renderOpencodeMonitorLines(goal, state, options = {}) {
@@ -28,6 +32,10 @@ export function renderOpencodeMonitorLines(goal, state, options = {}) {
         lines.push(`Workspace: ${goal.executionWorkspace}`);
     if (goal.sessionFile)
         lines.push(`Session: ${goal.sessionFile}`);
+    // Surface latest controller audit summary when available.
+    const auditSummary = extractLatestAuditSummary(options.ledgerEvents);
+    if (auditSummary)
+        lines.push(`Audit: ${auditSummary}`);
     if (state.nodes.length === 0 && state.subagents.length === 0) {
         lines.push("(no DAG nodes or subagents yet)");
         return lines;
@@ -142,5 +150,62 @@ function truncate(text, maxWidth) {
     if (maxWidth <= 4)
         return text.slice(0, maxWidth);
     return `${text.slice(0, maxWidth - 3)}...`;
+}
+/**
+ * Extracts the latest controller audit summary from ledger events.
+ * Returns a compact single-line summary suitable for monitor display,
+ * or `undefined` when no controller audit has run.
+ */
+function extractLatestAuditSummary(ledgerEvents) {
+    if (!ledgerEvents || ledgerEvents.length === 0)
+        return undefined;
+    // Find the most recent controller_audit_finished event.
+    let latestFinished;
+    for (const event of ledgerEvents) {
+        if (event.type === "controller_audit_finished") {
+            latestFinished = event;
+        }
+    }
+    if (!latestFinished)
+        return undefined;
+    const details = latestFinished.details ?? {};
+    const decision = details;
+    if (!decision.risk || !decision.summary)
+        return undefined;
+    // Collect applied-action events that occurred at or after the finished event.
+    const finishedAt = latestFinished.at;
+    const appliedActions = [];
+    for (const event of ledgerEvents) {
+        if (event.type !== "controller_audit_action_applied")
+            continue;
+        if (event.at < finishedAt)
+            continue;
+        const actionDetails = (event.details ?? {});
+        const actionKind = actionDetails.action ?? "pause-goal";
+        const findingKind = actionDetails.matchedFindingKind ?? "unknown";
+        const findingConfidence = actionDetails.matchedFindingConfidence ?? "high";
+        appliedActions.push({
+            action: {
+                action: actionKind,
+                reason: actionDetails.reason ?? "",
+                requiresUserApproval: false,
+                nodeId: actionDetails.nodeId,
+                subagentId: actionDetails.subagentId,
+            },
+            matchedFinding: {
+                kind: findingKind,
+                nodeId: actionDetails.nodeId,
+                subagentId: actionDetails.subagentId,
+                evidence: [],
+                confidence: findingConfidence,
+            },
+        });
+    }
+    try {
+        return formatAuditSummary(decision, appliedActions);
+    }
+    catch {
+        return undefined;
+    }
 }
 //# sourceMappingURL=monitor-ui.js.map

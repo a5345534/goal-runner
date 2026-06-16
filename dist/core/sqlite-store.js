@@ -288,6 +288,37 @@ export class SQLiteGoalStore {
       )`).run(goalId, excess);
         return Number(result.changes ?? 0);
     }
+    /**
+     * Returns the latest controller audit decision and applied action names,
+     * or `undefined` when no audit has completed for this goal.
+     */
+    async getLatestAuditDecision(goalId) {
+        const rows = this.db
+            .prepare(`SELECT type, at, details_json FROM goal_ledger
+         WHERE goal_id = ? AND type IN ('controller_audit_finished', 'controller_audit_action_applied')
+         ORDER BY id ASC`)
+            .all(goalId);
+        // Walk forward to find the latest finished event and collect trailing applied actions.
+        let latestFinished;
+        let appliedActionNames = [];
+        for (const row of rows) {
+            const details = parseDetails(row.details_json) ?? {};
+            if (row.type === "controller_audit_finished") {
+                latestFinished = { at: row.at, details };
+                appliedActionNames = [];
+            }
+            else if (row.type === "controller_audit_action_applied" && latestFinished && row.at >= latestFinished.at) {
+                const actionName = details.action ?? "pause-goal";
+                appliedActionNames.push(actionName);
+            }
+        }
+        if (!latestFinished)
+            return undefined;
+        const decision = latestFinished.details;
+        if (!decision.risk || !decision.summary)
+            return undefined;
+        return { decision, finishedAt: latestFinished.at, appliedActionNames };
+    }
     close() {
         this.db.close();
     }

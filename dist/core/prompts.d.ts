@@ -5,3 +5,4 @@ export declare function renderActiveGoalReminderPrompt(goal: GoalRecord): string
 export declare function renderBudgetLimitPrompt(goal: GoalRecord): string;
 export declare function renderObjectiveUpdatedPrompt(goal: GoalRecord): string;
 export declare function renderCompletionAuditPrompt(request: CompletionAuditRequest): string;
+export declare function renderControllerAuditPrompt(snapshot: unknown): string;
