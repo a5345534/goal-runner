@@ -58,7 +58,7 @@ export interface GoalMonitorRuntimeSummary {
         failed: number;
     };
 }
-export type MonitorHealth = "OK" | "Needs attention" | "Waiting" | "Stalled" | "Blocked";
+export type MonitorHealth = "OK" | "Needs attention" | "Waiting" | "Stalled" | "Blocked" | "Running" | "Complete" | "Complete with warnings";
 export declare const SESSION_STATE_LABELS: Record<MonitorSessionState, string>;
 export declare const HIDDEN_CONTINUATION_STATE_LABELS: Record<MonitorHiddenContinuationState, string>;
 export declare const CONTROLLER_POLL_STATE_LABELS: Record<MonitorControllerPollState, string>;

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { formatAuditSummary, } from "../../core/index.js";
+import { buildGoalMonitorOverview, EXTENDED_MONITOR_HEALTH_LABELS, MONITOR_NODE_DISPLAY_STATE_CHARS, ACTION_DISPLAY_LABELS, } from "../monitor-overview.js";
 // Canonical state labels shared across Pi TUI and OpenCode monitors.
 export const SESSION_STATE_LABELS = {
     "active-turn": "ACTIVE-TURN",
@@ -423,7 +424,6 @@ export class GoalMonitorController {
         this.followLiveTail = options.followLiveTail;
     }
     render(width, theme) {
-        const title = theme.bold ? theme.bold(`Goal ${this.goal.shortGoalId}`) : `Goal ${this.goal.shortGoalId}`;
         const controllerTranscript = this.readTranscript();
         const dag = this.readDagSnapshot();
         const view = this.buildView(dag, controllerTranscript);
@@ -441,38 +441,84 @@ export class GoalMonitorController {
             this.liveScroll = Math.max(0, view.liveLines.length - visibleLiveCount);
         else
             this.liveScroll = clampScroll(this.liveScroll, view.liveLines.length, visibleLiveCount);
-        // ── Runtime summary band ──
+        // ── Runtime summary ──
         const runtimeSummary = buildGoalMonitorRuntimeSummary(this.goal, dag.subagents, {
             harnessState: dag.harnessState,
             reservation: dag.reservation,
             ledgerEvents: dag.ledgerEvents,
             runners: dag.runners,
         });
-        const health = deriveMonitorHealth(runtimeSummary, this.goal, dag.subagents, dag.nodes);
-        const runtimeBandLines = formatRuntimeBandLines(runtimeSummary, health, width, theme);
-        const lines = [
-            truncateToWidth(theme.fg("accent", title), width),
-            truncateToWidth(`scope=${view.scopeLabel} focus=${this.activePane} rowOp=${formatPlainOperation(this.lastSelectedOperations[this.rowOperationIndex])} status=${derivedMonitorStatus(this.goal, dag)} tokens=${formatMonitorTokens(this.goal)} elapsed=${formatElapsedSeconds(this.goal.timeUsedSeconds)} controllerModel=${formatMonitorModel(this.goal.controllerModelScenario, this.goal.controllerModelArg)}`, width),
-            truncateToWidth(`workspace=${shortenPath(this.goal.executionWorkspace ?? "legacy")} branch=${shortenMiddle(this.goal.branch ?? this.goal.ref ?? "-", 72)}`, width),
-            truncateToWidth(`DAG nodes=${formatStatusCounts(dag.nodes.map((node) => node.status))} subagents=${formatStatusCounts(dag.subagents.map((subagent) => subagent.status))} refreshed=${compactTimestamp(dag.refreshedAt ?? new Date(0).toISOString())}`, width),
-            ...runtimeBandLines,
-            truncateToWidth(theme.fg("dim", `row-action monitor • ←→ select row op • Enter confirm row op • b/Backspace back • l/v focus • c compact/debug • Tab switch • ↑↓ move/scroll • PgUp/PgDn • Esc close`), width),
-            truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width),
-            truncateToWidth(theme.fg(this.activePane === "live" ? "accent" : "muted", `${this.activePane === "live" ? "▶ " : "  "}LIVE: ${view.liveTitle}`), width),
-        ];
+        // ── Build the structured overview model (shared with OpenCode adapter) ──
+        const overview = buildGoalMonitorOverview(this.goal, { nodes: dag.nodes, subagents: dag.subagents, ledgerEvents: dag.ledgerEvents }, runtimeSummary);
+        const isNarrow = width <= 80;
+        const lines = [];
+        // ── OVERVIEW HEADER ──
+        lines.push(...renderOverviewHeader(overview, runtimeSummary, width, isNarrow, theme));
+        // ── EXECUTION PLAN (controller scope only) ──
+        if (this.scope.kind === "controller") {
+            lines.push(...renderExecutionPlanSection(overview, dag, width, isNarrow, theme));
+        }
+        // ── RECENT EVENTS (controller scope only, after execution plan) ──
+        if (this.scope.kind === "controller" && overview.recentEvents.length > 0) {
+            lines.push(truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width));
+            lines.push(truncateToWidth(theme.fg("accent", `RECENT EVENTS (${overview.recentEvents.length} meaningful, ${dag.ledgerEvents?.length ?? 0} raw · c toggles debug history in LIVE pane)`), width));
+            for (const evt of overview.recentEvents) {
+                lines.push(truncateToWidth(theme.fg("dim", evt), width));
+            }
+        }
+        // ── KEY BINDS ──
+        lines.push(truncateToWidth(theme.fg("dim", `row-action monitor • ←→ select row op • Enter confirm • b/Backspace back • l/v focus • c compact/debug • Tab switch • ↑↓ move/scroll • PgUp/PgDn • Esc close`), width));
+        lines.push(truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width));
+        // ── COMPACT META + RUNTIME BAND (backward compat for existing tests) ──
+        const healthLabel = EXTENDED_MONITOR_HEALTH_LABELS[overview.health] ?? overview.health;
+        const sessionPart = `Session=${SESSION_STATE_LABELS[runtimeSummary.session.state]}`;
+        const hiddenPart = `Hidden=${HIDDEN_CONTINUATION_STATE_LABELS[runtimeSummary.hiddenContinuation.state]}`;
+        const pollPart = `Poll=${CONTROLLER_POLL_STATE_LABELS[runtimeSummary.controllerPoll.state]}`;
+        const runnersPart = `Runners=${formatRunnerSummary(runtimeSummary.runners)}`;
+        const fullBand = `${sessionPart}  ${hiddenPart}  ${pollPart}  ${runnersPart}  Health=${healthLabel}  Next: ${overview.nextActionLabel}`;
+        if (fullBand.length > width && width > 0) {
+            // Narrow: split across lines.
+            const lineA = `${sessionPart}  ${hiddenPart}`;
+            const lineB = `${pollPart}  ${runnersPart}`;
+            const lineC = `Health=${healthLabel}  Next: ${overview.nextActionLabel}`;
+            lines.push(truncateToWidth(theme.fg("dim", lineA), width));
+            lines.push(truncateToWidth(theme.fg("dim", lineB), width));
+            lines.push(truncateToWidth(theme.fg("dim", lineC), width));
+        }
+        else {
+            lines.push(truncateToWidth(theme.fg("dim", fullBand), width));
+        }
+        const compactMeta = isNarrow
+            ? `scope=${view.scopeLabel} focus=${this.activePane} rowOp=${formatPlainOperation(this.lastSelectedOperations[this.rowOperationIndex])}`
+            : `scope=${view.scopeLabel} focus=${this.activePane} rowOp=${formatPlainOperation(this.lastSelectedOperations[this.rowOperationIndex])} status=${derivedMonitorStatus(this.goal, dag)} tokens=${formatMonitorTokens(this.goal)} DAG nodes=${formatStatusCounts(dag.nodes.map((node) => node.status))} subagents=${formatStatusCounts(dag.subagents.map((subagent) => subagent.status))} elapsed=${formatElapsedSeconds(this.goal.timeUsedSeconds)}`;
+        lines.push(truncateToWidth(theme.fg("dim", compactMeta), width));
+        // ── LIVE PANE ──
+        // Always use the original live view (compact/debug controller history or runner transcript).
+        // Recent events from the overview are shown above as a dedicated section.
+        const liveTitle = view.liveTitle;
+        lines.push(truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width));
+        lines.push(truncateToWidth(theme.fg(this.activePane === "live" ? "accent" : "muted", `${this.activePane === "live" ? "▶ " : "  "}LIVE: ${liveTitle}`), width));
+        const liveLines = view.liveLines;
+        const liveDiag = view.liveDiagnostic;
+        const liveFollowsTail = view.liveFollowsTail;
         const auditSummary = this.scope.kind === "controller" ? extractLatestAuditSummary(dag.ledgerEvents) : undefined;
         if (auditSummary)
             lines.push(truncateToWidth(theme.fg("warning", auditSummary), width));
-        if (view.liveDiagnostic)
-            lines.push(truncateToWidth(theme.fg("warning", view.liveDiagnostic), width));
-        if (view.liveLines.length === 0)
+        if (liveDiag)
+            lines.push(truncateToWidth(theme.fg("warning", liveDiag), width));
+        if (liveLines.length === 0)
             lines.push(truncateToWidth(theme.fg("muted", "No live entries available"), width));
-        const liveStart = this.liveScroll;
-        const liveEnd = Math.min(view.liveLines.length, liveStart + visibleLiveCount);
-        for (const line of view.liveLines.slice(liveStart, liveEnd))
+        const followTail = liveFollowsTail && this.followLiveTail;
+        const liveScrollVal = followTail
+            ? Math.max(0, liveLines.length - visibleLiveCount)
+            : clampScroll(this.liveScroll, liveLines.length, visibleLiveCount);
+        const liveStart = liveScrollVal;
+        const liveEnd = Math.min(liveLines.length, liveStart + visibleLiveCount);
+        for (const line of liveLines.slice(liveStart, liveEnd))
             lines.push(truncateToWidth(line, width));
-        if (view.liveLines.length > 0)
-            lines.push(truncateToWidth(theme.fg("dim", formatLiveRange(liveStart, liveEnd, view.liveLines.length, this.activePane === "live", view.liveFollowsTail && this.followLiveTail)), width));
+        if (liveLines.length > 0)
+            lines.push(truncateToWidth(theme.fg("dim", formatLiveRange(liveStart, liveEnd, liveLines.length, this.activePane === "live", followTail)), width));
+        // ── LIST PANE ──
         lines.push(truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width));
         lines.push(truncateToWidth(theme.fg(this.activePane === "list" ? "accent" : "muted", `${this.activePane === "list" ? "▶ " : "  "}LIST: ${view.listTitle}`), width));
         if (view.listRows.length === 0) {
@@ -580,34 +626,47 @@ function operationsForListItem(item, goal, dag) {
         return [];
     if (item.kind === "controller") {
         return [
-            { kind: "internal", operation: "nodeList", label: "nodeList" },
-            ...controllerActions(goal).map((action) => ({ kind: "action", action, label: action })),
+            { kind: "internal", operation: "nodeList", label: userActionLabel("nodeList") },
+            ...controllerActions(goal).map((action) => ({ kind: "action", action, label: userActionLabel(action) })),
         ];
     }
     if (item.kind === "node") {
         const runnerCount = dag.subagents.filter((subagent) => subagent.nodeId === item.nodeId).length;
         return [
-            { kind: "internal", operation: "runnerList", label: `runnerList(${runnerCount})` },
-            { kind: "internal", operation: "back", label: "back" },
+            { kind: "internal", operation: "runnerList", label: `${userActionLabel("runnerList")}(${runnerCount})` },
+            { kind: "internal", operation: "back", label: userActionLabel("back") },
         ];
     }
     const subagent = dag.subagents.find((record) => record.subagentId === item.subagentId);
     const runnerRecords = (dag.runners ?? []).filter((runner) => runner.subagentId === item.subagentId);
     const hasLiveRunner = runnerRecords.some((runner) => runner.runnerAlive || runner.childAlive);
-    const operations = [{ kind: "internal", operation: "view", label: "view" }];
+    const operations = [{ kind: "internal", operation: "view", label: userActionLabel("view") }];
     if (subagent?.sessionFile)
-        operations.push({ kind: "runner", operation: "openSession", subagentId: item.subagentId, label: "openSession" });
+        operations.push({ kind: "runner", operation: "openSession", subagentId: item.subagentId, label: userActionLabel("openSession") });
     if (hasLiveRunner)
-        operations.push({ kind: "runner", operation: "stop", subagentId: item.subagentId, label: "stop" });
+        operations.push({ kind: "runner", operation: "stop", subagentId: item.subagentId, label: userActionLabel("stop") });
     if (hasLiveRunner)
-        operations.push({ kind: "runner", operation: "kill", subagentId: item.subagentId, label: "kill" });
+        operations.push({ kind: "runner", operation: "kill", subagentId: item.subagentId, label: userActionLabel("kill") });
     if (runnerRecords.length > 0)
-        operations.push({ kind: "runner", operation: "archive", subagentId: item.subagentId, label: "archive" });
-    operations.push({ kind: "internal", operation: "back", label: "back" });
+        operations.push({ kind: "runner", operation: "archive", subagentId: item.subagentId, label: userActionLabel("archive") });
+    operations.push({ kind: "internal", operation: "back", label: userActionLabel("back") });
     return operations;
 }
+/** Map an operation ID to its user-facing label using ACTION_DISPLAY_LABELS. */
+function userActionLabel(operationId) {
+    return ACTION_DISPLAY_LABELS[operationId] ?? operationId;
+}
 function formatPlainOperation(operation) {
-    return operation?.label ?? "-";
+    if (!operation)
+        return "-";
+    // Return the raw operation ID for the compact meta line, not the user-facing label.
+    if (operation.kind === "internal")
+        return operation.operation;
+    if (operation.kind === "action")
+        return operation.action;
+    if (operation.kind === "runner")
+        return operation.operation;
+    return "-";
 }
 function formatRowOperations(operations, selectedIndex, theme) {
     return operations
@@ -998,6 +1057,95 @@ function shortenMiddle(value, maxLength) {
  * Render the runtime summary as 2-3 compact lines for the Pi TUI header band.
  * Uses short labels and double-space separators to fit narrow terminals.
  */
+/**
+ * Render the structured overview header for the Pi TUI monitor.
+ * Shows Goal title, Health, Problem, Progress, Runtime, and Next Action.
+ * Adapts layout for narrow (≤80 cols) terminals.
+ */
+function renderOverviewHeader(overview, _runtimeSummary, width, isNarrow, theme) {
+    const healthLabel = EXTENDED_MONITOR_HEALTH_LABELS[overview.health] ?? overview.health;
+    const healthColor = overview.health === "OK" || overview.health === "Complete" ? "success" :
+        overview.health === "Needs attention" || overview.health === "Complete with warnings" ? "warning" :
+            overview.health === "Blocked" ? "error" :
+                overview.health === "Running" ? "success" : "dim";
+    const lines = [];
+    // Goal title line.
+    const titleLine = theme.bold
+        ? theme.bold(`${overview.title} · ${overview.statusLabel}`)
+        : `${overview.title} · ${overview.statusLabel}`;
+    lines.push(truncateToWidth(theme.fg("accent", titleLine), width));
+    if (isNarrow) {
+        // Narrow layout: stack key fields vertically.
+        lines.push(truncateToWidth(theme.fg(healthColor, `Health: ${healthLabel}`), width));
+        if (overview.problemLabel !== "none") {
+            lines.push(truncateToWidth(theme.fg("warning", `Problem: ${overview.problemLabel}`), width));
+        }
+        lines.push(truncateToWidth(theme.fg("dim", `Progress: ${overview.progressLabel}`), width));
+        lines.push(truncateToWidth(theme.fg("dim", `Runtime: ${overview.runtimeLabel}`), width));
+        lines.push(truncateToWidth(theme.fg("dim", `Next: ${overview.nextActionLabel}`), width));
+    }
+    else {
+        // Wide layout: Health + Problem on one line, Progress on next, Runtime on next, Next on last.
+        const problemPart = overview.problemLabel !== "none"
+            ? `  Problem: ${overview.problemLabel}`
+            : "";
+        lines.push(truncateToWidth(`${theme.fg(healthColor, `Health: ${healthLabel}`)}${problemPart ? theme.fg("warning", problemPart) : ""}`, width));
+        lines.push(truncateToWidth(theme.fg("dim", `Progress: ${overview.progressLabel}`), width));
+        lines.push(truncateToWidth(theme.fg("dim", `Runtime: ${overview.runtimeLabel}`), width));
+        lines.push(truncateToWidth(theme.fg("dim", `Next: ${overview.nextActionLabel}`), width));
+    }
+    return lines;
+}
+/**
+ * Render the Execution Plan section with node display states and Selected Detail.
+ * Uses single-char icons for narrow terminals.
+ */
+function renderExecutionPlanSection(overview, dag, width, isNarrow, theme) {
+    const lines = [];
+    lines.push(truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width));
+    if (overview.nodeDisplayStates.length === 0) {
+        lines.push(truncateToWidth(theme.fg("muted", "EXECUTION PLAN  (no DAG nodes yet)"), width));
+        return lines;
+    }
+    lines.push(truncateToWidth(theme.fg("accent", "EXECUTION PLAN"), width));
+    for (const nds of overview.nodeDisplayStates) {
+        const stateChar = MONITOR_NODE_DISPLAY_STATE_CHARS[nds.displayState] ?? "?";
+        const nodeColor = nds.displayState === "blocked" ? "error" :
+            nds.displayState === "warning" ? "warning" :
+                nds.displayState === "running" ? "success" :
+                    nds.displayState === "complete" ? "success" : "dim";
+        if (isNarrow) {
+            lines.push(truncateToWidth(theme.fg(nodeColor, `${stateChar} ${nds.slug}`), width));
+        }
+        else {
+            lines.push(truncateToWidth(theme.fg(nodeColor, `${stateChar} ${nds.slug} · ${nds.summary}`), width));
+        }
+    }
+    // Selected Detail — highlights the most important node.
+    if (overview.selectedDetail) {
+        if (isNarrow) {
+            lines.push(truncateToWidth(theme.fg("dim", `Selected: ${truncateNarrow(overview.selectedDetail, width - 10)}`), width));
+        }
+        else {
+            lines.push(truncateToWidth(theme.fg("dim", `Selected: ${overview.selectedDetail}`), width));
+        }
+    }
+    return lines;
+}
+/** Truncate text for narrow terminals preserving key fields. */
+function truncateNarrow(text, maxLen) {
+    if (text.length <= maxLen)
+        return text;
+    // Try to keep node slug and status by removing less important fields.
+    const parts = text.split(" · ");
+    if (parts.length <= 1)
+        return `${text.slice(0, maxLen - 3)}...`;
+    // Keep first two parts (slug + status), drop extras.
+    let result = parts.slice(0, 2).join(" · ");
+    if (result.length > maxLen)
+        result = `${result.slice(0, maxLen - 3)}...`;
+    return result;
+}
 function formatRuntimeBandLines(summary, health, width, theme) {
     const sessionLabel = SESSION_STATE_LABELS[summary.session.state];
     const hiddenLabel = HIDDEN_CONTINUATION_STATE_LABELS[summary.hiddenContinuation.state];
