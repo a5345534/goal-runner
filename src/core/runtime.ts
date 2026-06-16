@@ -150,6 +150,31 @@ export class GoalRuntime {
     return this.store.pruneLedgerEvents?.(goalId, options) ?? 0;
   }
 
+  // --- Controller audit port methods (GoalControllerRuntimePort) ---
+
+  async getGoalRecord(goalId: string): Promise<GoalRecord> {
+    const goal = await this.getGoalById(goalId);
+    if (!goal) throw new Error(`goal not found: ${goalId}`);
+    return goal;
+  }
+
+  async listGoalLedgerEvents(goalId: string): Promise<GoalLedgerEvent[]> {
+    const goal = await this.getGoalById(goalId);
+    if (!goal) return [];
+    return this.store.listLedgerEvents(goal.sessionKey, goalId);
+  }
+
+  async auditPauseGoal(goalId: string, reason: string): Promise<void> {
+    const goal = await this.getGoalById(goalId);
+    if (!goal) throw new Error(`goal not found: ${goalId}`);
+    const paused = await this.setGoalStatus(goal, "paused");
+    await this.store.clearReservation(goal.sessionKey);
+    await this.appendLedger("goal_paused", goal.sessionKey, paused.goalId, {
+      source: "controller_audit",
+      reason,
+    });
+  }
+
   async saveGoalSessionMetadata(metadata: GoalSessionMetadata): Promise<void> {
     await this.store.saveGoalSessionMetadata(metadata);
   }

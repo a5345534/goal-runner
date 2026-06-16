@@ -796,11 +796,20 @@ async function runControllerAuditGate(runtime, goalId, options, result, tickStar
     };
     await recordAuditActionDecisions(policyResult, decision, auditEventRecorder, tickStartedAt);
     // --- Apply auto-pause if indicated ---
+    let pauseApplied = false;
+    let pauseUnavailable = false;
+    let pauseFailed = false;
     if (policyResult.shouldPauseGoal) {
         if (runtime.auditPauseGoal) {
             try {
                 await runtime.auditPauseGoal(goalId, policyResult.pauseReason ?? "Controller audit auto-pause");
-                // Pause succeeded: record the definitive event.
+                // Pause succeeded: record definitive applied and paused events.
+                await recordControllerEvent(runtime, goalId, "controller_audit_action_applied", {
+                    action: "pause-goal",
+                    reason: policyResult.pauseReason,
+                    risk: decision.risk,
+                    findingKinds: decision.findings.map((finding) => finding.kind),
+                }, tickStartedAt);
                 await recordControllerEvent(runtime, goalId, "goal_paused_by_controller_audit", {
                     risk: decision.risk,
                     summary: decision.summary,
@@ -808,6 +817,7 @@ async function runControllerAuditGate(runtime, goalId, options, result, tickStar
                     findingKinds: decision.findings.map((finding) => finding.kind),
                 }, tickStartedAt);
                 result.auditPausedGoal = true;
+                pauseApplied = true;
             }
             catch (error) {
                 const errorMessage = error instanceof Error ? error.message : String(error);
@@ -817,15 +827,7 @@ async function runControllerAuditGate(runtime, goalId, options, result, tickStar
                     summary: decision.summary,
                     risk: decision.risk,
                 }, tickStartedAt);
-                await recordControllerEvent(runtime, goalId, "controller_audit_finished", {
-                    outcome: "pause_failed",
-                    pauseError: errorMessage,
-                    summary: decision.summary,
-                    risk: decision.risk,
-                }, tickStartedAt);
-                result.auditRun = true;
-                result.auditSummary = formatAuditSummary(decision, policyResult.applied);
-                return;
+                pauseFailed = true;
             }
         }
         else {
@@ -835,19 +837,28 @@ async function runControllerAuditGate(runtime, goalId, options, result, tickStar
                 reason: "auditPauseGoal port method is not available on this runtime.",
                 risk: decision.risk,
             }, tickStartedAt);
+            pauseUnavailable = true;
         }
     }
-    // --- Record audit finished ---
+    // --- Record audit finished with accurate outcome ---
+    const finishedOutcome = pauseApplied
+        ? "paused"
+        : pauseFailed
+            ? "pause_failed"
+            : pauseUnavailable
+                ? "pause_unavailable"
+                : "completed";
     await recordControllerEvent(runtime, goalId, "controller_audit_finished", {
-        outcome: policyResult.shouldPauseGoal ? "paused" : "completed",
+        outcome: finishedOutcome,
         risk: decision.risk,
         summary: decision.summary,
         findingKinds: decision.findings.map((finding) => finding.kind),
-        actionsApplied: policyResult.applied.map((entry) => entry.action.action),
+        actionsRecommended: policyResult.applied.map((entry) => entry.action.action),
+        actionsApplied: pauseApplied ? ["pause-goal"] : [],
         actionsSkipped: policyResult.skipped.map((entry) => entry.action.action),
     }, tickStartedAt);
     result.auditRun = true;
-    result.auditSummary = formatAuditSummary(decision, policyResult.applied);
+    result.auditSummary = formatAuditSummary(decision, pauseApplied ? policyResult.applied : []);
 }
 /**
  * Derives the last audit timestamp from ledger events by scanning for

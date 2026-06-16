@@ -39,6 +39,9 @@ export declare class GoalRuntime {
     pruneLedgerEvents(goalId: string, options: {
         maxEvents: number;
     }): Promise<number>;
+    getGoalRecord(goalId: string): Promise<GoalRecord>;
+    listGoalLedgerEvents(goalId: string): Promise<GoalLedgerEvent[]>;
+    auditPauseGoal(goalId: string, reason: string): Promise<void>;
     saveGoalSessionMetadata(metadata: GoalSessionMetadata): Promise<void>;
     listGoalSummaries(): Promise<GoalSummary[]>;
     getGoalById(goalId: string): Promise<GoalRecord | undefined>;

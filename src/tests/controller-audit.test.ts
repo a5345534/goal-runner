@@ -1465,18 +1465,18 @@ test("recordAuditActionEvents records pause-goal events correctly", async () => 
 
   await recordAuditActionEvents(result, decision, recorder, now);
 
-  // Should have: applied event + goal_paused event
-  const appliedEvents = events.filter(
-    (e) => e.type === "controller_audit_action_applied",
+  // Should have: recommended event + goal_paused event
+  const recommendedEvents = events.filter(
+    (e) => e.type === "controller_audit_action_recommended",
   );
   const pausedEvents = events.filter(
     (e) => e.type === "goal_paused_by_controller_audit",
   );
 
-  assert.equal(appliedEvents.length, 1);
-  assert.equal(appliedEvents[0].details.action, "pause-goal");
-  assert.equal(appliedEvents[0].details.matchedFindingKind, "retry-loop");
-  assert.equal(appliedEvents[0].details.matchedFindingConfidence, "high");
+  assert.equal(recommendedEvents.length, 1);
+  assert.equal(recommendedEvents[0].details.action, "pause-goal");
+  assert.equal(recommendedEvents[0].details.matchedFindingKind, "retry-loop");
+  assert.equal(recommendedEvents[0].details.matchedFindingConfidence, "high");
 
   assert.equal(pausedEvents.length, 1);
   assert.equal(pausedEvents[0].details.risk, "critical");
@@ -1526,9 +1526,9 @@ test("recordAuditActionEvents records skipped events", async () => {
   events.length = 0;
   await recordAuditActionEvents(result, decision, recorder, now);
 
-  // No applied or paused events
+  // No recommended or paused events (shouldPauseGoal is false, so no pause-goal is recommended)
   assert.equal(
-    events.filter((e) => e.type === "controller_audit_action_applied").length,
+    events.filter((e) => e.type === "controller_audit_action_recommended").length,
     0,
   );
   assert.equal(
@@ -1978,8 +1978,10 @@ test("GOAL_CONTROLLER_AUDIT_LEDGER_EVENT_TYPES includes all required event types
     "controller_audit_started",
     "controller_audit_finished",
     "controller_audit_invalid_output",
+    "controller_audit_action_recommended",
     "controller_audit_action_applied",
     "controller_audit_action_skipped",
+    "controller_audit_action_failed",
     "goal_paused_by_controller_audit",
   ];
   for (const t of requiredTypes) {

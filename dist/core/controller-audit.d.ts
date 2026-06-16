@@ -1,5 +1,5 @@
 import type { GoalLedgerEvent, GoalOrchestrationState, GoalRecord } from "./types.js";
-export declare const GOAL_CONTROLLER_AUDIT_LEDGER_EVENT_TYPES: readonly ["controller_audit_started", "controller_audit_finished", "controller_audit_invalid_output", "controller_audit_action_applied", "controller_audit_action_skipped", "goal_paused_by_controller_audit"];
+export declare const GOAL_CONTROLLER_AUDIT_LEDGER_EVENT_TYPES: readonly ["controller_audit_started", "controller_audit_finished", "controller_audit_invalid_output", "controller_audit_action_recommended", "controller_audit_action_applied", "controller_audit_action_skipped", "controller_audit_action_failed", "goal_paused_by_controller_audit"];
 export type GoalControllerAuditLedgerEventType = (typeof GOAL_CONTROLLER_AUDIT_LEDGER_EVENT_TYPES)[number];
 /** Default audit interval: 30 minutes. */
 export declare const DEFAULT_AUDIT_INTERVAL_MS: number;

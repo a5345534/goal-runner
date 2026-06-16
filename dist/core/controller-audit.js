@@ -5,8 +5,10 @@ export const GOAL_CONTROLLER_AUDIT_LEDGER_EVENT_TYPES = [
     "controller_audit_started",
     "controller_audit_finished",
     "controller_audit_invalid_output",
+    "controller_audit_action_recommended",
     "controller_audit_action_applied",
     "controller_audit_action_skipped",
+    "controller_audit_action_failed",
     "goal_paused_by_controller_audit",
 ];
 /** Default audit interval: 30 minutes. */
@@ -408,7 +410,7 @@ export async function recordAuditActionEvents(result, decision, recorder, at) {
  */
 export async function recordAuditActionDecisions(result, decision, recorder, at) {
     for (const entry of result.applied) {
-        await recorder("controller_audit_action_applied", {
+        await recorder("controller_audit_action_recommended", {
             action: entry.action.action,
             reason: entry.action.reason,
             matchedFindingKind: entry.matchedFinding.kind,
