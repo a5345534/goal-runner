@@ -1,4 +1,3 @@
-import type { GoalValidationEvidenceRequirement } from "./validation-evidence.js";
 import type { GoalControllerAuditLedgerEventType } from "./controller-audit.js";
 export declare const GOAL_STATUSES: readonly ["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"];
 export type GoalStatus = (typeof GOAL_STATUSES)[number];
@@ -263,44 +262,8 @@ export interface GoalControllerActionAttemptRecord {
     error?: string;
     evidence?: Record<string, unknown>;
 }
-export interface GoalDagConflictHints {
-    files?: string[];
-    modules?: string[];
-    capabilities?: string[];
-}
-export type GoalDagNodeKind = "test-spec" | "test-review" | "implementation" | "audit" | string;
-export type { GoalValidationEvidenceRequirement } from "./validation-evidence.js";
-export interface GoalValidationArtifactLock {
-    path: string;
-    sha256: string;
-    sourceNodeId?: string;
-    approvedByNodeId?: string;
-    approvedAt?: string;
-}
-export interface GoalDagValidationContract {
-    profile?: string;
-    testSpecNodeId?: string;
-    approvedByNodeId?: string;
-    artifactLocks?: GoalValidationArtifactLock[];
-    requiredEvidence?: GoalValidationEvidenceRequirement[];
-    onAuditTestGap?: string;
-    /** Optional Git ref used by generic diff evidence checks. */
-    diffBaseRef?: string;
-    /** Optional report paths used by audit-report-present evidence checks. */
-    auditReportPaths?: string[];
-    /** Optional path policy: when set, every changed file must match at least one allowed path/prefix. */
-    allowedPaths?: string[];
-    /** Optional path policy: changed files must not match any forbidden path/prefix. */
-    forbiddenPaths?: string[];
-}
-export interface GoalDagNodeWorkspaceBinding {
-    /** Optional deterministic subagent worktree directory name under the adapter's worktree root. */
-    worktreeSlug?: string;
-    /** Optional exact Git branch name to create/reuse for the subagent worktree. */
-    branch?: string;
-    /** Optional base ref for creating the subagent worktree/branch. */
-    baseRef?: string;
-}
+import type { GoalDagConflictHints, GoalDagNodeKind, GoalValidationArtifactLock, GoalDagValidationContract, GoalDagNodeWorkspaceBinding } from "goal-contract";
+export type { GoalDagConflictHints, GoalDagNodeKind, GoalValidationArtifactLock, GoalDagValidationContract, GoalDagNodeWorkspaceBinding, };
 export interface GoalDagNode {
     goalId: string;
     nodeId: string;
