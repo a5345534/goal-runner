@@ -1215,22 +1215,33 @@ function formatRuntimeBandLines(
   const hiddenLabel = HIDDEN_CONTINUATION_STATE_LABELS[summary.hiddenContinuation.state];
   const pollLabel = CONTROLLER_POLL_STATE_LABELS[summary.controllerPoll.state];
 
-  const line1 = [
-    `Session=${sessionLabel}`,
-    `Hidden=${hiddenLabel}${summary.hiddenContinuation.reason ? `(${summary.hiddenContinuation.reason})` : ""}`,
-    `Poll=${pollLabel}${summary.controllerPoll.reason ? `(${summary.controllerPoll.reason})` : ""}`,
-    `Runners=${formatRunnerSummary(summary.runners)}`,
-  ].join("  ");
+  const sessionPart = `Session=${sessionLabel}`;
+  const hiddenPart = `Hidden=${hiddenLabel}${summary.hiddenContinuation.reason ? `(${summary.hiddenContinuation.reason})` : ""}`;
+  const pollPart = `Poll=${pollLabel}${summary.controllerPoll.reason ? `(${summary.controllerPoll.reason})` : ""}`;
+  const runnersPart = `Runners=${formatRunnerSummary(summary.runners)}`;
 
+  const fullLine = [sessionPart, hiddenPart, pollPart, runnersPart].join("  ");
   const healthColor =
     health.health === "OK" ? "success" :
     health.health === "Needs attention" ? "warning" :
     health.health === "Blocked" ? "error" : "dim";
-  const line2 = `Health=${health.health}  Next: ${health.nextAction}`;
+  const healthLine = `Health=${health.health}  Next: ${health.nextAction}`;
+
+  // Narrow terminal: split key=value pairs across 2 lines so all four
+  // states (Session, Hidden, Poll, Runners) remain visible at 80 columns.
+  if (fullLine.length > width && width > 0) {
+    const lineA = [sessionPart, hiddenPart].join("  ");
+    const lineB = [pollPart, runnersPart].join("  ");
+    return [
+      truncateToWidth(theme.fg("dim", lineA), width),
+      truncateToWidth(theme.fg("dim", lineB), width),
+      truncateToWidth(theme.fg(healthColor, healthLine), width),
+    ];
+  }
 
   return [
-    truncateToWidth(theme.fg("dim", line1), width),
-    truncateToWidth(theme.fg(healthColor, line2), width),
+    truncateToWidth(theme.fg("dim", fullLine), width),
+    truncateToWidth(theme.fg(healthColor, healthLine), width),
   ];
 }
 
