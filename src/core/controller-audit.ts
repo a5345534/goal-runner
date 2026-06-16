@@ -251,7 +251,46 @@ export function buildControllerAuditSnapshot(params: {
       maxValidation,
     ),
     progressSignals: buildProgressSignals(state, recentEvents),
+    costSignals: buildCostSignals(goal, recentEvents),
   };
+}
+
+function buildCostSignals(
+  goal: GoalRecord,
+  recentEvents: GoalLedgerEvent[],
+): GoalControllerAuditSnapshot["costSignals"] {
+  // Estimate tokens used in the window by counting turn_finished events.
+  // Falls back to undefined when the ledger does not carry per-event
+  // token details.
+  let tokensLastWindow: number | undefined;
+  let estimatedCostLastWindow: number | undefined;
+
+  const turnFinishedEvents = recentEvents.filter(
+    (event) => event.type === "turn_finished",
+  );
+
+  if (turnFinishedEvents.length > 0) {
+    // Sum token usage from event details when available.
+    let windowTokens = 0;
+    let hasTokenData = false;
+    for (const event of turnFinishedEvents) {
+      const details = event.details as Record<string, unknown> | undefined;
+      const tokens = details?.tokensUsed as number | undefined;
+      if (typeof tokens === "number" && Number.isFinite(tokens)) {
+        windowTokens += tokens;
+        hasTokenData = true;
+      }
+    }
+    if (hasTokenData) {
+      tokensLastWindow = windowTokens;
+      // Rough cost estimate: $0.01 per 1K tokens (conservative blended rate).
+      estimatedCostLastWindow = Math.round((windowTokens / 1000) * 0.01 * 100) / 100;
+    }
+  }
+
+  return tokensLastWindow !== undefined
+    ? { tokensLastWindow, estimatedCostLastWindow }
+    : undefined;
 }
 
 function buildValidationSummaryAggregates(
@@ -291,8 +330,11 @@ function buildProgressSignals(
   state: GoalOrchestrationState,
   recentEvents: GoalLedgerEvent[],
 ): GoalControllerAuditSnapshot["progressSignals"] {
-  const completedNodesLastWindow = state.nodes.filter(
-    (node) => node.status === "complete",
+  // Count nodes that reached terminal "complete" during the event window.
+  const completedNodesLastWindow = recentEvents.filter(
+    (event) =>
+      event.type === "controller_event" &&
+      (event.details?.event as string) === "node.completed",
   ).length;
 
   const validationFailuresLastWindow = recentEvents.filter(
@@ -307,16 +349,24 @@ function buildProgressSignals(
       (event.details?.event as string)?.startsWith("followup."),
   ).length;
 
-  const retriesLastWindow = state.subagents.reduce(
-    (sum, subagent) => sum + (subagent.retryCount ?? 0),
-    0,
-  );
+  // Count retry-indicating events in the window (recovery decisions,
+  // continuation retryable failures, and explicit retry controller events)
+  // instead of summing cumulative subagent.retryCount.
+  const retriesLastWindow = recentEvents.filter(
+    (event) =>
+      event.type === "continuation_retryable_failure" ||
+      (event.type === "controller_event" &&
+        ((event.details?.event as string)?.startsWith("recovery.") ?? false)),
+  ).length;
 
-  const integrationsFailedLastWindow = state.subagents.filter(
-    (subagent) =>
-      subagent.integrationState === "failed" ||
-      (subagent.integrationStatus !== undefined &&
-        subagent.integrationStatus.toLowerCase().includes("failed")),
+  // Count integration failures that occurred in the window.
+  const integrationsFailedLastWindow = recentEvents.filter(
+    (event) =>
+      event.type === "controller_event" &&
+      ((event.details?.event as string) === "integration.failed" ||
+        (event.details?.event as string)?.startsWith("integration.result") === true),
+  ).length || state.subagents.filter(
+    (subagent) => subagent.integrationState === "failed",
   ).length;
 
   return {
