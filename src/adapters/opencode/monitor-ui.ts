@@ -7,13 +7,20 @@
 //   * the goal's current status, budget, usage, and elapsed time
 //   * each DAG node's status, validation summary, and last activity
 //   * each subagent's status, branch, workspace, and self-reported note
+//   * the latest controller audit summary, when available
 //
 // The same renderer is reused by the controller poll loop so the opencode
 // session can be sent a refreshed snapshot when a new turn starts.
 
 import { existsSync } from "node:fs";
+import {
+  formatAuditSummary,
+  type AuditActionPolicyResult,
+  type GoalControllerAuditDecision,
+} from "../../core/index.js";
 import type {
   GoalDagNode,
+  GoalLedgerEvent,
   GoalRuntime,
   GoalSubagentRecord,
   GoalSummary,
@@ -29,6 +36,8 @@ export interface OpencodeMonitorRendererOptions {
   maxLineWidth?: number;
   /** Custom clock. */
   now?: () => Date;
+  /** Ledger events for audit summary extraction. */
+  ledgerEvents?: GoalLedgerEvent[];
 }
 
 const DEFAULT_MAX_LINE_WIDTH = 96;
@@ -39,7 +48,9 @@ export async function readOpencodeGoalMonitorSnapshot(
   options: OpencodeMonitorRendererOptions = {},
 ): Promise<OpencodeMonitorSnapshot> {
   const state = await runtime.getGoalOrchestrationState(goal.goalId);
-  const lines = renderOpencodeMonitorLines(goal, state, options);
+  // Fetch ledger events for audit summary when not explicitly provided.
+  const ledgerEvents = options.ledgerEvents ?? await runtime.listLedgerEvents(goal.sessionKey, goal.goalId);
+  const lines = renderOpencodeMonitorLines(goal, state, { ...options, ledgerEvents });
   return { lines, refreshedAt: new Date().toISOString() };
 }
 
@@ -56,6 +67,11 @@ export function renderOpencodeMonitorLines(
   lines.push(`Objective: ${truncate(goal.objective ?? goal.objectiveSummary ?? "", maxLineWidth)}`);
   if (goal.executionWorkspace) lines.push(`Workspace: ${goal.executionWorkspace}`);
   if (goal.sessionFile) lines.push(`Session: ${goal.sessionFile}`);
+
+  // Surface latest controller audit summary when available.
+  const auditSummary = extractLatestAuditSummary(options.ledgerEvents);
+  if (auditSummary) lines.push(`Audit: ${auditSummary}`);
+
   if (state.nodes.length === 0 && state.subagents.length === 0) {
     lines.push("(no DAG nodes or subagents yet)");
     return lines;
@@ -166,4 +182,62 @@ function truncate(text: string, maxWidth: number): string {
   if (text.length <= maxWidth) return text;
   if (maxWidth <= 4) return text.slice(0, maxWidth);
   return `${text.slice(0, maxWidth - 3)}...`;
+}
+
+/**
+ * Extracts the latest controller audit summary from ledger events.
+ * Returns a compact single-line summary suitable for monitor display,
+ * or `undefined` when no controller audit has run.
+ */
+function extractLatestAuditSummary(
+  ledgerEvents: GoalLedgerEvent[] | undefined,
+): string | undefined {
+  if (!ledgerEvents || ledgerEvents.length === 0) return undefined;
+
+  // Find the most recent controller_audit_finished event.
+  let latestFinished: GoalLedgerEvent | undefined;
+  for (const event of ledgerEvents) {
+    if (event.type === "controller_audit_finished") {
+      latestFinished = event;
+    }
+  }
+  if (!latestFinished) return undefined;
+
+  const details = latestFinished.details ?? {};
+  const decision = details as unknown as GoalControllerAuditDecision;
+  if (!decision.risk || !decision.summary) return undefined;
+
+  // Collect applied-action events that occurred at or after the finished event.
+  const finishedAt = latestFinished.at;
+  const appliedActions: AuditActionPolicyResult["applied"] = [];
+  for (const event of ledgerEvents) {
+    if (event.type !== "controller_audit_action_applied") continue;
+    if (event.at < finishedAt) continue;
+    const actionDetails = (event.details ?? {}) as Record<string, unknown>;
+    const actionKind = (actionDetails.action as string) ?? "pause-goal";
+    const findingKind = (actionDetails.matchedFindingKind as string) ?? "unknown";
+    const findingConfidence = (actionDetails.matchedFindingConfidence as "low" | "medium" | "high" | undefined) ?? "high";
+    appliedActions.push({
+      action: {
+        action: actionKind as GoalControllerAuditDecision["recommendedActions"][number]["action"],
+        reason: (actionDetails.reason as string) ?? "",
+        requiresUserApproval: false,
+        nodeId: actionDetails.nodeId as string | undefined,
+        subagentId: actionDetails.subagentId as string | undefined,
+      },
+      matchedFinding: {
+        kind: findingKind as GoalControllerAuditDecision["findings"][number]["kind"],
+        nodeId: actionDetails.nodeId as string | undefined,
+        subagentId: actionDetails.subagentId as string | undefined,
+        evidence: [],
+        confidence: findingConfidence,
+      },
+    });
+  }
+
+  try {
+    return formatAuditSummary(decision, appliedActions);
+  } catch {
+    return undefined;
+  }
 }
