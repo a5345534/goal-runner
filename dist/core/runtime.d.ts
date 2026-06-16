@@ -75,6 +75,7 @@ export declare class GoalRuntime {
     createOrReplaceGoal(sessionKey: string, objectiveInput: string, options?: {
         tokenBudget?: number;
         confirmReplace?: boolean;
+        continueIfIdle?: boolean;
     }): Promise<GoalToolResult>;
     editGoal(sessionKey: string, objectiveInput: string, options?: {
         tokenBudget?: number;

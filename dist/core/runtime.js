@@ -326,7 +326,8 @@ export class GoalRuntime {
         });
         await this.store.clearReservation(sessionKey);
         await this.callbacks.notifyGoalUpdated?.(goal);
-        await this.maybeContinueIfIdle(sessionKey);
+        if (options.continueIfIdle !== false)
+            await this.maybeContinueIfIdle(sessionKey);
         return { goal, message: existing ? "Goal updated." : "Goal created." };
     }
     async editGoal(sessionKey, objectiveInput, options = {}) {

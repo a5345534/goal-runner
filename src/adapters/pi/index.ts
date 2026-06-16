@@ -108,8 +108,17 @@ export default function goalPiExtension(pi: ExtensionAPI) {
   const runtime = new GoalRuntime({
     store,
     callbacks: {
-      readHarnessState: async (_sessionKey) => {
-        const ctx = requireContext(lastCtx);
+      readHarnessState: async (sessionKey) => {
+        const ctx = sessionContexts.get(sessionKey);
+        if (!ctx) {
+          return {
+            materialized: false,
+            activeTurnId: undefined,
+            queuedUserInput: false,
+            queuedTriggerTurn: false,
+            continuationSuppressed: true,
+          };
+        }
         return {
           materialized: Boolean(resolveSessionKey(ctx)),
           activeTurnId: ctx.isIdle?.() === false ? "pi-active-turn" : undefined,
@@ -118,7 +127,13 @@ export default function goalPiExtension(pi: ExtensionAPI) {
           continuationSuppressed: ctx.hasUI === false,
         };
       },
-      startHiddenGoalTurn: async (request) => startHiddenGoalTurn(pi, requireContext(lastCtx), request, startedAttempts),
+      startHiddenGoalTurn: async (request) => {
+        const targetCtx = sessionContexts.get(request.sessionKey);
+        if (!targetCtx) {
+          return { kind: "skipped" as const, reason: "target session context is not materialized" };
+        }
+        return startHiddenGoalTurn(pi, targetCtx, request, startedAttempts);
+      },
       injectSteeringContext: async (request) => {
         pi.sendMessage(
           {
@@ -564,7 +579,7 @@ async function startGoalOwnedPiSession(
 
   try {
     const executionSessionKey = `pi:${background.sessionFile}`;
-    const created = await runtime.createOrReplaceGoal(executionSessionKey, command.objective, { tokenBudget: command.tokenBudget });
+    const created = await runtime.createOrReplaceGoal(executionSessionKey, command.objective, { tokenBudget: command.tokenBudget, continueIfIdle: false });
     if (!created.goal) throw new Error(created.message);
     const shortGoalId = created.goal.goalId.slice(0, 8);
     const sessionName = `goal ${shortGoalId}: ${labelObjective}`;
@@ -2476,6 +2491,9 @@ async function startHiddenGoalTurn(
   }
   if (ctx.isIdle?.() === false) return { kind: "skipped" as const, reason: "active turn is running" };
   if (ctx.hasPendingMessages?.()) return { kind: "skipped" as const, reason: "user input is queued" };
+  if (resolveSessionKey(ctx) !== request.sessionKey) {
+    return { kind: "skipped" as const, reason: "request session does not match target context" };
+  }
 
   try {
     const hostTurnId = `pi-hidden-${request.attemptId}`;

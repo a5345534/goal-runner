@@ -417,7 +417,7 @@ export class GoalRuntime {
   async createOrReplaceGoal(
     sessionKey: string,
     objectiveInput: string,
-    options: { tokenBudget?: number; confirmReplace?: boolean } = {},
+    options: { tokenBudget?: number; confirmReplace?: boolean; continueIfIdle?: boolean } = {},
   ): Promise<GoalToolResult> {
     const objective = validateGoalObjective(objectiveInput);
     const now = this.nowIso();
@@ -457,7 +457,7 @@ export class GoalRuntime {
     });
     await this.store.clearReservation(sessionKey);
     await this.callbacks.notifyGoalUpdated?.(goal);
-    await this.maybeContinueIfIdle(sessionKey);
+    if (options.continueIfIdle !== false) await this.maybeContinueIfIdle(sessionKey);
     return { goal, message: existing ? "Goal updated." : "Goal created." };
   }
 

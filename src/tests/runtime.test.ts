@@ -515,3 +515,36 @@ test("clearing a goal does not delete the configured execution workspace", async
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("createOrReplaceGoal with continueIfIdle:false does not trigger hidden continuation", async () => {
+  const hiddenTurnRequests: HiddenGoalTurnRequest[] = [];
+  const runtime = new GoalRuntime({
+    store: new MemoryGoalStore(),
+    callbacks: {
+      readHarnessState: async () => ({
+        materialized: true,
+        activeTurnId: undefined,
+        queuedUserInput: false,
+        queuedTriggerTurn: false,
+        continuationSuppressed: false,
+      }),
+      startHiddenGoalTurn: async (request) => {
+        hiddenTurnRequests.push(request);
+        return { kind: "started" as const, hostTurnId: "turn-id" };
+      },
+    },
+  });
+
+  // Goal-owned start path: pass continueIfIdle:false.
+  const result = await runtime.createOrReplaceGoal("pi:/background/session.jsonl", "objective", {
+    continueIfIdle: false,
+  });
+  assert.ok(result.goal);
+  assert.equal(hiddenTurnRequests.length, 0, "hidden turn must not be triggered");
+
+  // Default behaviour: should still trigger continuation.
+  hiddenTurnRequests.length = 0;
+  const result2 = await runtime.createOrReplaceGoal("s2", "default", {});
+  assert.ok(result2.goal);
+  assert.equal(hiddenTurnRequests.length, 1, "default createOrReplaceGoal must still allow continuation");
+});
