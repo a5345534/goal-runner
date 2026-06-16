@@ -73,7 +73,7 @@ function makeEvent(overrides = {}) {
         goalId: "goal-audit-1",
         type: "controller_event",
         at: "2026-06-15T11:55:00.000Z",
-        details: { event: "node.completed", nodeId: "node-1" },
+        details: { event: "node.complete", nodeId: "node-1" },
         ...overrides,
     };
 }
@@ -346,7 +346,7 @@ test("buildControllerAuditSnapshot respects maxRecentEvents", () => {
             eventId: `e${i}`,
             type: "controller_event",
             at: `2026-06-15T11:5${i}:00.000Z`,
-            details: { event: "node.completed", nodeId: `node-${i}` },
+            details: { event: "node.complete", nodeId: `node-${i}` },
         }));
     }
     const snapshot = buildControllerAuditSnapshot({
@@ -358,7 +358,7 @@ test("buildControllerAuditSnapshot respects maxRecentEvents", () => {
     assert.ok(snapshot.recentControllerEvents.length <= 5);
     // Should keep the most recent events
     assert.equal(snapshot.recentControllerEvents[snapshot.recentControllerEvents.length - 1]
-        .type, "node.completed");
+        .type, "node.complete");
 });
 test("buildControllerAuditSnapshot respects maxRecentValidationResults", () => {
     const nodes = [];
@@ -380,7 +380,7 @@ test("buildControllerAuditSnapshot only includes controller_event typed events",
     const events = [
         makeEvent({
             type: "controller_event",
-            details: { event: "node.completed", nodeId: "node-1" },
+            details: { event: "node.complete", nodeId: "node-1" },
         }),
         makeEvent({
             type: "turn_started",
@@ -399,7 +399,7 @@ test("buildControllerAuditSnapshot only includes controller_event typed events",
     });
     // Only controller_event entries appear in the snapshot
     const types = snapshot.recentControllerEvents.map((e) => e.type);
-    assert.ok(types.includes("node.completed"));
+    assert.ok(types.includes("node.complete"));
     assert.ok(!types.includes("turn_started"));
     assert.ok(!types.includes("goal_created"));
 });
@@ -407,11 +407,11 @@ test("buildControllerAuditSnapshot progressSignals counts completed nodes", () =
     const events = [
         makeEvent({
             type: "controller_event",
-            details: { event: "node.completed", nodeId: "node-1" },
+            details: { event: "node.complete", nodeId: "node-1" },
         }),
         makeEvent({
             type: "controller_event",
-            details: { event: "node.completed", nodeId: "node-2" },
+            details: { event: "node.complete", nodeId: "node-2" },
         }),
         makeEvent({
             type: "controller_event",
@@ -480,15 +480,15 @@ test("buildControllerAuditSnapshot costSignals aggregates token data from turn_f
     const events = [
         makeEvent({
             type: "turn_finished",
-            details: { tokensUsed: 1500 },
+            details: { tokensUsedDelta: 1500 },
         }),
         makeEvent({
             type: "turn_finished",
-            details: { tokensUsed: 2500 },
+            details: { tokensUsedDelta: 2500 },
         }),
         makeEvent({
             type: "turn_finished",
-            // no tokensUsed detail
+            // no tokensUsedDelta detail
             details: { other: true },
         }),
     ];
@@ -1388,12 +1388,12 @@ test("scenario: cost-spike triggers pause (spec: Critical cost-spike triggers au
     const events = [
         makeEvent({
             type: "turn_finished",
-            details: { tokensUsed: 25000 },
+            details: { tokensUsedDelta: 25000 },
             at: "2026-06-15T11:50:00.000Z",
         }),
         makeEvent({
             type: "turn_finished",
-            details: { tokensUsed: 30000 },
+            details: { tokensUsedDelta: 30000 },
             at: "2026-06-15T11:52:00.000Z",
         }),
     ];
@@ -1454,17 +1454,17 @@ test("scenario: healthy progress returns noop (spec: Steady progress returns noo
     const events = [
         makeEvent({
             type: "controller_event",
-            details: { event: "node.completed", nodeId: "node-1" },
+            details: { event: "node.complete", nodeId: "node-1" },
             at: "2026-06-15T11:45:00.000Z",
         }),
         makeEvent({
             type: "controller_event",
-            details: { event: "node.completed", nodeId: "node-3" },
+            details: { event: "node.complete", nodeId: "node-3" },
             at: "2026-06-15T11:54:00.000Z",
         }),
         makeEvent({
             type: "turn_finished",
-            details: { tokensUsed: 500 },
+            details: { tokensUsedDelta: 500 },
             at: "2026-06-15T11:50:00.000Z",
         }),
     ];

@@ -171,6 +171,16 @@ export type AuditEventRecorder = (eventType: GoalControllerAuditLedgerEventType,
  */
 export declare function recordAuditActionEvents(result: AuditActionPolicyResult, decision: GoalControllerAuditDecision, recorder: AuditEventRecorder, at?: Date | string): Promise<void>;
 /**
+ * Records applied/skipped action decisions without recording a definitive
+ * pause event. Use {@link recordAuditActionEvents} when the caller has
+ * already successfully paused (or when working with a full-pipeline
+ * recorder). Callers that need to separate decision recording from the
+ * actual pause (for correct ledger ordering) should call this function
+ * before pausing and then emit `goal_paused_by_controller_audit` only after
+ * a successful pause.
+ */
+export declare function recordAuditActionDecisions(result: AuditActionPolicyResult, decision: GoalControllerAuditDecision, recorder: AuditEventRecorder, at?: Date | string): Promise<void>;
+/**
  * Renders a compact single-line audit summary suitable for monitor/status
  * display.
  *

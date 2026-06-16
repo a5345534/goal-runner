@@ -117,7 +117,7 @@ function buildCostSignals(goal, recentEvents) {
         let hasTokenData = false;
         for (const event of turnFinishedEvents) {
             const details = event.details;
-            const tokens = details?.tokensUsed;
+            const tokens = details?.tokensUsedDelta;
             if (typeof tokens === "number" && Number.isFinite(tokens)) {
                 windowTokens += tokens;
                 hasTokenData = true;
@@ -157,7 +157,7 @@ function buildValidationSummaryAggregates(state, recentEvents, maxResults) {
 function buildProgressSignals(state, recentEvents) {
     // Count nodes that reached terminal "complete" during the event window.
     const completedNodesLastWindow = recentEvents.filter((event) => event.type === "controller_event" &&
-        event.details?.event === "node.completed").length;
+        event.details?.event === "node.complete").length;
     const validationFailuresLastWindow = recentEvents.filter((event) => event.type === "controller_event" &&
         event.details?.event === "validation.failed").length;
     const followupsLastWindow = recentEvents.filter((event) => event.type === "controller_event" &&
@@ -386,6 +386,27 @@ function buildSkipReason(action, risk, hasHighConfidence, pauseOnCritical) {
  * durable goal ledger.
  */
 export async function recordAuditActionEvents(result, decision, recorder, at) {
+    await recordAuditActionDecisions(result, decision, recorder, at);
+    if (result.shouldPauseGoal) {
+        await recorder("goal_paused_by_controller_audit", {
+            risk: decision.risk,
+            summary: decision.summary,
+            pauseReason: result.pauseReason,
+            appliedActions: result.applied.map((entry) => entry.action.action),
+            findingKinds: decision.findings.map((finding) => finding.kind),
+        }, at);
+    }
+}
+/**
+ * Records applied/skipped action decisions without recording a definitive
+ * pause event. Use {@link recordAuditActionEvents} when the caller has
+ * already successfully paused (or when working with a full-pipeline
+ * recorder). Callers that need to separate decision recording from the
+ * actual pause (for correct ledger ordering) should call this function
+ * before pausing and then emit `goal_paused_by_controller_audit` only after
+ * a successful pause.
+ */
+export async function recordAuditActionDecisions(result, decision, recorder, at) {
     for (const entry of result.applied) {
         await recorder("controller_audit_action_applied", {
             action: entry.action.action,
@@ -395,15 +416,6 @@ export async function recordAuditActionEvents(result, decision, recorder, at) {
             nodeId: entry.action.nodeId ?? entry.matchedFinding.nodeId,
             subagentId: entry.action.subagentId ?? entry.matchedFinding.subagentId,
             risk: decision.risk,
-        }, at);
-    }
-    if (result.shouldPauseGoal) {
-        await recorder("goal_paused_by_controller_audit", {
-            risk: decision.risk,
-            summary: decision.summary,
-            pauseReason: result.pauseReason,
-            appliedActions: result.applied.map((entry) => entry.action.action),
-            findingKinds: decision.findings.map((finding) => finding.kind),
         }, at);
     }
     for (const entry of result.skipped) {

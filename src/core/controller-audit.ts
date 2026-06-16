@@ -275,7 +275,7 @@ function buildCostSignals(
     let hasTokenData = false;
     for (const event of turnFinishedEvents) {
       const details = event.details as Record<string, unknown> | undefined;
-      const tokens = details?.tokensUsed as number | undefined;
+      const tokens = details?.tokensUsedDelta as number | undefined;
       if (typeof tokens === "number" && Number.isFinite(tokens)) {
         windowTokens += tokens;
         hasTokenData = true;
@@ -334,7 +334,7 @@ function buildProgressSignals(
   const completedNodesLastWindow = recentEvents.filter(
     (event) =>
       event.type === "controller_event" &&
-      (event.details?.event as string) === "node.completed",
+      (event.details?.event as string) === "node.complete",
   ).length;
 
   const validationFailuresLastWindow = recentEvents.filter(
@@ -650,6 +650,38 @@ export async function recordAuditActionEvents(
   recorder: AuditEventRecorder,
   at?: Date | string,
 ): Promise<void> {
+  await recordAuditActionDecisions(result, decision, recorder, at);
+
+  if (result.shouldPauseGoal) {
+    await recorder(
+      "goal_paused_by_controller_audit",
+      {
+        risk: decision.risk,
+        summary: decision.summary,
+        pauseReason: result.pauseReason,
+        appliedActions: result.applied.map((entry) => entry.action.action),
+        findingKinds: decision.findings.map((finding) => finding.kind),
+      },
+      at,
+    );
+  }
+}
+
+/**
+ * Records applied/skipped action decisions without recording a definitive
+ * pause event. Use {@link recordAuditActionEvents} when the caller has
+ * already successfully paused (or when working with a full-pipeline
+ * recorder). Callers that need to separate decision recording from the
+ * actual pause (for correct ledger ordering) should call this function
+ * before pausing and then emit `goal_paused_by_controller_audit` only after
+ * a successful pause.
+ */
+export async function recordAuditActionDecisions(
+  result: AuditActionPolicyResult,
+  decision: GoalControllerAuditDecision,
+  recorder: AuditEventRecorder,
+  at?: Date | string,
+): Promise<void> {
   for (const entry of result.applied) {
     await recorder(
       "controller_audit_action_applied",
@@ -661,20 +693,6 @@ export async function recordAuditActionEvents(
         nodeId: entry.action.nodeId ?? entry.matchedFinding.nodeId,
         subagentId: entry.action.subagentId ?? entry.matchedFinding.subagentId,
         risk: decision.risk,
-      },
-      at,
-    );
-  }
-
-  if (result.shouldPauseGoal) {
-    await recorder(
-      "goal_paused_by_controller_audit",
-      {
-        risk: decision.risk,
-        summary: decision.summary,
-        pauseReason: result.pauseReason,
-        appliedActions: result.applied.map((entry) => entry.action.action),
-        findingKinds: decision.findings.map((finding) => finding.kind),
       },
       at,
     );

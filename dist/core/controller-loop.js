@@ -2,7 +2,7 @@ import { normalizeExceptionSignature } from "./exception-handler.js";
 import { renderExecutorGuardrailLines } from "./executor-prompt.js";
 import { nodeRequiresSubagentIntegration, requiredSubagentIntegrationTerminalSuccess } from "./integration.js";
 import { attachPreparedResourcesToNode, recordAdapterObservationOnNode, recordRecoveryDecisionOnNode, supersedePreparedResourcesOnNode, withGoalDagNodeLifecyclePhase } from "./lifecycle.js";
-import { applyAuditActions, buildControllerAuditSnapshot, formatAuditSummary, isAuditDue, recordAuditActionEvents, validateControllerAuditDecision, } from "./controller-audit.js";
+import { applyAuditActions, buildControllerAuditSnapshot, formatAuditSummary, isAuditDue, recordAuditActionDecisions, validateControllerAuditDecision, } from "./controller-audit.js";
 const SYNCABLE_SUBAGENT_STATUSES = new Set(["sessionStarted", "running", "idle", "blocked"]);
 const NON_TERMINAL_SUBAGENT_STATUSES = new Set([
     "planned",
@@ -787,33 +787,55 @@ async function runControllerAuditGate(runtime, goalId, options, result, tickStar
     // --- Apply safe actions ---
     const policyResult = applyAuditActions(decision, auditOptions);
     // --- Record action events ---
+    // --- Record action decisions (applied/skipped) ---
+    // These are informational records of what the policy decided, recorded
+    // before the actual pause so the ledger preserves the recommendation
+    // even if the pause fails.
     const auditEventRecorder = async (eventType, details, at) => {
         await recordControllerEvent(runtime, goalId, eventType, details, at ?? tickStartedAt);
     };
-    await recordAuditActionEvents(policyResult, decision, auditEventRecorder, tickStartedAt);
+    await recordAuditActionDecisions(policyResult, decision, auditEventRecorder, tickStartedAt);
     // --- Apply auto-pause if indicated ---
     if (policyResult.shouldPauseGoal) {
         if (runtime.auditPauseGoal) {
             try {
                 await runtime.auditPauseGoal(goalId, policyResult.pauseReason ?? "Controller audit auto-pause");
+                // Pause succeeded: record the definitive event.
+                await recordControllerEvent(runtime, goalId, "goal_paused_by_controller_audit", {
+                    risk: decision.risk,
+                    summary: decision.summary,
+                    pauseReason: policyResult.pauseReason,
+                    findingKinds: decision.findings.map((finding) => finding.kind),
+                }, tickStartedAt);
                 result.auditPausedGoal = true;
             }
             catch (error) {
                 const errorMessage = error instanceof Error ? error.message : String(error);
+                await recordControllerEvent(runtime, goalId, "controller_audit_action_failed", {
+                    action: "pause-goal",
+                    error: errorMessage,
+                    summary: decision.summary,
+                    risk: decision.risk,
+                }, tickStartedAt);
                 await recordControllerEvent(runtime, goalId, "controller_audit_finished", {
-                    outcome: "paused",
+                    outcome: "pause_failed",
                     pauseError: errorMessage,
                     summary: decision.summary,
                     risk: decision.risk,
                 }, tickStartedAt);
-                // Still mark audit as run even if pause failed.
                 result.auditRun = true;
                 result.auditSummary = formatAuditSummary(decision, policyResult.applied);
                 return;
             }
         }
-        // auditPauseGoal not available: still record that we would have paused.
-        result.auditPausedGoal = policyResult.shouldPauseGoal;
+        else {
+            // auditPauseGoal not available: record skipped, do not claim paused.
+            await recordControllerEvent(runtime, goalId, "controller_audit_action_skipped", {
+                action: "pause-goal",
+                reason: "auditPauseGoal port method is not available on this runtime.",
+                risk: decision.risk,
+            }, tickStartedAt);
+        }
     }
     // --- Record audit finished ---
     await recordControllerEvent(runtime, goalId, "controller_audit_finished", {

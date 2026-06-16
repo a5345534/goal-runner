@@ -655,7 +655,7 @@ export class GoalRuntime {
   }
 
   async turnFinished(context: TurnContext, completed = true): Promise<void> {
-    await this.accountUsage(context.sessionKey, context.tokenUsage);
+    const tokenDelta = await this.accountUsage(context.sessionKey, context.tokenUsage);
     const turn = this.activeTurns.get(context.sessionKey);
     this.activeTurns.delete(context.sessionKey);
     const goal = await this.store.getCurrentGoal(context.sessionKey);
@@ -664,6 +664,8 @@ export class GoalRuntime {
       completed,
       madeMeaningfulProgress: turn?.madeMeaningfulProgress ?? false,
       stopped: turn?.stopped,
+      tokensUsedDelta: tokenDelta,
+      totalTokensUsed: goal?.tokensUsed,
     });
     if (!completed || turn?.stopped) return;
     if (goal && goal.status === "active") {
@@ -840,16 +842,17 @@ export class GoalRuntime {
     return updated;
   }
 
-  private async accountUsage(sessionKey: string, tokenUsage?: TokenUsageSnapshot): Promise<void> {
+  private async accountUsage(sessionKey: string, tokenUsage?: TokenUsageSnapshot): Promise<number> {
     const goal = await this.store.getCurrentGoal(sessionKey);
-    if (!goal) return;
+    if (!goal) return 0;
     const turn = this.activeTurns.get(sessionKey);
     const now = this.config.now();
     let tokensUsed = goal.tokensUsed;
+    let tokenDelta = 0;
     if (tokenUsage?.totalTokens !== undefined) {
       const previous = turn?.lastTokenTotal ?? 0;
-      const delta = Math.max(tokenUsage.totalTokens - previous, 0);
-      tokensUsed += delta;
+      tokenDelta = Math.max(tokenUsage.totalTokens - previous, 0);
+      tokensUsed += tokenDelta;
       if (turn) turn.lastTokenTotal = tokenUsage.totalTokens;
     }
 
@@ -861,6 +864,7 @@ export class GoalRuntime {
       updatedAt: this.nowIso(now),
     });
     if (turn) turn.startedAt = now;
+    return tokenDelta;
   }
 
   private async readHarnessState(sessionKey: string): Promise<HarnessState> {
