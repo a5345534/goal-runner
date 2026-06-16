@@ -2,17 +2,22 @@
 //
 // The opencode harness owns the TUI; the opencode adapter cannot mount a
 // custom interactive controller. Instead, `/goal monitor [ref]` returns a
-// pure-text, multi-line snapshot of:
+// pure-text, multi-line snapshot structured into four sections:
 //
-//   * the goal's current status, budget, usage, and elapsed time
-//   * each DAG node's status, validation summary, and last activity
-//   * each subagent's status, branch, workspace, and self-reported note
-//   * the latest controller audit summary, when available
+//   STATUS         — goal identity, status, tokens, elapsed, workspace, activity
+//   SUMMARY        — health, problem, progress, runtime, and next-action labels
+//   EXECUTION PLAN — per-node display states with symbols and summaries
+//   RECENT EVENTS  — filtered meaningful ledger events (3-8)
+//
+// Full controller history is available on demand (debug mode) but no longer
+// dominates the first screen.
 //
 // The same renderer is reused by the controller poll loop so the opencode
 // session can be sent a refreshed snapshot when a new turn starts.
+//
+// Health taxonomy and problem summarisation are shared with the Pi TUI via
+// the `src/adapters/monitor-overview.ts` module.
 
-import { existsSync } from "node:fs";
 import {
   formatAuditSummary,
   type AuditActionPolicyResult,
@@ -29,13 +34,13 @@ import type {
 } from "../../core/index.js";
 import {
   buildGoalMonitorRuntimeSummary,
-  deriveMonitorHealth,
   type GoalMonitorRuntimeSummary,
-  type MonitorHealth,
-  SESSION_STATE_LABELS,
-  HIDDEN_CONTINUATION_STATE_LABELS,
-  CONTROLLER_POLL_STATE_LABELS,
 } from "../pi/monitor-ui.js";
+import {
+  buildGoalMonitorOverview,
+  EXTENDED_MONITOR_HEALTH_LABELS,
+  MONITOR_NODE_DISPLAY_STATE_CHARS,
+} from "../monitor-overview.js";
 
 export interface OpencodeMonitorSnapshot {
   lines: string[];
@@ -64,8 +69,13 @@ export async function readOpencodeGoalMonitorSnapshot(
 ): Promise<OpencodeMonitorSnapshot> {
   const state = await runtime.getGoalOrchestrationState(goal.goalId);
   // Fetch ledger events for audit summary when not explicitly provided.
-  const ledgerEvents = options.ledgerEvents ?? await runtime.listLedgerEvents(goal.sessionKey, goal.goalId);
-  const lines = renderOpencodeMonitorLines(goal, state, { ...options, ledgerEvents });
+  const ledgerEvents =
+    options.ledgerEvents ??
+    (await runtime.listLedgerEvents(goal.sessionKey, goal.goalId));
+  const lines = renderOpencodeMonitorLines(goal, state, {
+    ...options,
+    ledgerEvents,
+  });
   return { lines, refreshedAt: new Date().toISOString() };
 }
 
@@ -78,20 +88,7 @@ export function renderOpencodeMonitorLines(
   const now = options.now ?? (() => new Date());
   const lines: string[] = [];
 
-  // ── STATUS section ──
-  lines.push(`── STATUS ──`);
-  lines.push(`Goal ${goal.shortGoalId} monitor — refreshed ${now().toISOString()}`);
-  lines.push(`Status: ${goal.status}  Tokens: ${formatTokens(goal)}  Elapsed: ${formatSeconds(goal.timeUsedSeconds)}`);
-  lines.push(`Objective: ${truncate(goal.objective ?? goal.objectiveSummary ?? "", maxLineWidth)}`);
-  if (goal.executionWorkspace) lines.push(`Workspace: ${goal.executionWorkspace}`);
-  if (goal.sessionFile) lines.push(`Session: ${goal.sessionFile}`);
-  if (goal.activityState) lines.push(`Activity: ${goal.activityState}`);
-
-  // Surface latest controller audit summary when available.
-  const auditSummary = extractLatestAuditSummary(options.ledgerEvents);
-  if (auditSummary) lines.push(`Audit: ${auditSummary}`);
-
-  // ── RUNTIME section ──
+  // ── Build the runtime summary (shared with Pi TUI) ──
   const runtimeSummary = buildGoalMonitorRuntimeSummary(
     goal,
     state.subagents,
@@ -101,108 +98,87 @@ export function renderOpencodeMonitorLines(
       ledgerEvents: options.ledgerEvents,
     },
   );
+
+  // ── Build the structured overview model (shared with Pi TUI) ──
+  const overview = buildGoalMonitorOverview(
+    goal,
+    {
+      nodes: state.nodes,
+      subagents: state.subagents,
+      ledgerEvents: options.ledgerEvents,
+    },
+    runtimeSummary,
+  );
+
+  // ── STATUS section ──
+  lines.push("── STATUS ──");
+  lines.push(
+    `Goal ${goal.shortGoalId} monitor — refreshed ${now().toISOString()}`,
+  );
+  lines.push(
+    `Status: ${goal.status}  Tokens: ${formatTokens(goal)}  Elapsed: ${formatSeconds(goal.timeUsedSeconds)}`,
+  );
+  lines.push(
+    `Objective: ${truncate(goal.objective ?? goal.objectiveSummary ?? "", maxLineWidth)}`,
+  );
+  if (goal.executionWorkspace)
+    lines.push(`Workspace: ${goal.executionWorkspace}`);
+  if (goal.sessionFile) lines.push(`Session: ${goal.sessionFile}`);
+  if (goal.activityState) lines.push(`Activity: ${goal.activityState}`);
+
+  // Surface latest controller audit summary when available.
+  const auditSummary = extractLatestAuditSummary(options.ledgerEvents);
+  if (auditSummary) lines.push(`Audit: ${auditSummary}`);
+
+  // ── SUMMARY section ──
   lines.push("");
-  lines.push(`── RUNTIME ──`);
-  lines.push(...formatOpencodeRuntimeSummary(runtimeSummary));
+  lines.push("── SUMMARY ──");
+  lines.push(
+    `Health: ${EXTENDED_MONITOR_HEALTH_LABELS[overview.health] ?? overview.health}`,
+  );
+  lines.push(`Problem: ${overview.problemLabel}`);
+  lines.push(`Progress: ${overview.progressLabel}`);
+  lines.push(`Runtime: ${overview.runtimeLabel}`);
+  lines.push(`Next Action: ${overview.nextActionLabel}`);
 
-  // ── Health line within RUNTIME ──
-  const health = deriveMonitorHealth(runtimeSummary, goal, state.subagents, state.nodes);
-  const opencodeNextAction = adaptNextActionForOpenCode(health.nextAction);
-  lines.push(`Health: ${health.health}`);
-
-  // ── PROGRESS section ──
+  // ── EXECUTION PLAN section ──
   lines.push("");
-  lines.push(`── PROGRESS ──`);
+  lines.push("── EXECUTION PLAN ──");
 
-  if (state.nodes.length === 0 && state.subagents.length === 0) {
+  if (overview.nodeDisplayStates.length === 0) {
     lines.push("(no DAG nodes or subagents yet)");
-    // ── NEXT ACTION section ──
-    lines.push("");
-    lines.push(`── NEXT ACTION ──`);
-    lines.push(truncate(opencodeNextAction, maxLineWidth));
-    return lines;
+  } else {
+    for (const nds of overview.nodeDisplayStates) {
+      const stateChar =
+        MONITOR_NODE_DISPLAY_STATE_CHARS[nds.displayState] ?? "?";
+      lines.push(
+        truncate(`${stateChar} ${nds.slug}: ${nds.summary}`, maxLineWidth),
+      );
+    }
+    // Selected detail — highlights the most important node based on health.
+    if (overview.selectedDetail) {
+      lines.push("");
+      lines.push(
+        `Detail: ${truncate(overview.selectedDetail, maxLineWidth)}`,
+      );
+    }
   }
 
-  const subagentsByNode = groupSubagentsByNode(state.subagents);
-  // Show runner summary before per-runner details.
-  const runnerSummaryLine = formatOpencodeRunnerSummary(runtimeSummary.runners);
-  lines.push(`Runners: ${runnerSummaryLine}`);
-  lines.push(`Nodes: ${state.nodes.length}  Subagents: ${state.subagents.length}`);
-
-  state.nodes.forEach((node, index) => {
-    lines.push("");
-    lines.push(
-      `${index + 1}. [${node.status}] ${truncate(node.slug || node.nodeId, maxLineWidth)} ` +
-        `phase=${node.lifecyclePhase ?? "-"} runtime=${formatRuntime(node.createdAt, now())} updated=${formatAgo(node.updatedAt, now())}`,
-    );
-    if (node.preparedResources) {
-      const resourceParts = [
-        node.preparedResources.workspacePath ? `workspace=${node.preparedResources.workspacePath}` : undefined,
-        node.preparedResources.branch ? `branch=${node.preparedResources.branch}` : undefined,
-        node.preparedResources.sessionId ? `session=${node.preparedResources.sessionId}` : undefined,
-        node.preparedResources.modelArg ? `model=${node.preparedResources.modelArg}` : undefined,
-      ].filter((part): part is string => Boolean(part));
-      if (resourceParts.length) lines.push(`   resources: ${truncate(resourceParts.join(" "), maxLineWidth - 3)}`);
-    }
-    if (node.lastAdapterObservation) {
-      const observation = `${node.lastAdapterObservation.kind}${node.lastAdapterObservation.error ? ` error=${node.lastAdapterObservation.error}` : node.lastAdapterObservation.summary ? ` summary=${node.lastAdapterObservation.summary}` : ""}`;
-      lines.push(`   observation: ${truncate(observation, maxLineWidth - 3)}`);
-    }
-    if (node.lastRecoveryDecision) {
-      const decision = `${node.lastRecoveryDecision.action}${node.lastRecoveryDecision.ruleId ? ` rule=${node.lastRecoveryDecision.ruleId}` : ""}: ${node.lastRecoveryDecision.reason}`;
-      lines.push(`   recovery: ${truncate(decision, maxLineWidth - 3)}`);
-    }
-    if (node.lastValidationSummary) lines.push(`   validation: ${truncate(node.lastValidationSummary, maxLineWidth - 3)}`);
-    if (node.modelScenario || node.modelArg) {
-      const parts: string[] = [];
-      if (node.modelScenario) parts.push(`scenario=${node.modelScenario}`);
-      if (node.modelArg) parts.push(`model=${node.modelArg}`);
-      lines.push(`   model: ${truncate(parts.join(" "), maxLineWidth - 3)}`);
-    }
-    const subagents = subagentsByNode.get(node.nodeId) ?? [];
-    if (subagents.length === 0) {
-      lines.push(`   subagents: none`);
-      return;
-    }
-    for (const subagent of subagents) {
-      lines.push(
-        `   ↳ [${subagent.status}] ${truncate(subagent.subagentId, maxLineWidth - 6)} ` +
-          `runtime=${formatRuntime(subagent.createdAt, now())} last=${formatAgo(subagent.lastActivityAt ?? subagent.updatedAt, now())}`,
-      );
-      if (subagent.branch) lines.push(`      branch: ${truncate(subagent.branch, maxLineWidth - 6)}`);
-      if (subagent.workspacePath) {
-        const stillExists = subagent.workspacePath && existsSync(subagent.workspacePath);
-        lines.push(
-          `      workspace: ${truncate(subagent.workspacePath, maxLineWidth - 6)}${stillExists ? "" : " (missing)"}`,
-        );
-      }
-      if (subagent.lastAdapterObservation) lines.push(`      observation: ${truncate(subagent.lastAdapterObservation.kind, maxLineWidth - 6)}`);
-      if (subagent.lastRecoveryDecision) {
-        const recovery = `${subagent.lastRecoveryDecision.action}${subagent.lastRecoveryDecision.ruleId ? ` rule=${subagent.lastRecoveryDecision.ruleId}` : ""}`;
-        lines.push(`      recovery: ${truncate(recovery, maxLineWidth - 6)}`);
-      }
-      const note = subagent.integrationStatus ?? subagent.selfReportedResult;
-      if (note) lines.push(`      note: ${truncate(note, maxLineWidth - 6)}`);
-    }
-  });
-
-  // ── NEXT ACTION section ──
+  // ── RECENT EVENTS section ──
   lines.push("");
-  lines.push(`── NEXT ACTION ──`);
-  lines.push(truncate(opencodeNextAction, maxLineWidth));
+  lines.push("── RECENT EVENTS ──");
+  if (overview.recentEvents.length === 0) {
+    lines.push("(no recent meaningful events)");
+  } else {
+    for (const evt of overview.recentEvents) {
+      lines.push(truncate(evt, maxLineWidth));
+    }
+  }
 
   return lines;
 }
 
-function groupSubagentsByNode(subagents: GoalSubagentRecord[]): Map<string, GoalSubagentRecord[]> {
-  const map = new Map<string, GoalSubagentRecord[]>();
-  for (const subagent of subagents) {
-    const list = map.get(subagent.nodeId) ?? [];
-    list.push(subagent);
-    map.set(subagent.nodeId, list);
-  }
-  return map;
-}
+// ── Private helpers ──
 
 function formatTokens(goal: GoalSummary): string {
   if (goal.tokenBudget === undefined) return `${goal.tokensUsed}`;
@@ -211,65 +187,15 @@ function formatTokens(goal: GoalSummary): string {
 
 function formatSeconds(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3_600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  if (seconds < 3_600)
+    return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
   return `${Math.floor(seconds / 3_600)}h ${Math.floor((seconds % 3_600) / 60)}m`;
-}
-
-function formatRuntime(startedAt: string | undefined, now: Date): string {
-  if (!startedAt) return "-";
-  const started = Date.parse(startedAt);
-  if (!Number.isFinite(started)) return "-";
-  return formatElapsedSeconds(Math.max(0, Math.floor((now.getTime() - started) / 1_000)));
-}
-
-function formatAgo(timestamp: string | undefined, now: Date): string {
-  if (!timestamp) return "-";
-  const parsed = Date.parse(timestamp);
-  if (!Number.isFinite(parsed)) return "-";
-  return `${formatElapsedSeconds(Math.max(0, Math.floor((now.getTime() - parsed) / 1_000)))} ago`;
-}
-
-function formatElapsedSeconds(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3_600) return `${Math.floor(seconds / 60)}m${seconds % 60 ? ` ${seconds % 60}s` : ""}`;
-  return `${Math.floor(seconds / 3_600)}h${Math.floor((seconds % 3_600) / 60) ? ` ${Math.floor((seconds % 3_600) / 60)}m` : ""}`;
 }
 
 function truncate(text: string, maxWidth: number): string {
   if (text.length <= maxWidth) return text;
   if (maxWidth <= 4) return text.slice(0, maxWidth);
   return `${text.slice(0, maxWidth - 3)}...`;
-}
-
-/** Format the runtime summary as a compact multi-line block for OpenCode text output. */
-function formatOpencodeRuntimeSummary(summary: GoalMonitorRuntimeSummary): string[] {
-  const sessionLabel = SESSION_STATE_LABELS[summary.session.state];
-  const hiddenLabel = HIDDEN_CONTINUATION_STATE_LABELS[summary.hiddenContinuation.state];
-  const pollLabel = CONTROLLER_POLL_STATE_LABELS[summary.controllerPoll.state];
-
-  const result = [
-    `Session=${sessionLabel}  Hidden=${hiddenLabel}${summary.hiddenContinuation.reason ? ` (${summary.hiddenContinuation.reason})` : ""}  Poll=${pollLabel}${summary.controllerPoll.reason ? ` (${summary.controllerPoll.reason})` : ""}`,
-    `Runners: ${formatOpencodeRunnerSummary(summary.runners)}`,
-  ];
-
-  if (summary.controllerPoll.lastPollAt) {
-    result.push(`Last poll: ${summary.controllerPoll.lastPollAt}`);
-  }
-  if (summary.hiddenContinuation.attemptId) {
-    result.push(`Continuation attempt: ${summary.hiddenContinuation.attemptId}`);
-  }
-
-  return result;
-}
-
-function formatOpencodeRunnerSummary(runners: GoalMonitorRuntimeSummary["runners"]): string {
-  const parts: string[] = [];
-  if (runners.running > 0) parts.push(`${runners.running} running`);
-  if (runners.stopped > 0) parts.push(`${runners.stopped} stopped`);
-  if (runners.duplicateStopped > 0) parts.push(`${runners.duplicateStopped} duplicate`);
-  if (runners.archived > 0) parts.push(`${runners.archived} archived`);
-  if (runners.failed > 0) parts.push(`${runners.failed} failed`);
-  return parts.length > 0 ? parts.join(", ") : "none";
 }
 
 /**
@@ -303,8 +229,16 @@ function extractLatestAuditSummary(
     if (event.at < finishedAt) continue;
     const actionDetails = (event.details ?? {}) as Record<string, unknown>;
     const actionKind = (actionDetails.action as string) ?? "pause-goal";
-    const findingKind = (actionDetails.matchedFindingKind as string) ?? "unknown";
-    const findingConfidence = (actionDetails.matchedFindingConfidence as "low" | "medium" | "high" | undefined) ?? "high";
+    const findingKind =
+      (actionDetails.matchedFindingKind as string) ?? "unknown";
+    const findingConfidence =
+      (
+        actionDetails.matchedFindingConfidence as
+          | "low"
+          | "medium"
+          | "high"
+          | undefined
+      ) ?? "high";
     appliedActions.push({
       action: {
         action: actionKind as GoalControllerAuditDecision["recommendedActions"][number]["action"],
@@ -328,16 +262,4 @@ function extractLatestAuditSummary(
   } catch {
     return undefined;
   }
-}
-
-/**
- * Adapt Pi TUI-specific next-action language for the OpenCode text monitor.
- * Shared `deriveMonitorHealth` returns next-action strings that reference Pi
- * TUI navigation (nodeList, runnerList) and row actions (pause, clear).  The
- * OpenCode text monitor rewrites these references to be adapter-agnostic.
- */
-function adaptNextActionForOpenCode(piNextAction: string): string {
-  return piNextAction
-    .replace(/via nodeList → runnerList/, "and runners in output above")
-    .replace(/or pause\/clear goal/, "or take manual action");
 }
