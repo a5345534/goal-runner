@@ -1,18 +1,7 @@
 /**
- * Shared supported required-evidence token registry.
+ * Compatibility re-export from goal-contract.
  *
- * This module is the single source of truth for controller-enforced
- * `validation.requiredEvidence` tokens.  Every consumer — parser, schema,
- * validation runner, docs, tests, and future adapters — must reference
- * this registry instead of maintaining its own copy.
+ * goal-contract is the canonical pipeline-wide source of truth for
+ * controller-enforced `validation.requiredEvidence` tokens.
  */
-export declare const SUPPORTED_REQUIRED_EVIDENCE: readonly ["validators-ran", "locked-artifacts-unchanged", "implementation-diff-present", "non-test-diff-present", "post-merge-validation-ran", "audit-report-present"];
-/** Closed union derived from the canonical token list. */
-export type GoalValidationEvidenceRequirement = (typeof SUPPORTED_REQUIRED_EVIDENCE)[number];
-/** O(1) lookup set built from the canonical token list. */
-export declare const SUPPORTED_REQUIRED_EVIDENCE_SET: ReadonlySet<string>;
-/**
- * Type guard / runtime check to determine whether a string value is a
- * supported controller-enforced evidence token.
- */
-export declare function isSupportedRequiredEvidence(value: string): value is GoalValidationEvidenceRequirement;
+export { SUPPORTED_REQUIRED_EVIDENCE, SUPPORTED_REQUIRED_EVIDENCE_SET, isSupportedRequiredEvidence, requireSupportedRequiredEvidence, type GoalValidationEvidenceRequirement, } from "goal-contract";

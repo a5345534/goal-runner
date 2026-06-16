@@ -87,5 +87,8 @@
   },
   "engines": {
     "node": ">=22.5.0"
+  },
+  "dependencies": {
+    "goal-contract": "github:a5345534/goal-contract#95cc0fc"
   }
 }
