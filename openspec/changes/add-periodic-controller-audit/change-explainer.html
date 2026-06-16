@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="openspec-explainer-mode" content="decision-review">
+  <title>add-periodic-controller-audit 決策審查</title>
+  <style>
+    :root { color-scheme: light; --bg:#f7f8fb; --card:#ffffff; --ink:#172033; --muted:#5b667a; --line:#d8deea; --accent:#3157d5; --danger:#b42318; --ok:#027a48; --warn:#b54708; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:var(--bg); color:var(--ink); line-height:1.6; }
+    header { padding:32px clamp(16px, 4vw, 56px); background:linear-gradient(135deg, #172033, #3157d5); color:white; }
+    header p { max-width: 980px; color:#e6ebff; }
+    nav { position:sticky; top:0; z-index:10; display:flex; gap:8px; overflow:auto; padding:10px clamp(12px, 3vw, 40px); background:#ffffffee; border-bottom:1px solid var(--line); backdrop-filter: blur(10px); }
+    nav a { white-space:nowrap; color:var(--accent); text-decoration:none; font-weight:700; padding:8px 10px; border-radius:999px; }
+    nav a:hover { background:#eef2ff; }
+    main { width:min(1180px, 100%); margin:0 auto; padding:24px clamp(14px, 3vw, 32px) 56px; }
+    section { background:var(--card); border:1px solid var(--line); border-radius:18px; padding:22px; margin:18px 0; box-shadow:0 8px 28px rgba(23,32,51,.06); }
+    h1 { margin:0 0 8px; font-size:clamp(1.8rem, 4vw, 3.2rem); }
+    h2 { margin-top:0; color:#101828; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    pre { overflow:auto; background:#101828; color:#e7eefc; padding:14px; border-radius:12px; }
+    .grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:16px; }
+    .three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .card { border:1px solid var(--line); border-radius:14px; padding:16px; background:#fbfcff; }
+    .tag { display:inline-block; border-radius:999px; padding:3px 9px; font-size:.84rem; font-weight:700; background:#eef2ff; color:#3157d5; margin:2px; }
+    .risk-high { border-left:5px solid var(--danger); }
+    .risk-medium { border-left:5px solid var(--warn); }
+    .risk-low { border-left:5px solid var(--ok); }
+    table { width:100%; border-collapse:collapse; }
+    th, td { text-align:left; vertical-align:top; border-bottom:1px solid var(--line); padding:10px; }
+    th { background:#f2f4f7; }
+    button.copy-button { border:0; border-radius:10px; padding:8px 10px; background:var(--accent); color:white; font-weight:700; cursor:pointer; }
+    .svg-wrap { overflow:auto; }
+    svg { max-width:100%; height:auto; }
+    @media (max-width: 1023px) { nav { flex-wrap:wrap; overflow:visible; } nav a { white-space:normal; } }
+    @media (max-width: 760px) { .grid, .three { grid-template-columns: 1fr; } section { padding:16px; } nav { position:static; font-size:.92rem; } table, thead, tbody, tr, th, td { display:block; width:100%; } thead { border:0; } th { margin-top:6px; } td { border-bottom:0; } tr { border-bottom:1px solid var(--line); padding:6px 0; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>add-periodic-controller-audit</h1>
+    <p>Phase 3 follow-up protection layer：新增低頻率 controller audit watchdog，從 structured runtime state 偵測未知 retry-loop / no-progress / cost-spike pattern，並在 critical 時自動 pause goal 避免 token 浪費。</p>
+    <p><span class="tag">controller audit</span><span class="tag">diagnostic watchdog</span><span class="tag">safe pause</span><span class="tag">no transcript matching</span></p>
+  </header>
+
+  <nav role="navigation">
+    <a href="#why">Why</a><a href="#what-changes">What Changes</a><a href="#before-after">Before/After</a><a href="#flow">Flow</a><a href="#scope-boundaries">Scope</a><a href="#rollout">Rollout</a><a href="#decision-points">Decisions</a><a href="#implementation-slices">Slices</a><a href="#verification-plan">Verification</a><a href="#risk-register">Risks</a><a href="#agent-prompts">Agent Prompts</a>
+  </nav>
+
+  <main>
+    <section id="why">
+      <h2>Why</h2>
+      <p>Controller 可以執行 state transitions，但不會週期檢查整體執行健康。Issue #39 的 retry loop 發生時，deterministic loop 只反覆發 follow-up，無法自我診斷為 unhealthy pattern。Phase 1 關閉了已知 invalid contract，但未來未知的 retry-loop / no-progress / cost-spike pattern 仍需要一個低頻率 diagnostic watchdog。</p>
+    </section>
+
+    <section id="what-changes">
+      <h2>What Changes</h2>
+      <div class="grid three">
+        <div class="card"><h3>Audit path</h3><p>新增 <code>runGoalControllerAudit()</code>，和 deterministic tick 分離。</p></div>
+        <div class="card"><h3>Bounded snapshot</h3><p>從 runtime state 產出 structured snapshot，不含 full transcript。</p></div>
+        <div class="card"><h3>Safe pause</h3><p>只有 critical + high-confidence 時自動 pause-goal；其他 actions 需 deterministic confirmation。</p></div>
+      </div>
+    </section>
+
+    <section id="before-after">
+      <h2>Before / After</h2>
+      <div class="grid">
+        <div class="card risk-high"><h3>變更前</h3><p>Controller tick 只做確定性同步/驗證/整合。No-progress 或 retry loop 可能持續到 token 耗盡或人為發現。</p></div>
+        <div class="card risk-low"><h3>變更後</h3><p>每 30 分鐘（可配置）audit 檢查 recent window。偵測到 critical retry-loop / cost-spike → 自動 pause goal。Ledger 記錄，monitor 顯示。</p></div>
+      </div>
+    </section>
+
+    <section id="affected-surfaces">
+      <h2>Affected Surfaces</h2>
+      <ul>
+        <li><strong>Core types:</strong> <code>GoalControllerAuditOptions</code>, <code>GoalControllerAuditSnapshot</code>, <code>GoalControllerAuditDecision</code></li>
+        <li><strong>Controller loop:</strong> audit scheduling gate after deterministic tick</li>
+        <li><strong>Ledger store:</strong> new audit lifecycle event types</li>
+        <li><strong>Monitor UI:</strong> audit summary display line</li>
+        <li><strong>Prompts:</strong> strict audit model system prompt</li>
+      </ul>
+    </section>
+
+    <section id="flow">
+      <h2>Architecture / Flow</h2>
+      <div class="svg-wrap">
+        <svg viewBox="0 0 980 280" role="img" aria-label="controller audit flow">
+          <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#3157d5"/></marker></defs>
+          <rect x="10" y="40" width="140" height="60" rx="14" fill="#eef2ff" stroke="#3157d5"/><text x="80" y="68" text-anchor="middle" font-size="15">Tick done</text>
+          <line x1="150" y1="70" x2="220" y2="70" stroke="#3157d5" stroke-width="3" marker-end="url(#arrow)"/>
+          <rect x="220" y="40" width="140" height="60" rx="14" fill="#fff7ed" stroke="#b54708"/><text x="290" y="68" text-anchor="middle" font-size="15">Audit due?</text>
+          <line x1="360" y1="70" x2="430" y2="70" stroke="#3157d5" stroke-width="3" marker-end="url(#arrow)"/>
+          <rect x="430" y="40" width="150" height="60" rx="14" fill="#ecfdf3" stroke="#027a48"/><text x="505" y="68" text-anchor="middle" font-size="15">Build snapshot</text>
+          <line x1="580" y1="70" x2="650" y2="70" stroke="#3157d5" stroke-width="3" marker-end="url(#arrow)"/>
+          <rect x="650" y="40" width="150" height="60" rx="14" fill="#f8fafc" stroke="#98a2b3"/><text x="725" y="68" text-anchor="middle" font-size="15">Invoke model</text>
+          <line x1="800" y1="70" x2="870" y2="70" stroke="#3157d5" stroke-width="3" marker-end="url(#arrow)"/>
+          <rect x="870" y="40" width="90" height="60" rx="14" fill="#fef3f2" stroke="#b42318"/><text x="915" y="68" text-anchor="middle" font-size="15">Pause?</text>
+
+          <rect x="430" y="145" width="290" height="50" rx="14" fill="#f0f9ff" stroke="#0284c7"/>
+          <text x="575" y="168" text-anchor="middle" font-size="14">Valid JSON? → safe action policy</text>
+          <text x="575" y="188" text-anchor="middle" font-size="14">Invalid → record &amp; ignore</text>
+
+          <rect x="10" y="212" width="960" height="45" rx="14" fill="#f8fafc" stroke="#98a2b3"/>
+          <text x="490" y="232" text-anchor="middle" font-size="14">Ledger records events → monitor surfaces latest finding → goal can be manually resumed</text>
+          <text x="490" y="250" text-anchor="middle" font-size="12">No transcript matching. No completion. No merge. No code modification. No DAG modification.</text>
+        </svg>
+      </div>
+    </section>
+
+    <section id="decision-points">
+      <h2>Decision Points</h2>
+      <table>
+        <thead><tr><th>決策</th><th>選擇</th><th>取捨</th><th>信心</th></tr></thead>
+        <tbody>
+          <tr><td>Audit path</td><td>Separate from tick</td><td>避免 tick 耦合 model cost。</td><td>High</td></tr>
+          <tr><td>Snapshot data</td><td>Structured state only, no transcript default</td><td>更安全更便宜；可能漏看 transscript 細節。</td><td>High</td></tr>
+          <tr><td>Auto actions</td><td>Only pause-goal for critical+high-confidence</td><td>保守安全；其他 actions 留給 human 或 future deterministic confirmation。</td><td>High</td></tr>
+          <tr><td>Model output</td><td>Schema-validated JSON</td><td>需要 prompt engineering；但確保 runtime 只執行合法輸出。</td><td>Medium</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="implementation-slices">
+      <h2>Implementation Slices</h2>
+      <ol>
+        <li><strong>Types &amp; options:</strong> audit contracts, config model。</li>
+        <li><strong>Snapshot builder:</strong> structured state builder。</li>
+        <li><strong>Decision validation:</strong> JSON schema validation。</li>
+        <li><strong>Safe action policy:</strong> pause-gate logic。</li>
+        <li><strong>Controller loop integration:</strong> audit scheduling gate。</li>
+        <li><strong>Ledger &amp; monitor:</strong> events recording, display lines。</li>
+        <li><strong>System prompt:</strong> strict audit model prompt。</li>
+        <li><strong>Tests:</strong> unit + scenario (retry-loop, cost-spike, healthy-noop)。</li>
+      </ol>
+    </section>
+
+    <section id="scope-boundaries">
+      <h2>Scope Boundaries</h2>
+      <p>本 change 只做 <strong>Phase 3 最小可行 audit</strong>：snapshot + pause-on-critical。不實作 cap-retries auto-action、mark-node-blocked auto-action、deterministic contract re-check、或 per-goal audit config。</p>
+      <p>禁止：audit agent 不能 complete / merge / modify code / modify DAG / replan / override deterministic validation。不能用 transcript matching 滿足 evidence。</p>
+    </section>
+
+    <section id="rollout">
+      <h2>Rollout / Migration</h2>
+      <p>不需要 DB migration。Audit 預設 disabled 或 interval 30min。新 ledger event types 加到現有 event model。既有 goals 不受影響，只在 deployment 之後 active 的 goal 才會觸發 audit。</p>
+    </section>
+
+    <section id="current-status">
+      <h2>Current Status</h2>
+      <p>OpenSpec change 已建立為 draft。Phase 1（close-required-evidence-contract）的 DAG 正在執行中。Phase 3 在 Phase 1 完成後才能安全實作。</p>
+    </section>
+
+    <section id="verification-plan">
+      <h2>Verification Plan</h2>
+      <ul>
+        <li>Unit: isAuditDue scheduling respects intervalMs。</li>
+        <li>Unit: snapshot is bounded, no transcripts by default。</li>
+        <li>Unit: invalid JSON recorded and ignored。</li>
+        <li>Unit: critical+high-confidence pause applied; medium-risk / low-confidence skipped。</li>
+        <li>Scenario: retry-loop triggers pause; cost-spike triggers pause; healthy returns noop。</li>
+        <li>Monitor: audit summary renders correctly。</li>
+        <li><code>npm run check</code>。</li>
+      </ul>
+    </section>
+
+    <section id="risk-register">
+      <h2>Risk Register</h2>
+      <p><strong>High-risk filter：</strong><span data-filter="high-risk">會誤判或浪費 token 的項目標為高風險。</span></p>
+      <div class="grid">
+        <div class="card risk-medium"><h3>Model produces invalid JSON</h3><p>緩解：validate &amp; ignore。</p></div>
+        <div class="card risk-high"><h3>Model recommends unsafe action</h3><p>緩解：only pause-goal auto；all others require confirmation。</p></div>
+        <div class="card risk-medium"><h3>Audit cost exceeds tolerance</h3><p>緩解：bounded snapshot, configurable interval, maxTokensPerAudit。</p></div>
+        <div class="card risk-medium"><h3>False positive pause</h3><p>緩解：needs critical + high-confidence；human can resume。</p></div>
+      </div>
+    </section>
+
+    <section id="copy-controls">
+      <h2>Copy Controls</h2>
+      <button class="copy-button" data-copy="#decision-summary">複製決策摘要</button>
+      <button class="copy-button" data-copy="#task-json">複製任務 JSON</button>
+      <pre id="decision-summary">Decision summary: add a periodic controller audit agent with bounded structured snapshot, schema-validated JSON output, and pause-goal as the only automatic protective action for critical+high-confidence findings. Audit cannot complete, merge, modify code, modify DAG, or override deterministic validation.</pre>
+      <script id="task-json" type="application/json">{"change":"add-periodic-controller-audit","tasks":["types","snapshot builder","decision validation","safe action policy","controller loop integration","ledger record","monitor display","system prompt","tests"]}</script>
+    </section>
+
+    <section id="agent-prompts">
+      <h2>Agent Prompts</h2>
+      <div class="grid three">
+        <div class="card"><h3>Implementation agent prompt</h3><p>Implement the periodic controller audit agent with bounded snapshot, JSON validation, safe pause-only action policy, ledger integration, and monitor display. Do not auto-apply actions beyond pause-goal.</p></div>
+        <div class="card"><h3>Review agent prompt</h3><p>Review that the audit agent cannot complete/merge/modify code/modify DAG. Verify model output is validated, snapshot excludes transcripts by default, and only pause-goal is automatic.</p></div>
+        <div class="card"><h3>Verification agent prompt</h3><p>Run unit and scenario tests: retry-loop triggers pause, cost-spike triggers pause, healthy progress returns noop, invalid JSON is ignored, medium-risk findings are skipped.</p></div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    for (const button of document.querySelectorAll('[data-copy]')) {
+      button.addEventListener('click', async () => {
+        const target = document.querySelector(button.getAttribute('data-copy'));
+        const text = target ? target.textContent.trim() : '';
+        if (navigator.clipboard) await navigator.clipboard.writeText(text);
+        button.textContent = '已複製';
+        setTimeout(() => { button.textContent = button.getAttribute('data-copy').includes('task') ? '複製任務 JSON' : '複製決策摘要'; }, 1200);
+      });
+    }
+  </script>
+</body>
+</html>

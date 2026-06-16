@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1.0",
+  "changeName": "add-periodic-controller-audit",
+  "generatedAt": "2026-06-16T03:33:00.464910+00:00",
+  "sources": [
+    {
+      "path": "proposal.md",
+      "kind": "proposal",
+      "sha256": "0c968a77d6567dae217950f732d727b3544d42907c9a9eed52a9368bc835dfa8"
+    },
+    {
+      "path": "design.md",
+      "kind": "design",
+      "sha256": "72129ed467a606d7da510aced7bccc472a1d2894be93f15bf61a1f1868da780b"
+    },
+    {
+      "path": "tasks.md",
+      "kind": "tasks",
+      "sha256": "dae933a6b114659c61f0f504dfb64041a2cd9a72dfdefe2f91f279c88027097c"
+    },
+    {
+      "path": "specs/controller-audit-agent/spec.md",
+      "kind": "spec-delta",
+      "sha256": "a90586875693ae4eafdff27d4dee2b6abce67b08c322b65754c39b713f729841"
+    }
+  ]
+}
