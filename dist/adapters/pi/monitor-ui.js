@@ -1,6 +1,232 @@
 import { existsSync, readFileSync } from "node:fs";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { formatAuditSummary, } from "../../core/index.js";
+// Canonical state labels shared across Pi TUI and OpenCode monitors.
+export const SESSION_STATE_LABELS = {
+    "active-turn": "ACTIVE-TURN",
+    idle: "IDLE",
+    missing: "MISSING",
+    "not-materialized": "NOT-MATERIALIZED",
+    unknown: "UNKNOWN",
+};
+export const HIDDEN_CONTINUATION_STATE_LABELS = {
+    eligible: "ELIGIBLE",
+    suppressed: "SUPPRESSED",
+    reserved: "RESERVED",
+    started: "STARTED",
+    "not-configured": "NOT-CONFIGURED",
+    "not-eligible": "NOT-ELIGIBLE",
+    unknown: "UNKNOWN",
+};
+export const CONTROLLER_POLL_STATE_LABELS = {
+    active: "ACTIVE",
+    leased: "LEASED",
+    skipped: "SKIPPED",
+    stopped: "STOPPED",
+    unknown: "UNKNOWN",
+};
+/**
+ * Derive a `GoalMonitorRuntimeSummary` synchronously from existing runtime
+ * and adapter state. No async calls — uses only already-loaded data.
+ */
+export function buildGoalMonitorRuntimeSummary(goal, subagents, options = {}) {
+    const harness = options.harnessState;
+    const reservation = options.reservation;
+    const ledgerEvents = options.ledgerEvents ?? [];
+    const bgRunners = options.runners ?? [];
+    const pollGraceMs = options.controllerPollGraceMs ?? 30_000;
+    // ── Session state ──
+    const sessionState = deriveSessionState(goal, harness);
+    // ── Hidden continuation state ──
+    const hiddenContinuation = deriveHiddenContinuationState(goal, harness, reservation);
+    // ── Controller poll state ──
+    const controllerPoll = deriveControllerPollState(ledgerEvents, pollGraceMs);
+    // ── Runner counts ──
+    const runnerCounts = deriveRunnerCounts(subagents, bgRunners);
+    return { session: sessionState, hiddenContinuation, controllerPoll, runners: runnerCounts };
+}
+function deriveSessionState(goal, harness) {
+    if (harness) {
+        if (harness.activeTurnId)
+            return { state: "active-turn", activeTurnId: harness.activeTurnId };
+        if (harness.materialized)
+            return { state: "idle" };
+        return { state: "not-materialized" };
+    }
+    // Fallback: derive from activityState when harness not available.
+    const activity = goal.activityState ?? "";
+    if (activity.includes("active-turn"))
+        return { state: "active-turn" };
+    if (activity.includes("idle"))
+        return { state: "idle" };
+    if (["complete"].includes(goal.status))
+        return { state: "not-materialized" };
+    if (!goal.sessionFile || !existsSync(goal.sessionFile))
+        return { state: "missing" };
+    return { state: "unknown" };
+}
+function deriveHiddenContinuationState(goal, harness, reservation) {
+    // Check reservation first — most authoritative source.
+    if (reservation) {
+        if (reservation.status === "started") {
+            return { state: "started", attemptId: reservation.attemptId };
+        }
+        if (reservation.status === "pending") {
+            return { state: "reserved", attemptId: reservation.attemptId };
+        }
+    }
+    // Check harness for suppressed continuation.
+    if (harness) {
+        if (harness.continuationSuppressed) {
+            const reason = harness.activeTurnId
+                ? "active turn running"
+                : harness.queuedUserInput
+                    ? "queued user input"
+                    : harness.queuedTriggerTurn
+                        ? "queued trigger turn"
+                        : "suppressed by runtime";
+            return { state: "suppressed", reason };
+        }
+        if (harness.materialized && harness.activeTurnId) {
+            // Materialized but not suppressed — could be eligible next cycle.
+        }
+    }
+    // Fallback: derive from activityState.
+    const activity = goal.activityState ?? "";
+    if (activity.includes("suppressed"))
+        return { state: "suppressed", reason: "suppressed by runtime" };
+    if (activity.includes("eligible") || activity.includes("idle-eligible"))
+        return { state: "eligible" };
+    if (activity.includes("idle"))
+        return { state: "eligible" };
+    if (["complete", "blocked", "failed"].includes(goal.status)) {
+        return { state: "not-eligible", reason: `goal status is ${goal.status}` };
+    }
+    return { state: "unknown" };
+}
+function deriveControllerPollState(ledgerEvents, pollGraceMs) {
+    const pollEvents = ledgerEvents
+        .filter((event) => {
+        const details = event.details ?? {};
+        return event.type === "controller_event" && typeof details.event === "string" && details.event.startsWith("poll.");
+    })
+        .sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+    if (pollEvents.length === 0) {
+        // Check if we have any controller event — if not, poll may not be configured.
+        const hasAnyEvents = ledgerEvents.length > 0;
+        return { state: hasAnyEvents ? "skipped" : "unknown" };
+    }
+    const lastEvent = pollEvents[pollEvents.length - 1];
+    const details = (lastEvent.details ?? {});
+    const eventName = details.event;
+    const lastEventAt = Date.parse(lastEvent.at);
+    const now = Date.now();
+    if (eventName === "poll.started") {
+        const age = now - lastEventAt;
+        if (age > pollGraceMs * 2) {
+            return { state: "stopped", reason: "no poll finished within grace period", lastPollAt: lastEvent.at };
+        }
+        return { state: "active", lastPollAt: lastEvent.at };
+    }
+    if (eventName === "poll.finished") {
+        if (typeof details.leased === "boolean" && details.leased) {
+            const leaseOwner = typeof details.leaseOwner === "string" ? details.leaseOwner : undefined;
+            return { state: "leased", leaseOwner, lastPollAt: lastEvent.at };
+        }
+        const age = now - lastEventAt;
+        if (age > pollGraceMs) {
+            return { state: "stopped", reason: "last poll stale", lastPollAt: lastEvent.at };
+        }
+        return { state: "active", lastPollAt: lastEvent.at };
+    }
+    if (eventName === "poll.stopped") {
+        return { state: "stopped", reason: typeof details.reason === "string" ? details.reason : undefined, lastPollAt: lastEvent.at };
+    }
+    return { state: "unknown" };
+}
+function deriveRunnerCounts(subagents, runners) {
+    const runnerAlive = new Set(runners.filter((r) => r.runnerAlive || r.childAlive).map((r) => r.subagentId ?? r.configPath));
+    // Map by subagentId for quick look-up.
+    const runnerBySubagent = new Map();
+    for (const runner of runners) {
+        const key = runner.subagentId ?? runner.configPath;
+        const list = runnerBySubagent.get(key) ?? [];
+        list.push(runner);
+        runnerBySubagent.set(key, list);
+    }
+    let running = 0;
+    let stopped = 0;
+    let duplicateStopped = 0;
+    let archived = 0;
+    let failed = 0;
+    for (const subagent of subagents) {
+        const subagentRunners = runnerBySubagent.get(subagent.subagentId) ?? [];
+        const aliveCount = subagentRunners.filter((r) => r.runnerAlive || r.childAlive).length;
+        const totalCount = subagentRunners.length;
+        if (aliveCount > 0) {
+            running += aliveCount;
+            // Any extra non-alive runners for the same subagent are duplicate-stopped.
+            if (totalCount > aliveCount)
+                duplicateStopped += totalCount - aliveCount;
+        }
+        else if (totalCount > 0) {
+            stopped += totalCount;
+        }
+        if (["blocked", "failed"].includes(subagent.status)) {
+            failed += 1;
+        }
+        else if (subagent.status === "complete") {
+            archived += 1;
+        }
+    }
+    // Also count runners that aren't associated with any known subagent.
+    const knownSubagentIds = new Set(subagents.map((s) => s.subagentId));
+    for (const runner of runners) {
+        if (runner.subagentId && !knownSubagentIds.has(runner.subagentId)) {
+            if (runner.runnerAlive || runner.childAlive) {
+                running += 1;
+            }
+        }
+    }
+    return { running, stopped, duplicateStopped, archived, failed };
+}
+/**
+ * Derive a monitor health status from the runtime summary and DAG state.
+ * Returns { health, nextAction } where nextAction is a one-line recommendation.
+ */
+export function deriveMonitorHealth(summary, goal, _subagents) {
+    const hasBlockedOrFailed = _subagents.some((s) => ["blocked", "failed", "needsFollowup"].includes(s.status));
+    const hasRunning = _subagents.some((s) => s.status === "running");
+    const hasComplete = _subagents.some((s) => s.status === "complete");
+    if (hasBlockedOrFailed) {
+        if (summary.session.state === "active-turn" || summary.runners.running > 0) {
+            return { health: "Needs attention", nextAction: "inspect blocked/failed nodes via nodeList → runnerList" };
+        }
+        return { health: "Blocked", nextAction: "inspect blocked nodes or pause/clear goal" };
+    }
+    if (goal.status === "blocked") {
+        return { health: "Blocked", nextAction: "inspect goal status or take manual action" };
+    }
+    if (goal.status === "paused") {
+        return { health: "Waiting", nextAction: "resume goal to continue" };
+    }
+    if (goal.status === "budgetLimited" || goal.status === "usageLimited") {
+        return { health: "Waiting", nextAction: "goal waiting on budget/usage limit reset" };
+    }
+    if (goal.status === "complete") {
+        return { health: "OK", nextAction: "goal complete — archive or inspect" };
+    }
+    if (hasRunning && summary.controllerPoll.state === "active") {
+        return { health: "OK", nextAction: "monitor progress" };
+    }
+    if (summary.runners.running > 0 && summary.controllerPoll.state === "unknown") {
+        return { health: "OK", nextAction: "monitor progress" };
+    }
+    if (!hasRunning && !hasComplete) {
+        return { health: "Stalled", nextAction: "no running subagents — check controller poll and hidden continuation" };
+    }
+    return { health: "OK", nextAction: "monitor progress" };
+}
 const DEFAULT_VISIBLE_LIVE_LINES = 18;
 const DEFAULT_VISIBLE_LIST_LINES = 14;
 export class GoalMonitorController {
@@ -207,11 +433,19 @@ export class GoalMonitorController {
             this.liveScroll = Math.max(0, view.liveLines.length - visibleLiveCount);
         else
             this.liveScroll = clampScroll(this.liveScroll, view.liveLines.length, visibleLiveCount);
+        // ── Runtime summary band ──
+        const runtimeSummary = buildGoalMonitorRuntimeSummary(this.goal, dag.subagents, {
+            ledgerEvents: dag.ledgerEvents,
+            runners: dag.runners,
+        });
+        const health = deriveMonitorHealth(runtimeSummary, this.goal, dag.subagents);
+        const runtimeBandLines = formatRuntimeBandLines(runtimeSummary, health, width, theme);
         const lines = [
             truncateToWidth(theme.fg("accent", title), width),
             truncateToWidth(`scope=${view.scopeLabel} focus=${this.activePane} rowOp=${formatPlainOperation(this.lastSelectedOperations[this.rowOperationIndex])} status=${derivedMonitorStatus(this.goal, dag)} tokens=${formatMonitorTokens(this.goal)} elapsed=${formatElapsedSeconds(this.goal.timeUsedSeconds)} controllerModel=${formatMonitorModel(this.goal.controllerModelScenario, this.goal.controllerModelArg)}`, width),
             truncateToWidth(`workspace=${shortenPath(this.goal.executionWorkspace ?? "legacy")} branch=${shortenMiddle(this.goal.branch ?? this.goal.ref ?? "-", 72)}`, width),
             truncateToWidth(`DAG nodes=${formatStatusCounts(dag.nodes.map((node) => node.status))} subagents=${formatStatusCounts(dag.subagents.map((subagent) => subagent.status))} refreshed=${compactTimestamp(dag.refreshedAt ?? new Date(0).toISOString())}`, width),
+            ...runtimeBandLines,
             truncateToWidth(theme.fg("dim", `row-action monitor • ←→ select row op • Enter confirm row op • b/Backspace back • l/v focus • c compact/debug • Tab switch • ↑↓ move/scroll • PgUp/PgDn • Esc close`), width),
             truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width),
             truncateToWidth(theme.fg(this.activePane === "live" ? "accent" : "muted", `${this.activePane === "live" ? "▶ " : "  "}LIVE: ${view.liveTitle}`), width),
@@ -749,6 +983,53 @@ function shortenMiddle(value, maxLength) {
     const head = Math.ceil(keep * 0.6);
     const tail = Math.floor(keep * 0.4);
     return `${value.slice(0, head)}…${value.slice(value.length - tail)}`;
+}
+/**
+ * Render the runtime summary as 2-3 compact lines for the Pi TUI header band.
+ * Uses short labels and double-space separators to fit narrow terminals.
+ */
+function formatRuntimeBandLines(summary, health, width, theme) {
+    const sessionLabel = SESSION_STATE_LABELS[summary.session.state];
+    const hiddenLabel = HIDDEN_CONTINUATION_STATE_LABELS[summary.hiddenContinuation.state];
+    const pollLabel = CONTROLLER_POLL_STATE_LABELS[summary.controllerPoll.state];
+    const sessionPart = `Session=${sessionLabel}`;
+    const hiddenPart = `Hidden=${hiddenLabel}${summary.hiddenContinuation.reason ? `(${summary.hiddenContinuation.reason})` : ""}`;
+    const pollPart = `Poll=${pollLabel}${summary.controllerPoll.reason ? `(${summary.controllerPoll.reason})` : ""}`;
+    const runnersPart = `Runners=${formatRunnerSummary(summary.runners)}`;
+    const fullLine = [sessionPart, hiddenPart, pollPart, runnersPart].join("  ");
+    const healthColor = health.health === "OK" ? "success" :
+        health.health === "Needs attention" ? "warning" :
+            health.health === "Blocked" ? "error" : "dim";
+    const healthLine = `Health=${health.health}  Next: ${health.nextAction}`;
+    // Narrow terminal: split key=value pairs across 2 lines so all four
+    // states (Session, Hidden, Poll, Runners) remain visible at 80 columns.
+    if (fullLine.length > width && width > 0) {
+        const lineA = [sessionPart, hiddenPart].join("  ");
+        const lineB = [pollPart, runnersPart].join("  ");
+        return [
+            truncateToWidth(theme.fg("dim", lineA), width),
+            truncateToWidth(theme.fg("dim", lineB), width),
+            truncateToWidth(theme.fg(healthColor, healthLine), width),
+        ];
+    }
+    return [
+        truncateToWidth(theme.fg("dim", fullLine), width),
+        truncateToWidth(theme.fg(healthColor, healthLine), width),
+    ];
+}
+function formatRunnerSummary(runners) {
+    const parts = [];
+    if (runners.running > 0)
+        parts.push(`${runners.running} running`);
+    if (runners.stopped > 0)
+        parts.push(`${runners.stopped} stopped`);
+    if (runners.duplicateStopped > 0)
+        parts.push(`${runners.duplicateStopped} dup`);
+    if (runners.archived > 0)
+        parts.push(`${runners.archived} archived`);
+    if (runners.failed > 0)
+        parts.push(`${runners.failed} failed`);
+    return parts.length > 0 ? parts.join(" ") : "none";
 }
 export function readGoalTranscriptLines(sessionFile) {
     return readGoalTranscript(sessionFile).lines;
