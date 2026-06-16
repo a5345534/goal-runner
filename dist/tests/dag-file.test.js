@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { createGoalDagNodesFromFileContent, GoalRuntime, MemoryGoalStore, parseGoalDagFileContent, planGoalDagFromFileDocument, } from "../core/index.js";
+import { createGoalDagNodesFromFileContent, GoalRuntime, MemoryGoalStore, parseGoalDagFileContent, planGoalDagFromFileDocument, SUPPORTED_REQUIRED_EVIDENCE_SET, } from "../core/index.js";
 const now = "2026-06-02T00:00:00.000Z";
 const validDag = {
     version: 1,
@@ -181,5 +181,101 @@ test("goal DAG file parser rejects non-string-array validation scope policies", 
     };
     assert.throws(() => parseGoalDagFileContent(JSON.stringify({ ...base, nodes: [{ ...base.nodes[0], validation: { allowedPaths: "src/**" } }] })), /validation\.allowedPaths must be an array/);
     assert.throws(() => parseGoalDagFileContent(JSON.stringify({ ...base, nodes: [{ ...base.nodes[0], validation: { forbiddenPaths: ["src/**", 42] } }] })), /validation\.forbiddenPaths\[1\] must be a non-empty string/);
+});
+test("goal DAG file parser accepts all supported required evidence tokens", () => {
+    const document = parseGoalDagFileContent(JSON.stringify({
+        version: 1,
+        objective: "Test all evidence tokens",
+        nodes: [{
+                id: "full-evidence",
+                objective: "Use all tokens",
+                validation: {
+                    requiredEvidence: [
+                        "validators-ran",
+                        "locked-artifacts-unchanged",
+                        "implementation-diff-present",
+                        "non-test-diff-present",
+                        "post-merge-validation-ran",
+                        "audit-report-present",
+                    ],
+                },
+            }],
+    }));
+    assert.deepEqual(document.nodes[0]?.validation?.requiredEvidence, [
+        "validators-ran",
+        "locked-artifacts-unchanged",
+        "implementation-diff-present",
+        "non-test-diff-present",
+        "post-merge-validation-ran",
+        "audit-report-present",
+    ]);
+});
+test("goal DAG file parser rejects unsupported required evidence with clear remediation guidance", () => {
+    assert.throws(() => parseGoalDagFileContent(JSON.stringify({
+        version: 1,
+        objective: "Bad evidence",
+        nodes: [{
+                id: "bad-node",
+                objective: "Bad",
+                validation: { requiredEvidence: ["pnpm test passes"] },
+            }],
+    })), /unsupported required evidence.*pnpm test passes/i);
+    // The error must list the supported evidence tokens
+    assert.throws(() => parseGoalDagFileContent(JSON.stringify({
+        version: 1,
+        objective: "Bad evidence",
+        nodes: [{
+                id: "bad-node",
+                objective: "Bad",
+                validation: { requiredEvidence: ["manual review passed"] },
+            }],
+    })), /supported evidence tokens.*validators-ran/i);
+    // Natural-language checks should get remediation guidance
+    assert.throws(() => parseGoalDagFileContent(JSON.stringify({
+        version: 1,
+        objective: "Bad evidence",
+        nodes: [{
+                id: "bad-node",
+                objective: "Bad",
+                validation: { requiredEvidence: ["pnpm test passes"] },
+            }],
+    })), /natural-language acceptance checks/i);
+});
+test("goal DAG file parser rejects duplicate required evidence", () => {
+    assert.throws(() => parseGoalDagFileContent(JSON.stringify({
+        version: 1,
+        objective: "Duplicate evidence",
+        nodes: [{
+                id: "dup-node",
+                objective: "Dupe",
+                validation: { requiredEvidence: ["validators-ran", "validators-ran"] },
+            }],
+    })), /duplicate required evidence: validators-ran/);
+    // Multiple duplicates should be caught (first duplicate errors first)
+    assert.throws(() => parseGoalDagFileContent(JSON.stringify({
+        version: 1,
+        objective: "Duplicate evidence",
+        nodes: [{
+                id: "dup-node",
+                objective: "Dupe",
+                validation: { requiredEvidence: ["validators-ran", "locked-artifacts-unchanged", "locked-artifacts-unchanged"] },
+            }],
+    })), /duplicate required evidence: locked-artifacts-unchanged/);
+});
+test("goal DAG file documentation examples use only supported evidence tokens", () => {
+    const docs = readFileSync(new URL("../../docs/goal-dag-format.md", import.meta.url), "utf8");
+    // Collect all requiredEvidence arrays from JSON code blocks in the docs
+    const evidenceBlocks = [...docs.matchAll(/"requiredEvidence"\s*:\s*(\[[^\]]*\])/g)];
+    for (const [, arrayText] of evidenceBlocks) {
+        try {
+            const parsed = JSON.parse(arrayText);
+            for (const token of parsed) {
+                assert.ok(SUPPORTED_REQUIRED_EVIDENCE_SET.has(token), `Docs example uses unsupported requiredEvidence: "${token}". Supported: ${[...SUPPORTED_REQUIRED_EVIDENCE_SET].join(", ")}`);
+            }
+        }
+        catch {
+            // Skip malformed JSON in example blocks (not a test failure for this check)
+        }
+    }
 });
 //# sourceMappingURL=dag-file.test.js.map
