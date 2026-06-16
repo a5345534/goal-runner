@@ -27,6 +27,7 @@ It is the portable `/goal` runtime. Producer tools may create DAG JSON, but this
 - `source-manifest.json`.
 - `change-explainer.html`.
 - PRD, design, ticket, or markdown task-list prose.
+- Natural-language acceptance criteria/checklists that are not encoded as explicit runtime validation fields.
 
 ### Owns
 
@@ -59,4 +60,4 @@ Given a single objective or explicit DAG JSON, `goal-runner` produces durable ru
 
 ## Producer responsibilities
 
-Producer stages are responsible for converting PRDs, OpenSpec changes, tickets, or other planning sources into runtime DAG JSON before invoking `/goal --dag`. If a producer emits trace sidecar data, that sidecar is for review/audit workflows and humans; it is not runtime input and must not affect scheduling, validation, model routing, or completion.
+Producer stages are responsible for converting PRDs, OpenSpec changes, tickets, or other planning sources into runtime DAG JSON before invoking `/goal --dag`. If a producer emits trace sidecar data, that sidecar is for review/audit workflows and humans; it is not runtime input and must not affect scheduling, validation, model routing, or completion. Natural-language acceptance checks in those sources must be mapped to explicit `validators`, `artifactLocks` + `requiredEvidence` checks, path policies, or producer-owned review metadata; unsupported `requiredEvidence` labels must not be emitted.
