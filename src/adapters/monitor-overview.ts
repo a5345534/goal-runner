@@ -212,14 +212,26 @@ export function deriveMonitorHealth(
     return "Waiting";
   }
 
-  // ── 2. Active goals: node/subagent status ──
+  // ── 2. Active goals: current effective state, not historical failures ──
 
   const blockedNode = nodes?.find((n) => ["blocked", "failed"].includes(n.status));
-  const hasBlockedOrFailedSubagent = subagents.some(
-    (s) => ["blocked", "failed", "needsFollowup"].includes(s.status),
-  );
   const hasRunning = subagents.some((s) => s.status === "running");
   const hasComplete = subagents.some((s) => s.status === "complete");
+
+  // Only count failed/blocked subagents that don't have a newer replacement
+  // (running or complete) for the same node.
+  const failedSubagentsWithNoReplacement = subagents.filter(
+    (s) => ["blocked", "failed", "needsFollowup"].includes(s.status),
+  ).filter((failed) => {
+    // If any subagent for the same node is running or complete, this failure is historical.
+    const hasReplacement = subagents.some(
+      (other) =>
+        other.nodeId === failed.nodeId &&
+        other.subagentId !== failed.subagentId &&
+        ["running", "complete"].includes(other.status),
+    );
+    return !hasReplacement;
+  });
 
   if (blockedNode) {
     if (summary.session.state === "active-turn" || summary.runners.running > 0) {
@@ -228,7 +240,7 @@ export function deriveMonitorHealth(
     return "Blocked";
   }
 
-  if (hasBlockedOrFailedSubagent) {
+  if (failedSubagentsWithNoReplacement.length > 0) {
     if (summary.session.state === "active-turn" || summary.runners.running > 0) {
       return "Needs attention";
     }
@@ -286,7 +298,20 @@ export function summarizeMonitorProblem(
   }
 
   // Blocked/failed subagents (not associated with blocked node).
-  const blockedSub = subagents.find((s) => ["blocked", "failed", "needsFollowup"].includes(s.status));
+  // Only count subagents that don't have a newer replacement.
+  const failedWithoutReplacement = subagents.filter(
+    (s) => ["blocked", "failed", "needsFollowup"].includes(s.status),
+  ).filter((failed) => {
+    const hasReplacement = subagents.some(
+      (other) =>
+        other.nodeId === failed.nodeId &&
+        other.subagentId !== failed.subagentId &&
+        ["running", "complete"].includes(other.status),
+    );
+    return !hasReplacement;
+  });
+
+  const blockedSub = failedWithoutReplacement[0];
   if (blockedSub) {
     const reason = blockedSub.selfReportedResult ?? blockedSub.integrationError ?? blockedSub.integrationStatus ?? "blocked";
     const node = nodes.find((n) => n.nodeId === blockedSub.nodeId);
@@ -434,7 +459,7 @@ export function formatRecentEvents(
   ledgerEvents: GoalLedgerEvent[],
   options: { maxRecentEvents?: number; minRecentEvents?: number } = {},
 ): string[] {
-  const maxEvents = options.maxRecentEvents ?? 8;
+  const maxEvents = options.maxRecentEvents ?? 5;
   const minEvents = options.minRecentEvents ?? 3;
 
   const meaningful = ledgerEvents

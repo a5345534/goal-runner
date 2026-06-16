@@ -469,29 +469,27 @@ export class GoalMonitorController {
         // ── KEY BINDS ──
         lines.push(truncateToWidth(theme.fg("dim", `row-action monitor • ←→ select row op • Enter confirm • b/Backspace back • l/v focus • c compact/debug • Tab switch • ↑↓ move/scroll • PgUp/PgDn • Esc close`), width));
         lines.push(truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width));
-        // ── COMPACT META + RUNTIME BAND (backward compat for existing tests) ──
-        const healthLabel = EXTENDED_MONITOR_HEALTH_LABELS[overview.health] ?? overview.health;
-        const sessionPart = `Session=${SESSION_STATE_LABELS[runtimeSummary.session.state]}`;
-        const hiddenPart = `Hidden=${HIDDEN_CONTINUATION_STATE_LABELS[runtimeSummary.hiddenContinuation.state]}`;
-        const pollPart = `Poll=${CONTROLLER_POLL_STATE_LABELS[runtimeSummary.controllerPoll.state]}`;
-        const runnersPart = `Runners=${formatRunnerSummary(runtimeSummary.runners)}`;
-        const fullBand = `${sessionPart}  ${hiddenPart}  ${pollPart}  ${runnersPart}  Health=${healthLabel}  Next: ${overview.nextActionLabel}`;
-        if (fullBand.length > width && width > 0) {
-            // Narrow: split across lines.
-            const lineA = `${sessionPart}  ${hiddenPart}`;
-            const lineB = `${pollPart}  ${runnersPart}`;
-            const lineC = `Health=${healthLabel}  Next: ${overview.nextActionLabel}`;
-            lines.push(truncateToWidth(theme.fg("dim", lineA), width));
-            lines.push(truncateToWidth(theme.fg("dim", lineB), width));
-            lines.push(truncateToWidth(theme.fg("dim", lineC), width));
+        // ── DEBUG META + RUNTIME BAND (only in debug mode or LIVE focus) ──
+        if (this.controllerHistoryMode === "debug" || this.activePane === "live") {
+            const healthLabel = EXTENDED_MONITOR_HEALTH_LABELS[overview.health] ?? overview.health;
+            const sessionPart = `Session=${SESSION_STATE_LABELS[runtimeSummary.session.state]}`;
+            const hiddenPart = `Hidden=${HIDDEN_CONTINUATION_STATE_LABELS[runtimeSummary.hiddenContinuation.state]}`;
+            const pollPart = `Poll=${CONTROLLER_POLL_STATE_LABELS[runtimeSummary.controllerPoll.state]}`;
+            const runnersPart = `Runners=${formatRunnerSummary(runtimeSummary.runners)}`;
+            const fullBand = `${sessionPart}  ${hiddenPart}  ${pollPart}  ${runnersPart}  Health=${healthLabel}  Next: ${overview.nextActionLabel}`;
+            if (fullBand.length > width && width > 0) {
+                lines.push(truncateToWidth(theme.fg("dim", `${sessionPart}  ${hiddenPart}`), width));
+                lines.push(truncateToWidth(theme.fg("dim", `${pollPart}  ${runnersPart}`), width));
+                lines.push(truncateToWidth(theme.fg("dim", `Health=${healthLabel}  Next: ${overview.nextActionLabel}`), width));
+            }
+            else {
+                lines.push(truncateToWidth(theme.fg("dim", fullBand), width));
+            }
+            const compactMeta = isNarrow
+                ? `scope=${view.scopeLabel} focus=${this.activePane} rowOp=${formatPlainOperation(this.lastSelectedOperations[this.rowOperationIndex])}`
+                : `scope=${view.scopeLabel} focus=${this.activePane} rowOp=${formatPlainOperation(this.lastSelectedOperations[this.rowOperationIndex])} status=${derivedMonitorStatus(this.goal, dag)} tokens=${formatMonitorTokens(this.goal)} DAG nodes=${formatStatusCounts(dag.nodes.map((node) => node.status))} subagents=${formatStatusCounts(dag.subagents.map((subagent) => subagent.status))} elapsed=${formatElapsedSeconds(this.goal.timeUsedSeconds)}`;
+            lines.push(truncateToWidth(theme.fg("dim", compactMeta), width));
         }
-        else {
-            lines.push(truncateToWidth(theme.fg("dim", fullBand), width));
-        }
-        const compactMeta = isNarrow
-            ? `scope=${view.scopeLabel} focus=${this.activePane} rowOp=${formatPlainOperation(this.lastSelectedOperations[this.rowOperationIndex])}`
-            : `scope=${view.scopeLabel} focus=${this.activePane} rowOp=${formatPlainOperation(this.lastSelectedOperations[this.rowOperationIndex])} status=${derivedMonitorStatus(this.goal, dag)} tokens=${formatMonitorTokens(this.goal)} DAG nodes=${formatStatusCounts(dag.nodes.map((node) => node.status))} subagents=${formatStatusCounts(dag.subagents.map((subagent) => subagent.status))} elapsed=${formatElapsedSeconds(this.goal.timeUsedSeconds)}`;
-        lines.push(truncateToWidth(theme.fg("dim", compactMeta), width));
         // ── LIVE PANE ──
         // Always use the original live view (compact/debug controller history or runner transcript).
         // Recent events from the overview are shown above as a dedicated section.
