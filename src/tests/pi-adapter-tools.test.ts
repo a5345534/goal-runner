@@ -1370,3 +1370,114 @@ test("goal-owned /goal start does not trigger foreground hidden continuation", a
     rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test("goal-owned /goal --dag start does not trigger foreground hidden continuation", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "goal-pi-dag-no-continue-"));
+  const previousStateHome = process.env.AGENT_GOAL_STATE_HOME;
+  process.env.AGENT_GOAL_STATE_HOME = dir;
+  const workspace = createGitWorkspace();
+  const dagFile = join(workspace, "test.dag.json");
+  writeFileSync(dagFile, JSON.stringify({
+    version: 1,
+    objective: "ship feature",
+    nodes: [{ id: "node-1", objective: "Implement feature" }],
+  }));
+  let commandHandler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+  const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
+  const launched: Array<{ sessionName: string }> = [];
+  const prompts: string[] = [];
+  const sentMessages: Array<{ options: unknown }> = [];
+
+  setPiBackgroundGoalSessionLauncherForTests(async (request) => {
+    launched.push({ sessionName: request.sessionName ?? "" });
+    const sessionFile = join(dir, `subagent-${launched.length}.jsonl`);
+    writeFileSync(sessionFile, "");
+    return {
+      sessionFile,
+      sessionId: request.sessionId ?? `subagent-${launched.length}`,
+      setSessionName: async () => undefined,
+      sendPrompt: async (prompt: string) => {
+        prompts.push(prompt);
+        writeFileSync(sessionFile, JSON.stringify({
+          type: "message",
+          timestamp: new Date().toISOString(),
+          message: { role: "assistant", content: [{ type: "text", text: "SUBAGENT_RESULT: done" }] },
+        }));
+      },
+      isAlive: () => true,
+      stop: () => undefined,
+    };
+  });
+  const pi = {
+    registerTool() {},
+    registerCommand(_name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) {
+      commandHandler = options.handler;
+    },
+    on(event: string, handler: (...args: unknown[]) => unknown) {
+      const list = handlers.get(event) ?? [];
+      list.push(handler);
+      handlers.set(event, list);
+    },
+    appendEntry() {},
+    sendMessage(_message: unknown, options: unknown) {
+      sentMessages.push({ options });
+    },
+  };
+  const notifications: string[] = [];
+  const controllerCtx = {
+    hasUI: true,
+    cwd: workspace,
+    model: { provider: "test", id: "model" },
+    ui: {
+      notify(message: string) { notifications.push(message); },
+      setStatus() {},
+      setWidget() {},
+      confirm: async () => true,
+      editor: async () => undefined,
+      select: async () => undefined,
+      custom: async () => undefined,
+    },
+    sessionManager: {
+      createSession: async () => ({
+        id: `background-${launched.length}`,
+        title: "background",
+        cwd: workspace,
+        resolveSessionFile: () => join(dir, "background.jsonl"),
+        async sendPrompt() {},
+        async stop() {},
+        async setTitle() {},
+      }),
+      listSessions: async () => [],
+      getSession: async () => undefined,
+      stopSession: async () => undefined,
+    },
+    getSessionDirectory: () => dir,
+    isIdle: () => true,
+    hasPendingMessages: () => false,
+    saveSession() {},
+    openSession() {},
+  };
+  try {
+    goalPiExtension(pi as never);
+    assert.ok(commandHandler);
+
+    await commandHandler?.(
+      `--workspace ${workspace} --branch main --dag test.dag.json`,
+      controllerCtx as never,
+    );
+
+    const triggerTurnCalls = sentMessages.filter(
+      (entry) => (entry.options as any)?.triggerTurn === true,
+    );
+    assert.equal(triggerTurnCalls.length, 0, "goal-owned --dag start must not trigger foreground hidden continuation");
+
+    assert.ok(prompts.length >= 1, "subagent must be launched for DAG node");
+    assert.match(prompts[0] ?? "", /SUBAGENT_RESULT/);
+  } finally {
+    setPiBackgroundGoalSessionLauncherForTests();
+    if (previousStateHome === undefined) delete process.env.AGENT_GOAL_STATE_HOME;
+    else process.env.AGENT_GOAL_STATE_HOME = previousStateHome;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
