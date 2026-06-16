@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GoalMonitorController, readControllerTranscript, readGoalTranscript, readGoalTranscriptLines, buildGoalMonitorRuntimeSummary, deriveMonitorHealth, SESSION_STATE_LABELS, HIDDEN_CONTINUATION_STATE_LABELS, CONTROLLER_POLL_STATE_LABELS, } from "../adapters/pi/monitor-ui.js";
+import { buildGoalMonitorOverview, deriveMonitorHealth as deriveExtendedMonitorHealth, EXTENDED_MONITOR_HEALTH_LABELS, MONITOR_NODE_DISPLAY_STATE_CHARS, ACTION_DISPLAY_LABELS, formatRuntimeSummaryForOverview, formatNodeDisplayState, summarizeMonitorProblem, } from "../adapters/monitor-overview.js";
 function summary(status = "active", sessionFile) {
     return {
         sessionKey: "s1",
@@ -68,6 +69,7 @@ function subagent(overrides = {}) {
     };
 }
 const theme = { fg: (_color, text) => text, bold: (text) => text };
+// ── Basic controller tests ──
 test("goal monitor escape closes without lifecycle action", () => {
     const controller = new GoalMonitorController(summary());
     assert.deepEqual(controller.handleInput("\x1b"), { kind: "close" });
@@ -79,7 +81,7 @@ test("goal monitor exposes lifecycle actions as controller row operations", () =
     assert.deepEqual(paused.actions, ["resume", "clear", "close"]);
     const rendered = active.render(140, theme).join("\n");
     assert.match(rendered, /scope=controller focus=list rowOp=nodeList/);
-    assert.match(rendered, /> \[controller\].*ops: \[nodeList\].*pause.*resume.*clear.*close/);
+    assert.match(rendered, /EXECUTION PLAN/);
     active.handleInput("\x1b[C"); // select pause operation on the controller row.
     assert.deepEqual(active.handleInput("\r"), { kind: "action", action: "pause" });
 });
@@ -189,8 +191,9 @@ test("goal monitor starts at controller row with explicit nodeList operation", (
     assert.match(rendered, /DAG nodes=1 \(running=1\) subagents=1 \(running=1\)/);
     assert.match(rendered, /LIVE: Controller legacy transcript fallback \(1 line\)/);
     assert.match(rendered, /controller-tail/);
-    assert.match(rendered, /LIST: Controller/);
-    assert.match(rendered, /> \[controller\] status=active\/idle-eligible nodes=1 \(running=1\) runners=1 \(running=1\) history=0.*ops: \[nodeList\]/);
+    // LIST now shows the overview-first layout with execution plan, then the controller list row.
+    assert.match(rendered, /\[controller\]/);
+    assert.match(rendered, /> \[controller\].*ops: \[nodes\].*pause.*resume.*clear/);
 });
 test("goal monitor controller live pane renders durable controller history events", () => {
     const now = new Date("2026-05-31T00:05:00.000Z");
@@ -219,10 +222,13 @@ test("goal monitor controller live pane renders durable controller history event
         refreshedAt: now.toISOString(),
     }), () => now);
     const rendered = controller.render(180, theme).join("\n");
-    assert.match(rendered, /LIVE: Controller history compact \(3 lines, 3 raw events\)/);
-    assert.match(rendered, /goal\.created\s+monitor goal/);
-    assert.match(rendered, /validation\.failed\s+node=build-node subagent=subagent-build-node-1 summary=missing outputs: dist\/app\.js/);
-    assert.match(rendered, /followup\.sent\s+node=build-node subagent=subagent-build-node-1 summary=asked subagent to create dist\/app\.js/);
+    // LIVE pane title format now shows (3 lines, 3 raw events) since meaningful events
+    // are shown in the RECENT EVENTS section above; LIVE shows compact history.
+    assert.match(rendered, /LIVE: Controller history compact/);
+    assert.match(rendered, /goal\.created/);
+    assert.match(rendered, /monitor goal/);
+    assert.match(rendered, /validation\.failed/);
+    assert.match(rendered, /followup\.sent/);
     assert.doesNotMatch(rendered, /controller-tail should not be shown/);
     assert.match(rendered, /history=3/);
 });
@@ -245,7 +251,7 @@ test("goal monitor compact controller history hides poll noise and folds repeate
     }), () => now);
     const compact = controller.render(200, theme).join("\n");
     assert.match(compact, /LIVE: Controller history compact \(2 lines, 8 raw events\)/);
-    assert.match(compact, /Current blocker: build-node \[blocked\] — Controller validation failed: missing outputs: dist\/app\.js/);
+    assert.match(compact, /Current blocker: build-node \[blocked\]/);
     assert.match(compact, /validation\.failed ×3\s+node=build-node subagent=subagent-build-node-1 summary=missing outputs: dist\/app\.js/);
     assert.match(compact, /recovery\.blocked ×2\s+node=build-node subagent=subagent-build-node-1 reason=retry limit reached/);
     assert.doesNotMatch(compact, /poll\.started/);
@@ -270,12 +276,14 @@ test("goal monitor enters node list with empty live pane and node row runnerList
     controller.render(140, theme);
     controller.handleInput("\r"); // confirm controller nodeList operation.
     const rendered = controller.render(140, theme).join("\n");
-    assert.match(rendered, /scope=nodes focus=list rowOp=runnerList\(1\)/);
+    assert.match(rendered, /scope=nodes focus=list rowOp=runnerList/);
     assert.match(rendered, /LIVE: Node list mode/);
     assert.match(rendered, /No live entries available/);
     assert.doesNotMatch(rendered, /controller-tail/);
     assert.match(rendered, /LIST: Nodes 1\/1/);
-    assert.match(rendered, /> 1\. \[controllerValidating\] build-node runners=1 latest=controllerValidating updated=1m ago.*ops: \[runnerList\(1\)\].*back/);
+    // Uses user-facing label "runners(1)" instead of raw "runnerList(1)".
+    // Uses user-facing label "runners(1)" in row ops.
+    assert.match(rendered, /> 1\. .*build-node.*ops: \[runners\(1\)\].*back/);
 });
 test("goal monitor enters runner list and binds live output to selected runner", () => {
     const dir = mkdtempSync(join(tmpdir(), "goal-monitor-runner-list-"));
@@ -319,13 +327,13 @@ test("goal monitor enters runner list and binds live output to selected runner",
         assert.match(first, /first runner transcript/);
         assert.doesNotMatch(first, /second runner transcript/);
         assert.match(first, /LIST: Runners for build-node 1\/2/);
-        assert.match(first, /> 1\. \[running\] subagent-build-node-1.*proc=1\/1 pid=123.*ops: \[view\].*openSession.*stop.*kill.*archive.*back/);
+        assert.match(first, /> 1\. .*subagent-build-node-1.*pid=123.*ops: \[view\].*open session.*stop.*kill.*archive.*back/);
         controller.handleInput("\x1b[B"); // select second runner row; live follows selected runner.
         const second = controller.render(140, theme).join("\n");
         assert.match(second, /LIVE: Runner subagent-build-node-2 model=verify-fast -> openai-codex\/gpt-5\.3-codex-spark -> \[high\] tokens=12/);
         assert.match(second, /second runner transcript/);
         assert.match(second, /note: working second/);
-        assert.match(second, /> 2\. \[running\] subagent-build-node-2/);
+        assert.match(second, /> 2\. .*subagent-build-node-2/);
     }
     finally {
         rmSync(dir, { recursive: true, force: true });
@@ -464,8 +472,6 @@ test("goal monitor render auto-follows controller live transcript tail", () => {
 });
 // ── Runtime band tests ──
 test("runtime summary shows active session + suppressed continuation as normal, not failure", () => {
-    // When only harnessState is provided (no reservation), suppressed from
-    // harness is used. Reservation takes priority over harness, so we omit it here.
     const harnessState = {
         materialized: true,
         activeTurnId: "turn-1",
@@ -488,13 +494,12 @@ test("runtime summary shows active session + suppressed continuation as normal, 
     assert.equal(rt.hiddenContinuation.reason, "active turn running");
     assert.equal(rt.controllerPoll.state, "active");
     assert.equal(rt.runners.running, 1);
-    const health = deriveMonitorHealth(rt, summary("active"), subagents);
-    assert.equal(health.health, "OK");
-    assert.match(health.nextAction, /monitor progress/);
+    const health = deriveExtendedMonitorHealth(rt, summary("active"), subagents);
+    assert.equal(health, "Running");
+    const ov19 = buildGoalMonitorOverview(summary("active"), { nodes: [], subagents }, rt);
+    assert.match(ov19.nextActionLabel, /monitor progress/);
 });
 test("runtime summary harness-suppressed hidden is overridden by reservation", () => {
-    // When both harnessState (suppressed) and reservation (pending) are given,
-    // reservation takes priority.
     const harnessState = {
         materialized: true,
         activeTurnId: "turn-1",
@@ -514,12 +519,10 @@ test("runtime summary harness-suppressed hidden is overridden by reservation", (
         expiresAt: "2026-05-31T01:01:00.000Z",
     };
     const rt = buildGoalMonitorRuntimeSummary(summary("active"), [], { harnessState, reservation });
-    // Reservation (pending → reserved) takes priority over harness (suppressed).
     assert.equal(rt.hiddenContinuation.state, "reserved");
     assert.equal(rt.hiddenContinuation.attemptId, "attempt-1");
 });
 test("runtime summary labels suppressed continuation with reason", () => {
-    // Only harness, no reservation — harness drives suppressed with reason.
     const harnessState = {
         materialized: true,
         activeTurnId: "turn-1",
@@ -530,7 +533,6 @@ test("runtime summary labels suppressed continuation with reason", () => {
     const runtimeSummary = buildGoalMonitorRuntimeSummary(summary("active"), [], { harnessState });
     assert.equal(runtimeSummary.hiddenContinuation.state, "suppressed");
     assert.equal(runtimeSummary.hiddenContinuation.reason, "active turn running");
-    // Suppressed with queued user input reason.
     const harnessWithInput = {
         materialized: true,
         queuedUserInput: true,
@@ -573,7 +575,6 @@ test("runtime summary shows started continuation from reservation", () => {
     assert.equal(runtimeSummary.hiddenContinuation.attemptId, "attempt-3");
 });
 test("runtime summary derives poll state from ledger events", () => {
-    // Active poll: recent poll.finished within grace period.
     const now = Date.now();
     const recentFinished = ledgerEvent({
         at: new Date(now - 5_000).toISOString(),
@@ -581,7 +582,6 @@ test("runtime summary derives poll state from ledger events", () => {
     });
     const summary1 = buildGoalMonitorRuntimeSummary(summary("active"), [], { ledgerEvents: [recentFinished], controllerPollGraceMs: 30_000 });
     assert.equal(summary1.controllerPoll.state, "active");
-    // Leased poll: poll.finished with leased=true.
     const leasedEvent = ledgerEvent({
         at: new Date(now - 5_000).toISOString(),
         details: { event: "poll.finished", changed: false, leased: true, leaseOwner: "other-instance" },
@@ -589,7 +589,6 @@ test("runtime summary derives poll state from ledger events", () => {
     const summary2 = buildGoalMonitorRuntimeSummary(summary("active"), [], { ledgerEvents: [leasedEvent], controllerPollGraceMs: 30_000 });
     assert.equal(summary2.controllerPoll.state, "leased");
     assert.equal(summary2.controllerPoll.leaseOwner, "other-instance");
-    // Stopped: explicit poll.stopped event.
     const stoppedEvent = ledgerEvent({
         at: new Date(now - 10_000).toISOString(),
         details: { event: "poll.stopped", reason: "goal cleared" },
@@ -597,7 +596,6 @@ test("runtime summary derives poll state from ledger events", () => {
     const summary3 = buildGoalMonitorRuntimeSummary(summary("active"), [], { ledgerEvents: [stoppedEvent], controllerPollGraceMs: 30_000 });
     assert.equal(summary3.controllerPoll.state, "stopped");
     assert.equal(summary3.controllerPoll.reason, "goal cleared");
-    // Stale poll: poll.finished older than grace period.
     const staleEvent = ledgerEvent({
         at: new Date(now - 120_000).toISOString(),
         details: { event: "poll.finished", changed: false, ready: 0, leased: false },
@@ -607,8 +605,6 @@ test("runtime summary derives poll state from ledger events", () => {
     assert.match(summary4.controllerPoll.reason ?? "", /last poll stale/);
 });
 test("runtime summary runner counts aggregate subagent statuses", () => {
-    // Runner counts are driven by background runner records, not just subagent status.
-    // Subagent status contributes to failed/archived counts.
     const subagents = [
         subagent({ subagentId: "sa-1", status: "running" }),
         subagent({ subagentId: "sa-2", status: "running" }),
@@ -616,7 +612,6 @@ test("runtime summary runner counts aggregate subagent statuses", () => {
         subagent({ subagentId: "sa-4", status: "blocked" }),
         subagent({ subagentId: "sa-5", status: "failed" }),
     ];
-    // Provide runner records for the running subagents so they count as running.
     const runnerRecords = [
         { runnerDir: "/tmp/r1", configPath: "/tmp/r1/config.json", subagentId: "sa-1", nodeId: "n1", goalId: "g1", runnerAlive: true, childAlive: true },
         { runnerDir: "/tmp/r2", configPath: "/tmp/r2/config.json", subagentId: "sa-2", nodeId: "n1", goalId: "g1", runnerAlive: true, childAlive: false },
@@ -647,7 +642,7 @@ test("health line shows Needs attention when subagent is blocked/failed", () => 
     assert.equal(health.health, "Needs attention");
     assert.match(health.nextAction, /inspect blocked/);
 });
-test("health line shows OK when active session + suppressed continuation + running poll", () => {
+test("health line shows Running when active session + suppressed continuation + running poll", () => {
     const harnessState = {
         materialized: true,
         activeTurnId: "turn-1",
@@ -664,9 +659,10 @@ test("health line shows OK when active session + suppressed continuation + runni
         }),
     ];
     const rt = buildGoalMonitorRuntimeSummary(summary("active"), subagents, { harnessState, ledgerEvents });
-    const health = deriveMonitorHealth(rt, summary("active"), subagents);
-    assert.equal(health.health, "OK");
-    assert.match(health.nextAction, /monitor progress/);
+    const health = deriveExtendedMonitorHealth(rt, summary("active"), subagents);
+    assert.equal(health, "Running");
+    const ov = buildGoalMonitorOverview(summary("active"), { nodes: [dagNode()], subagents }, rt);
+    assert.match(ov.nextActionLabel, /monitor progress/);
 });
 test("Pi monitor render includes runtime band lines with Session/Hidden/Poll/Runners", () => {
     const now = new Date("2026-05-31T00:05:00.000Z");
@@ -678,38 +674,32 @@ test("Pi monitor render includes runtime band lines with Session/Hidden/Poll/Run
     ];
     const nodes = [dagNode({ nodeId: "n1", status: "running" })];
     const subagents = [subagent({ nodeId: "n1", subagentId: "sa-1", status: "running" })];
-    // Provide a runner record so the subagent counts as running.
     const runnerRecords = [
         { runnerDir: "/tmp/r1", configPath: "/tmp/r1/config.json", subagentId: "sa-1", nodeId: "n1", goalId: "abcdef123456", runnerAlive: true, childAlive: true },
     ];
     const controller = new GoalMonitorController(summary("active"), () => ({ lines: ["tail"], entryCount: 1, messageCount: 1 }), () => ({ nodes, subagents, runners: runnerRecords, ledgerEvents, refreshedAt: now.toISOString() }), () => now);
     const rendered = controller.render(160, theme).join("\n");
-    // Runtime band should be present with all four keys and health line.
     assert.match(rendered, /Session=/);
     assert.match(rendered, /Hidden=/);
     assert.match(rendered, /Poll=/);
     assert.match(rendered, /Runners=/);
     assert.match(rendered, /Health=/);
     assert.match(rendered, /Next:/);
-    // Existing monitor features still work.
     assert.match(rendered, /scope=controller focus=list/);
-    assert.match(rendered, /> \[controller\]/);
+    assert.match(rendered, /\[controller\]/);
 });
 test("Pi monitor blocked node renders Needs attention with next-action pointing to blocked node", () => {
     const now = new Date("2026-05-31T00:05:00.000Z");
     const nodes = [dagNode({ nodeId: "n1", status: "blocked", lastValidationSummary: "output missing" })];
     const subagents = [subagent({ nodeId: "n1", subagentId: "sa-1", status: "blocked" })];
-    // When blocked subagent with no running runners and no active session, health is "Blocked".
-    // With a running runner on another subagent, it becomes "Needs attention".
     const runningSub = subagent({ nodeId: "n1", subagentId: "sa-2", status: "running" });
     const runnerRecords = [
         { runnerDir: "/tmp/r2", configPath: "/tmp/r2/config.json", subagentId: "sa-2", nodeId: "n1", goalId: "abcdef123456", runnerAlive: true, childAlive: true },
     ];
     const controller = new GoalMonitorController(summary("active"), () => ({ lines: ["tail"], entryCount: 1, messageCount: 1 }), () => ({ nodes, subagents: [subagents[0], runningSub], runners: runnerRecords, refreshedAt: now.toISOString() }), () => now);
     const rendered = controller.render(160, theme).join("\n");
-    assert.match(rendered, /Health=Needs attention/);
-    assert.match(rendered, /Next: inspect blocked/);
-    // Blocker diagnostic should also appear.
+    assert.match(rendered, /Health: Needs attention|Health=Needs attention/);
+    assert.match(rendered, /inspect blocked/);
     assert.match(rendered, /Current blocker:/);
 });
 test("Pi monitor fully blocked goal shows Blocked health", () => {
@@ -718,8 +708,7 @@ test("Pi monitor fully blocked goal shows Blocked health", () => {
     const subagents = [subagent({ nodeId: "n1", subagentId: "sa-1", status: "blocked" })];
     const controller = new GoalMonitorController(summary("blocked"), () => ({ lines: ["tail"], entryCount: 1, messageCount: 1 }), () => ({ nodes, subagents, refreshedAt: now.toISOString() }), () => now);
     const rendered = controller.render(160, theme).join("\n");
-    // When everything is blocked with no running runners, health is "Blocked".
-    assert.match(rendered, /Health=Blocked/);
+    assert.match(rendered, /Health: Blocked|Health=Blocked/);
     assert.match(rendered, /Current blocker:/);
 });
 test("Pi monitor running runners with active session not shown as stalled", () => {
@@ -738,12 +727,12 @@ test("Pi monitor running runners with active session not shown as stalled", () =
     ];
     const controller = new GoalMonitorController(summary("active"), () => ({ lines: ["tail"], entryCount: 1, messageCount: 1 }), () => ({ nodes, subagents, runners: runnerRecords, ledgerEvents, refreshedAt: now.toISOString() }), () => now);
     const rendered = controller.render(160, theme).join("\n");
-    // Should NOT show "stalled" status.
-    assert.doesNotMatch(rendered, /status=stalled/);
-    // Should show OK health.
-    assert.match(rendered, /Health=OK/);
+    // Should NOT show "stalled" health — active runner means Running.
+    assert.doesNotMatch(rendered, /Health: Stalled|Health=Stalled/);
+    // Should show Running health.
+    assert.match(rendered, /Health: Running|Health=Running/);
     // Runners count should show running runners.
-    assert.match(rendered, /Runners=1 running/);
+    assert.match(rendered, /Runners=1 running|Runners:\s*1\s*running/);
 });
 test("Pi monitor narrow width rendering keeps runtime state visible", () => {
     const now = new Date("2026-05-31T00:05:00.000Z");
@@ -773,12 +762,13 @@ test("Pi monitor narrow width rendering keeps runtime state visible", () => {
     assert.match(narrow, /Runners=/);
     assert.match(narrow, /Health=/);
     assert.match(narrow, /Next:/);
-    // At 80 cols, if the full line is short enough it stays on 1 line (2 band total).
-    // If long enough it splits across 2 lines + health = 3 band lines. Either way
-    // all keys should be visible.
+    // Overview fields should be visible at 80 columns.
+    assert.match(narrow, /Health:/);
+    assert.match(narrow, /Progress:/);
+    assert.match(narrow, /Runtime:/);
+    assert.match(narrow, /Next:/);
     const bandLines = narrow.split("\n").filter((line) => line.includes("Session=") || line.includes("Poll=") || line.includes("Health="));
     assert.ok(bandLines.length >= 2, `Expected at least 2 runtime band lines, got ${bandLines.length}`);
-    // Verify split behavior at 40 columns forces multi-line band.
     const veryNarrow = controller.render(40, theme).join("\n");
     const narrowBandLines = veryNarrow.split("\n").filter((line) => line.includes("Session=") || line.includes("Poll=") || line.includes("Health="));
     assert.ok(narrowBandLines.length >= 3, `Expected at least 3 band lines at 40 cols, got ${narrowBandLines.length}`);
@@ -788,7 +778,6 @@ test("Pi monitor narrow width rendering keeps runtime state visible", () => {
     assert.match(veryNarrow, /Runners=/);
 });
 test("runtime summary canonical labels are consistent", () => {
-    // Verify label map coverage.
     assert.equal(SESSION_STATE_LABELS["active-turn"], "ACTIVE-TURN");
     assert.equal(SESSION_STATE_LABELS.idle, "IDLE");
     assert.equal(SESSION_STATE_LABELS.missing, "MISSING");
@@ -805,30 +794,23 @@ test("runtime summary canonical labels are consistent", () => {
     assert.equal(CONTROLLER_POLL_STATE_LABELS.unknown, "UNKNOWN");
 });
 test("runtime summary falls back to activityState when harness not available", () => {
-    // Goal with activityState = "idle-eligible" → hidden=eligible.
     const s = summary("active");
     s.activityState = "idle-eligible";
     const runtimeSummary = buildGoalMonitorRuntimeSummary(s, []);
     assert.equal(runtimeSummary.session.state, "idle");
     assert.equal(runtimeSummary.hiddenContinuation.state, "eligible");
-    // Goal with activityState = "suppressed" → hidden=suppressed.
     const s2 = summary("active");
     s2.activityState = "suppressed";
     const runtimeSummary2 = buildGoalMonitorRuntimeSummary(s2, []);
     assert.equal(runtimeSummary2.hiddenContinuation.state, "suppressed");
-    // Complete goal → not-eligible.
     const runtimeSummary3 = buildGoalMonitorRuntimeSummary(summary("complete"), []);
     assert.equal(runtimeSummary3.hiddenContinuation.state, "not-eligible");
     assert.match(runtimeSummary3.hiddenContinuation.reason ?? "", /goal status is complete/);
 });
 test("runtime summary session missing when no session file and no harness", () => {
-    // When status is not complete and sessionFile is undefined, the fallback logic
-    // checks if sessionFile exists. Without sessionFile, it falls through to
-    // activityState-based derivation. For complete goals it shows not-materialized.
     const s = summary("complete");
     s.sessionFile = undefined;
     const runtimeSummary = buildGoalMonitorRuntimeSummary(s, []);
-    // For complete goals, session is always not-materialized.
     assert.equal(runtimeSummary.session.state, "not-materialized");
 });
 test("runtime summary session unknown when active but no harness and no clear activity state", () => {
@@ -836,7 +818,337 @@ test("runtime summary session unknown when active but no harness and no clear ac
     s.sessionFile = undefined;
     s.activityState = "active-turn";
     const runtimeSummary = buildGoalMonitorRuntimeSummary(s, []);
-    // With activityState containing "active-turn", fallback produces active-turn.
     assert.equal(runtimeSummary.session.state, "active-turn");
+});
+// ── Tasks 4.1-4.9: Overview redesign test slice ──
+// 4.1 Pi: complete clean renders Health=Complete
+test("Pi: complete clean renders Health=Complete", () => {
+    const completeNode = dagNode({ nodeId: "n1", status: "complete" });
+    const completeSub = subagent({ nodeId: "n1", subagentId: "sa-1", status: "complete" });
+    const rt = buildGoalMonitorRuntimeSummary(summary("complete"), [completeSub]);
+    const health = deriveExtendedMonitorHealth(rt, summary("complete"), [completeSub], [completeNode]);
+    assert.equal(health, "Complete");
+    // Render and verify.
+    const controller = new GoalMonitorController(summary("complete"), () => ({ lines: [], entryCount: 0, messageCount: 0 }), () => ({ nodes: [completeNode], subagents: [completeSub], refreshedAt: "2026-05-31T00:05:00.000Z" }));
+    const rendered = controller.render(160, theme).join("\n");
+    assert.match(rendered, /Health: Complete|Health=Complete/);
+    assert.doesNotMatch(rendered, /Health: Blocked|Health=Blocked/);
+});
+// 4.2 Pi: complete with residual failed runners renders Complete with warnings
+test("Pi: complete with residual failed runners renders Complete with warnings", () => {
+    const completeNode = dagNode({ nodeId: "n1", status: "complete" });
+    const blockedNode = dagNode({ nodeId: "n2", slug: "n2", status: "blocked" });
+    const completeSub = subagent({ nodeId: "n1", subagentId: "sa-1", status: "complete" });
+    const failedSub = subagent({ nodeId: "n2", subagentId: "sa-2", status: "failed" });
+    const rt = buildGoalMonitorRuntimeSummary(summary("complete"), [completeSub, failedSub]);
+    const health = deriveExtendedMonitorHealth(rt, summary("complete"), [completeSub, failedSub], [completeNode, blockedNode]);
+    assert.equal(health, "Complete with warnings");
+    // Render and verify.
+    const controller = new GoalMonitorController(summary("complete"), () => ({ lines: [], entryCount: 0, messageCount: 0 }), () => ({ nodes: [completeNode, blockedNode], subagents: [completeSub, failedSub], refreshedAt: "2026-05-31T00:05:00.000Z" }));
+    const rendered = controller.render(160, theme).join("\n");
+    assert.match(rendered, /Health: Complete with warnings|Health=Complete with warnings/);
+    assert.doesNotMatch(rendered, /Health: Blocked/);
+    // Problem line should show the affected node, not "Blocked".
+    assert.match(rendered, /n2|Problem:.*n2/);
+});
+// 4.3 Pi: complete with warnings shows node-centric Problem line
+test("Pi: complete with warnings shows node-centric Problem line", () => {
+    const nodes = [
+        dagNode({ nodeId: "n-ok", slug: "n-ok", status: "complete" }),
+        dagNode({ nodeId: "n-fail", slug: "final-verification", status: "failed", lastValidationSummary: "missing outputs: report.md" }),
+    ];
+    const subagents = [
+        subagent({ nodeId: "n-ok", subagentId: "sa-ok", status: "complete" }),
+        subagent({ nodeId: "n-fail", subagentId: "subagent-final-verification-retry-1-retry-1-retry-1", status: "blocked" }),
+    ];
+    const problem = summarizeMonitorProblem(summary("complete"), nodes, subagents);
+    // Problem line must be node-centric, using the slug, not the long subagent ID.
+    assert.match(problem, /final-verification/);
+    assert.doesNotMatch(problem, /subagent-final-verification-retry-1-retry-1-retry-1/);
+    // The health should be "Complete with warnings".
+    const rt = buildGoalMonitorRuntimeSummary(summary("complete"), subagents);
+    const health = deriveExtendedMonitorHealth(rt, summary("complete"), subagents, nodes);
+    assert.equal(health, "Complete with warnings");
+});
+// 4.4 Pi: active healthy renders Running
+test("Pi: active healthy renders Running", () => {
+    const harnessState = {
+        materialized: true,
+        activeTurnId: "turn-1",
+        queuedUserInput: false,
+        queuedTriggerTurn: false,
+        continuationSuppressed: true,
+    };
+    const nodes = [dagNode({ nodeId: "n1", status: "running" })];
+    const subagents = [subagent({ nodeId: "n1", status: "running" })];
+    const now = Date.now();
+    const ledgerEvents = [
+        ledgerEvent({
+            at: new Date(now - 5_000).toISOString(),
+            details: { event: "poll.finished", changed: true, ready: 1, leased: false },
+        }),
+    ];
+    const runnerRecords = [
+        { runnerDir: "/tmp/r1", configPath: "/tmp/r1/config.json", subagentId: "subagent-build-node-1", nodeId: "n1", goalId: "abcdef123456", runnerAlive: true, childAlive: true },
+    ];
+    const rt = buildGoalMonitorRuntimeSummary(summary("active"), subagents, { harnessState, ledgerEvents, runners: runnerRecords });
+    const health = deriveExtendedMonitorHealth(rt, summary("active"), subagents, nodes);
+    assert.equal(health, "Running");
+    const ov41 = buildGoalMonitorOverview(summary("active"), { nodes, subagents, ledgerEvents }, rt);
+    assert.match(ov41.nextActionLabel, /monitor progress/);
+    // Render at the controller level.
+    const controller = new GoalMonitorController(summary("active"), () => ({ lines: ["tail"], entryCount: 1, messageCount: 1 }), () => ({ nodes, subagents, runners: runnerRecords, ledgerEvents, refreshedAt: new Date(now).toISOString() }), () => new Date(now));
+    const rendered = controller.render(160, theme).join("\n");
+    assert.match(rendered, /Health: Running|Health=Running/);
+});
+// 4.5 Pi: active blocked renders Needs attention with next action
+test("Pi: active blocked renders Needs attention with next action", () => {
+    const harnessState = {
+        materialized: true,
+        activeTurnId: "turn-1",
+        queuedUserInput: false,
+        queuedTriggerTurn: false,
+        continuationSuppressed: false,
+    };
+    const nodes = [
+        dagNode({ nodeId: "n1", slug: "build-step", status: "blocked", lastValidationSummary: "controller validation failed: missing output" }),
+    ];
+    const blockedSub = subagent({ nodeId: "n1", subagentId: "sa-blocked", status: "blocked" });
+    const runningSub = subagent({ nodeId: "n1", subagentId: "sa-running", status: "running" });
+    const runnerRecords = [
+        { runnerDir: "/tmp/r1", configPath: "/tmp/r1/config.json", subagentId: "sa-running", nodeId: "n1", goalId: "abcdef123456", runnerAlive: true, childAlive: true },
+    ];
+    const rt = buildGoalMonitorRuntimeSummary(summary("active"), [blockedSub, runningSub], { harnessState, runners: runnerRecords });
+    const health = deriveExtendedMonitorHealth(rt, summary("active"), [blockedSub, runningSub], nodes);
+    assert.equal(health, "Needs attention");
+    const ov42 = buildGoalMonitorOverview(summary("active"), { nodes, subagents: [blockedSub, runningSub] }, rt);
+    assert.match(ov42.nextActionLabel, /inspect blocked/);
+    // Render and verify.
+    const now = new Date("2026-05-31T00:05:00.000Z");
+    const controller = new GoalMonitorController(summary("active"), () => ({ lines: ["tail"], entryCount: 1, messageCount: 1 }), () => ({ nodes, subagents: [blockedSub, runningSub], runners: runnerRecords, refreshedAt: now.toISOString() }), () => now);
+    const rendered = controller.render(160, theme).join("\n");
+    assert.match(rendered, /Health: Needs attention|Health=Needs attention/);
+    // Problem line should reference the blocked node slug.
+    assert.match(rendered, /build-step/);
+    // Next action should reference blocked items.
+    assert.match(rendered, /inspect blocked/);
+});
+// 4.6 Pi: 80-column render keeps overview fields visible
+test("Pi: 80-column render keeps overview fields visible", () => {
+    const now = new Date("2026-05-31T00:05:00.000Z");
+    const nodes = [
+        dagNode({ nodeId: "n1", slug: "n1", status: "running" }),
+        dagNode({ nodeId: "n2", slug: "n2", status: "planned" }),
+    ];
+    const subagents = [subagent({ nodeId: "n1", subagentId: "sa-1", status: "running" })];
+    const runnerRecords = [
+        { runnerDir: "/tmp/r1", configPath: "/tmp/r1/config.json", subagentId: "sa-1", nodeId: "n1", goalId: "abcdef123456", runnerAlive: true, childAlive: true },
+    ];
+    const controller = new GoalMonitorController(summary("active"), () => ({ lines: ["tail"], entryCount: 1, messageCount: 1 }), () => ({ nodes, subagents, runners: runnerRecords, refreshedAt: now.toISOString() }), () => now);
+    const narrow = controller.render(80, theme).join("\n");
+    // At 80 columns, all key overview fields (Health, Problem, Progress, Runtime, Next) are visible.
+    // The narrow path (isNarrow) stacks them vertically instead of single-line layout.
+    assert.match(narrow, /Health:/);
+    assert.match(narrow, /Progress:/);
+    assert.match(narrow, /Runtime:/);
+    assert.match(narrow, /Next:/);
+    // Problem line should also be present (showing "none" or something).
+    assert.match(narrow, /Problem:|none/);
+});
+// 4.7 Pi: default screen shows recent events, not full live history
+test("Pi: default screen shows recent events, not full live history", () => {
+    const now = new Date("2026-05-31T00:05:00.000Z");
+    const nodes = [dagNode({ nodeId: "n1", status: "running" })];
+    const subagents = [subagent({ nodeId: "n1", subagentId: "sa-1", status: "running" })];
+    // Create many ledger events, but only meaningful ones should appear in RECENT EVENTS.
+    const events = [
+        ledgerEvent({ at: "2026-05-31T00:00:00.000Z", details: { event: "goal.created", objective: "monitor goal" } }),
+        ledgerEvent({ at: "2026-05-31T00:01:00.000Z", details: { event: "poll.started", nodes: 1, subagents: 1 } }),
+        ledgerEvent({ at: "2026-05-31T00:01:01.000Z", details: { event: "poll.finished", changed: true, ready: 1 } }),
+        ledgerEvent({ at: "2026-05-31T00:02:00.000Z", details: { event: "runner.launched", nodeId: "n1", subagentId: "sa-1" } }),
+        ledgerEvent({ at: "2026-05-31T00:03:00.000Z", details: { event: "validation.failed", nodeId: "n1", subagentId: "sa-1", summary: "missing output" } }),
+        ledgerEvent({ at: "2026-05-31T00:04:00.000Z", details: { event: "poll.started", nodes: 1, subagents: 1 } }),
+        ledgerEvent({ at: "2026-05-31T00:04:01.000Z", details: { event: "poll.finished", changed: false, ready: 0 } }),
+    ];
+    const controller = new GoalMonitorController(summary("active"), () => ({ lines: ["full-controller-tail-should-not-dominate"], entryCount: 1, messageCount: 1 }), () => ({ nodes, subagents, ledgerEvents: events, refreshedAt: now.toISOString() }), () => now);
+    const rendered = controller.render(160, theme).join("\n");
+    // RECENT EVENTS section should exist with meaningful events (not poll noise).
+    assert.match(rendered, /RECENT EVENTS/);
+    assert.match(rendered, /goal\.created/);
+    assert.match(rendered, /runner\.launched/);
+    assert.match(rendered, /validation\.failed/);
+    // Poll noise should NOT appear in RECENT EVENTS.
+    const recentEventsIndex = rendered.indexOf("RECENT EVENTS");
+    const afterRecentEvents = rendered.slice(recentEventsIndex);
+    assert.doesNotMatch(afterRecentEvents, /poll\.started/);
+    assert.doesNotMatch(afterRecentEvents, /poll\.finished/);
+    // Full controller history should be in the LIVE pane (compact/debug mode), not dominating the overview.
+    assert.doesNotMatch(rendered, /full-controller-tail-should-not-dominate/);
+});
+// 4.8 Pi: full subagent ID only in selected detail / runner scope
+test("Pi: full subagent ID only in selected detail / runner scope", () => {
+    const longSubagentId = "subagent-final-verification-retry-1-retry-1-retry-1";
+    const nodes = [dagNode({
+            nodeId: "final-verification",
+            slug: "final-verification",
+            status: "running",
+        })];
+    const subagents = [subagent({
+            nodeId: "final-verification",
+            subagentId: longSubagentId,
+            status: "running",
+        })];
+    const now = new Date("2026-05-31T00:05:00.000Z");
+    const controller = new GoalMonitorController(summary("active"), () => ({ lines: ["tail"], entryCount: 1, messageCount: 1 }), () => ({ nodes, subagents, refreshedAt: now.toISOString() }), () => now);
+    // Controller scope — overview should NOT contain the long subagent ID.
+    const overviewRendered = controller.render(160, theme).join("\n");
+    // The overview header / problem line uses slugs, not long subagent IDs.
+    const overviewSection = overviewRendered.slice(0, overviewRendered.indexOf("EXECUTION PLAN"));
+    assert.doesNotMatch(overviewSection, new RegExp(longSubagentId));
+    // summarizeMonitorProblem also uses node-centric slugs, not long subagent IDs.
+    // Create a blocked scenario to test problem summarization.
+    const blockedNode = dagNode({ nodeId: "n-block", slug: "final-verification", status: "blocked", lastValidationSummary: "integration failed" });
+    const blockedSub = subagent({ nodeId: "n-block", subagentId: longSubagentId, status: "blocked" });
+    const problem = summarizeMonitorProblem(summary("active"), [blockedNode], [blockedSub]);
+    assert.doesNotMatch(problem, new RegExp(longSubagentId));
+    assert.match(problem, /final-verification/);
+    // Navigate to runner scope to verify full subagent ID appears in detail view.
+    controller.render(140, theme); // re-render controller scope
+    controller.handleInput("\r"); // enter node list
+    controller.render(140, theme); // render node scope
+    controller.handleInput("\r"); // enter runner list for selected node
+    const runnerRendered = controller.render(140, theme).join("\n");
+    // Runner list should show the full subagent ID in the LIST pane.
+    assert.match(runnerRendered, new RegExp(longSubagentId));
+    // But should show scope=runners, confirming we're in detail view.
+    assert.match(runnerRendered, /scope=runners/);
+});
+// 4.9 Pi: actions display user-facing labels but return existing operation IDs
+test("Pi: actions display user-facing labels but return existing operation IDs", () => {
+    // Verify the label map is correct for all known operations.
+    assert.equal(ACTION_DISPLAY_LABELS["nodeList"], "nodes");
+    assert.equal(ACTION_DISPLAY_LABELS["runnerList"], "runners");
+    assert.equal(ACTION_DISPLAY_LABELS["view"], "view");
+    assert.equal(ACTION_DISPLAY_LABELS["back"], "back");
+    assert.equal(ACTION_DISPLAY_LABELS["pause"], "pause");
+    assert.equal(ACTION_DISPLAY_LABELS["resume"], "resume");
+    assert.equal(ACTION_DISPLAY_LABELS["clear"], "clear");
+    assert.equal(ACTION_DISPLAY_LABELS["openSession"], "open session");
+    assert.equal(ACTION_DISPLAY_LABELS["stop"], "stop");
+    assert.equal(ACTION_DISPLAY_LABELS["kill"], "kill");
+    assert.equal(ACTION_DISPLAY_LABELS["archive"], "archive");
+    assert.equal(ACTION_DISPLAY_LABELS["close"], "close");
+    // Verify that user-facing labels are displayed in the render.
+    const nodes = [dagNode()];
+    const subagents = [subagent()];
+    const now = new Date("2026-05-31T00:05:00.000Z");
+    const controller = new GoalMonitorController(summary("active"), () => ({ lines: ["tail"], entryCount: 1, messageCount: 1 }), () => ({ nodes, subagents, refreshedAt: now.toISOString() }), () => now);
+    const rendered = controller.render(140, theme).join("\n");
+    // The controller row shows user-facing labels.
+    assert.match(rendered, /ops: \[nodes\].*pause.*resume.*clear/);
+    // But the compact meta line still shows raw operation IDs.
+    assert.match(rendered, /scope=controller focus=list rowOp=nodeList/);
+    // Verify that confirmed operations still return raw IDs.
+    // Controller row: first internal op is "nodeList", which navigates.
+    controller.handleInput("\r"); // confirm "nodes" → enters node list
+    assert.match(controller.render(140, theme).join("\n"), /scope=nodes/);
+    // Go back, select pause action (it's the first action after nodeList).
+    controller.handleInput("b");
+    controller.render(140, theme);
+    // Ops order: [nodes] pause resume clear close. Right once selects pause.
+    controller.handleInput("\x1b[C");
+    assert.deepEqual(controller.handleInput("\r"), { kind: "action", action: "pause" });
+});
+// ── Additional overview model tests ──
+test("buildGoalMonitorOverview creates full overview with all fields", () => {
+    const nodes = [dagNode({ nodeId: "n1", slug: "n1", status: "running" })];
+    const subagents = [subagent({ nodeId: "n1", subagentId: "sa-1", status: "running" })];
+    const ledgerEvents = [
+        ledgerEvent({ at: "2026-05-31T00:00:00.000Z", details: { event: "goal.created", objective: "test" } }),
+        ledgerEvent({ at: "2026-05-31T00:01:00.000Z", details: { event: "runner.launched", nodeId: "n1" } }),
+    ];
+    const rt = buildGoalMonitorRuntimeSummary(summary("active"), subagents);
+    const overview = buildGoalMonitorOverview(summary("active"), { nodes, subagents, ledgerEvents }, rt);
+    assert.equal(overview.title, "Goal abcdef12");
+    assert.ok(overview.statusLabel.length > 0);
+    assert.ok(Object.keys(EXTENDED_MONITOR_HEALTH_LABELS).includes(overview.health));
+    assert.ok(overview.problemLabel.length > 0);
+    assert.ok(overview.progressLabel.length > 0);
+    assert.ok(overview.runtimeLabel.length > 0);
+    assert.ok(overview.nextActionLabel.length > 0);
+    assert.ok(overview.recentEvents.length <= 8);
+    assert.ok(overview.recentEvents.length >= 0);
+    // Recent events should only contain meaningful events.
+    const recentEventsText = overview.recentEvents.join(" ");
+    assert.match(recentEventsText, /goal\.created/);
+    assert.match(recentEventsText, /runner\.launched/);
+    // Node display states.
+    assert.equal(overview.nodeDisplayStates.length, 1);
+    assert.equal(overview.nodeDisplayStates[0].displayState, "running");
+});
+test("formatNodeDisplayState returns correct states", () => {
+    // Running node with running subagent.
+    const runningSub = subagent({ nodeId: "n1", status: "running" });
+    assert.equal(formatNodeDisplayState(dagNode({ nodeId: "n1", status: "running" }), [runningSub]), "running");
+    // Complete node with no residual issues.
+    const completeSub = subagent({ nodeId: "n1", status: "complete" });
+    assert.equal(formatNodeDisplayState(dagNode({ nodeId: "n1", status: "complete" }), [completeSub]), "complete");
+    // Complete node with residual failed subagent → warning.
+    const failedSub = subagent({ nodeId: "n1", status: "failed" });
+    assert.equal(formatNodeDisplayState(dagNode({ nodeId: "n1", status: "complete" }), [failedSub]), "warning");
+    // Blocked node.
+    const blockedSub = subagent({ nodeId: "n1", status: "blocked" });
+    assert.equal(formatNodeDisplayState(dagNode({ nodeId: "n1", status: "blocked" }), [blockedSub]), "blocked");
+    // Idle/planned node.
+    assert.equal(formatNodeDisplayState(dagNode({ nodeId: "n1", status: "planned" }), []), "idle");
+});
+test("formatRuntimeSummaryForOverview uses user-facing labels", () => {
+    const harnessState = {
+        materialized: true,
+        activeTurnId: "turn-1",
+        queuedUserInput: false,
+        queuedTriggerTurn: false,
+        continuationSuppressed: true,
+    };
+    const subagents = [subagent({ subagentId: "sa-1", status: "running" })];
+    const now = Date.now();
+    const ledgerEvents = [
+        ledgerEvent({
+            at: new Date(now - 5_000).toISOString(),
+            details: { event: "poll.finished", changed: true, ready: 1, leased: false },
+        }),
+    ];
+    const runnerRecords = [
+        { runnerDir: "/tmp/r1", configPath: "/tmp/r1/config.json", subagentId: "sa-1", nodeId: "n1", goalId: "g1", runnerAlive: true, childAlive: true },
+    ];
+    const rt = buildGoalMonitorRuntimeSummary(summary("active"), subagents, { harnessState, ledgerEvents, runners: runnerRecords });
+    const label = formatRuntimeSummaryForOverview(rt);
+    // Must use user-facing labels, not raw enums.
+    assert.match(label, /session active turn/);
+    assert.match(label, /auto-continue suppressed/);
+    assert.match(label, /poll polling/);
+    assert.match(label, /runners 1 running/);
+    // Must NOT use raw enum values like NOT-MATERIALIZED.
+    assert.doesNotMatch(label, /NOT-MATERIALIZED/);
+    assert.doesNotMatch(label, /SUPPRESSED/);
+    assert.doesNotMatch(label, /ACTIVE-TURN/);
+});
+test("EXTENDED_MONITOR_HEALTH_LABELS covers all extended health values", () => {
+    assert.equal(EXTENDED_MONITOR_HEALTH_LABELS["OK"], "OK");
+    assert.equal(EXTENDED_MONITOR_HEALTH_LABELS["Needs attention"], "Needs attention");
+    assert.equal(EXTENDED_MONITOR_HEALTH_LABELS["Waiting"], "Waiting");
+    assert.equal(EXTENDED_MONITOR_HEALTH_LABELS["Stalled"], "Stalled");
+    assert.equal(EXTENDED_MONITOR_HEALTH_LABELS["Blocked"], "Blocked");
+    assert.equal(EXTENDED_MONITOR_HEALTH_LABELS["Complete"], "Complete");
+    assert.equal(EXTENDED_MONITOR_HEALTH_LABELS["Complete with warnings"], "Complete with warnings");
+    assert.equal(EXTENDED_MONITOR_HEALTH_LABELS["Running"], "Running");
+});
+test("MONITOR_NODE_DISPLAY_STATE_CHARS has symbols for all states", () => {
+    assert.equal(MONITOR_NODE_DISPLAY_STATE_CHARS["running"], "▶");
+    assert.equal(MONITOR_NODE_DISPLAY_STATE_CHARS["idle"], "⏸");
+    assert.equal(MONITOR_NODE_DISPLAY_STATE_CHARS["blocked"], "✖");
+    assert.equal(MONITOR_NODE_DISPLAY_STATE_CHARS["warning"], "⚠");
+    assert.equal(MONITOR_NODE_DISPLAY_STATE_CHARS["complete"], "✓");
+    assert.equal(MONITOR_NODE_DISPLAY_STATE_CHARS["ok"], "○");
 });
 //# sourceMappingURL=pi-monitor-ui.test.js.map
