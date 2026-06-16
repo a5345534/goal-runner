@@ -437,3 +437,103 @@ test("controller validation runner checks required implementation diff evidence"
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("controller validation runner blocks persisted unsupported required evidence without follow-up", () => {
+  // Simulate old persisted state with unsupported evidence tokens.
+  // The closed TypeScript union prevents assigning invalid strings, so we
+  // mutate the returned mutable request object to bypass the type guard.
+  const req = request({
+    node: {
+      ...request().node,
+      validation: {} as never,
+    },
+  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (req.node.validation as any).requiredEvidence = ["pnpm test passes"];
+  const result = runControllerValidation(req);
+
+  assert.equal(result.status, "blocked");
+  assert.ok(!result.followupPrompt, "must not include followupPrompt for invalid contract");
+  assert.match(result.summary ?? "", /unsupported requiredEvidence token\(s\): pnpm test passes/);
+  assert.match(result.summary ?? "", /invalid validation contract/i);
+  // Validation signals should include diagnostic info about the unsupported token
+  assert.match(
+    result.validationSignals?.join("\n") ?? "",
+    /invalid contract: unsupported required evidence: pnpm test passes/,
+  );
+});
+
+test("controller validation runner blocks multiple persisted unsupported evidence tokens together", () => {
+  const req = request({
+    node: {
+      ...request().node,
+      validation: {} as never,
+    },
+  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (req.node.validation as any).requiredEvidence = ["manual review passed", "lint ok"];
+  const result = runControllerValidation(req);
+
+  assert.equal(result.status, "blocked");
+  assert.ok(!result.followupPrompt, "must not include followupPrompt");
+  // Both unsupported tokens should appear in diagnostics
+  assert.match(result.summary ?? "", /manual review passed/);
+  assert.match(result.summary ?? "", /lint ok/);
+  // Should list supported evidence tokens for remediation
+  assert.match(result.summary ?? "", /supported evidence tokens/i);
+  assert.match(result.summary ?? "", /validators-ran/);
+});
+
+test("controller validation runner rejects unsupported evidence as high-risk implementation coverage", () => {
+  // High-risk implementation node with ONLY unsupported evidence and no other validation.
+  // The unsupported-evidence guard must fire before high-risk policy check.
+  const req = request({
+    node: {
+      ...request().node,
+      kind: "implementation",
+      risk: "high",
+      validation: {} as never,
+    },
+  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (req.node.validation as any).requiredEvidence = ["manual review passed"];
+  const result = runControllerValidation(req);
+
+  // The unsupported evidence guard fires first, returning blocked
+  assert.equal(result.status, "blocked");
+  assert.match(result.summary ?? "", /unsupported requiredEvidence token/);
+  // Since unsupported-evidence guard runs before high-risk policy check,
+  // the blocked result must not also contain the high-risk policy failure message
+  assert.doesNotMatch(result.summary ?? "", /high-risk implementation nodes require/);
+});
+
+test("controller validation runner does not treat unsupported evidence as valid high-risk coverage", () => {
+  const dir = mkdtempSync(join(tmpdir(), "goal-validation-highrisk-unsupported-"));
+  try {
+    // High-risk implementation node with supported evidence alongside unsupported.
+    // The unsupported evidence should still trigger blocking regardless of supported evidence.
+    const req = request({
+      node: {
+        ...request().node,
+        kind: "implementation",
+        risk: "high",
+        validators: ["true"],
+        validation: {} as never,
+      },
+      subagent: {
+        ...request().subagent,
+        workspacePath: dir,
+      },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (req.node.validation as any).requiredEvidence = ["validators-ran", "pnpm test passes"];
+    const result = runControllerValidation(req);
+
+    // Even with a supported evidence token present, unsupported ones must still cause blocking
+    assert.equal(result.status, "blocked");
+    assert.match(result.summary ?? "", /unsupported requiredEvidence token/);
+    assert.ok(!result.followupPrompt);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
