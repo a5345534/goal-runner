@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1.0",
+  "changeName": "close-required-evidence-contract",
+  "generatedAt": "2026-06-16T03:12:04.995537+00:00",
+  "sources": [
+    {
+      "path": "proposal.md",
+      "kind": "proposal",
+      "sha256": "144440c30a813d691d97b3a44b9b08d09c43b1061aefffcc49d2fa41ee1dad39"
+    },
+    {
+      "path": "design.md",
+      "kind": "design",
+      "sha256": "869ae31a1af6925e539299fa14ac08c515f93c80d47b610e7c1428222d1de4d2"
+    },
+    {
+      "path": "tasks.md",
+      "kind": "tasks",
+      "sha256": "71849ef7c5c2041acbd543f79e7fe9a8b3490597983787ef21aff5320d7366e8"
+    },
+    {
+      "path": "specs/goal-dag-validation-contract/spec.md",
+      "kind": "spec-delta",
+      "sha256": "77b912aab6fe548aad14dbbfb4435ec2fa432b44afa9f9467aedeeb040c66042"
+    }
+  ]
+}
