@@ -1,4 +1,5 @@
 import type { GoalValidationEvidenceRequirement } from "./validation-evidence.js";
+import type { GoalControllerAuditLedgerEventType } from "./controller-audit.js";
 
 export const GOAL_STATUSES = [
   "active",
@@ -102,7 +103,8 @@ export type GoalLedgerEventType =
   | "goal_completed"
   | "goal_blocked"
   | "goal_budget_limited"
-  | "goal_usage_limited";
+  | "goal_usage_limited"
+  | GoalControllerAuditLedgerEventType;
 
 export interface GoalLedgerEvent {
   eventId?: string;
