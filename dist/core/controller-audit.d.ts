@@ -159,12 +159,26 @@ export declare function applyAuditActions(decision: GoalControllerAuditDecision,
 /** Callback for recording a single audit lifecycle ledger event. */
 export type AuditEventRecorder = (eventType: GoalControllerAuditLedgerEventType, details: Record<string, unknown>, at?: Date | string) => void | Promise<void>;
 /**
- * Records ledger events for the outcome of {@link applyAuditActions}.
+ * Records the full audit action outcome, including definitive pause events.
  *
- * - One `controller_audit_action_applied` event per applied action.
- * - One `controller_audit_action_skipped` event per skipped action.
- * - One `goal_paused_by_controller_audit` event when `result.shouldPauseGoal`
- *   is `true`.
+ * This helper records `controller_audit_action_recommended` and
+ * `controller_audit_action_skipped` events via
+ * {@link recordAuditActionDecisions}, then unconditionally emits
+ * `goal_paused_by_controller_audit` when `result.shouldPauseGoal` is
+ * `true`.
+ *
+ * **Important:** the controller loop does **not** use this function for
+ * the normal audit gate flow. It calls {@link recordAuditActionDecisions}
+ * to record the policy recommendation **before** the actual pause, and
+ * then emits `controller_audit_action_applied` +
+ * `goal_paused_by_controller_audit` only after a successful
+ * `runtime.auditPauseGoal()` call. Callers that follow the same split
+ * (recommend → pause → record) should use `recordAuditActionDecisions`
+ * and record the definitive events manually.
+ *
+ * This function is appropriate for callers that have already applied the
+ * pause (for example test helpers or deferred-replay flows) and want to
+ * emit the full event batch atomically.
  *
  * The caller must supply an {@link AuditEventRecorder} that writes to the
  * durable goal ledger.

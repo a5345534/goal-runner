@@ -11,7 +11,6 @@ import {
   buildControllerAuditSnapshot,
   formatAuditSummary,
   isAuditDue,
-  recordAuditActionEvents,
   recordAuditActionDecisions,
   validateControllerAuditDecision,
   type AuditActionPolicyResult,
