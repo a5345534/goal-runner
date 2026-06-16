@@ -1,3 +1,4 @@
+import type { GoalAuditDecisionRecord } from "./memory-store.js";
 import type { ContinuationReservation, GoalDagNode, GoalLedgerEvent, GoalRecord, GoalSessionMetadata, GoalStore, GoalSubagentRecord, GoalSummary, WorkspaceProfile } from "./types.js";
 export declare class SQLiteGoalStore implements GoalStore {
     readonly dbPath: string;
@@ -32,6 +33,11 @@ export declare class SQLiteGoalStore implements GoalStore {
     pruneLedgerEvents(goalId: string, options: {
         maxEvents: number;
     }): Promise<number>;
+    /**
+     * Returns the latest controller audit decision and applied action names,
+     * or `undefined` when no audit has completed for this goal.
+     */
+    getLatestAuditDecision(goalId: string): Promise<GoalAuditDecisionRecord | undefined>;
     close(): void;
     private migrate;
 }

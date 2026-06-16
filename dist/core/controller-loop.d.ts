@@ -1,7 +1,8 @@
 import type { GoalDagSchedulingPolicy } from "./dag-scheduler.js";
 import type { ControllerExceptionHandler } from "./exception-handler.js";
 import type { HarnessSubagentAdapter, StartGoalSubagentOptions } from "./subagent-adapter.js";
-import type { GoalDagNode, GoalOrchestrationState, GoalSubagentRecord } from "./types.js";
+import type { GoalDagNode, GoalLedgerEvent, GoalOrchestrationState, GoalRecord, GoalSubagentRecord } from "./types.js";
+import { type GoalControllerAuditOptions, type GoalControllerAuditSnapshot } from "./controller-audit.js";
 export interface GoalControllerRuntimePort {
     getGoalOrchestrationState(goalId: string): Promise<GoalOrchestrationState>;
     getGoalDagReadyQueue(goalId: string, policy?: GoalDagSchedulingPolicy): Promise<{
@@ -22,6 +23,12 @@ export interface GoalControllerRuntimePort {
     recordControllerEvent?(goalId: string, details: Record<string, unknown>, options?: {
         at?: Date | string;
     }): Promise<void>;
+    /** Resolve goal record for the given goalId. Required for controller audit snapshots. */
+    getGoalRecord?(goalId: string): Promise<GoalRecord>;
+    /** List ledger events for the given goalId. Required for controller audit snapshots. */
+    listGoalLedgerEvents?(goalId: string): Promise<GoalLedgerEvent[]>;
+    /** Pause the goal with the given reason. Called when audit auto-pauses a goal. */
+    auditPauseGoal?(goalId: string, reason: string): Promise<void>;
 }
 export interface GoalControllerWorkspaceAllocation {
     subagentId?: string;
@@ -105,6 +112,13 @@ export interface GoalControllerTickOptions {
     systemPrompt?: string;
     metadata?: Record<string, unknown>;
     now?: Date | string | (() => Date | string);
+    /** Periodic controller audit configuration. When enabled, each tick checks
+     * whether an audit is due and runs one if the interval has elapsed. */
+    audit?: GoalControllerAuditOptions;
+    /** Invokes the configured audit model with a structured snapshot. The model
+     * should return a JSON-parseable {@link GoalControllerAuditDecision}.
+     * Called by the controller tick when an audit is due. */
+    auditModel?: (snapshot: GoalControllerAuditSnapshot) => Promise<unknown>;
 }
 export interface GoalControllerTickResult {
     goalId: string;
@@ -121,6 +135,12 @@ export interface GoalControllerTickResult {
         reasons: string[];
     }>;
     changed: boolean;
+    /** Whether a controller audit ran during this tick. */
+    auditRun?: boolean;
+    /** Compact audit summary when an audit ran. */
+    auditSummary?: string;
+    /** Whether the audit auto-paused the goal. */
+    auditPausedGoal?: boolean;
 }
 export interface GoalControllerLoopOptions extends GoalControllerTickOptions {
     maxTicks?: number;

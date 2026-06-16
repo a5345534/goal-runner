@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { formatAuditSummary, } from "../../core/index.js";
 const DEFAULT_VISIBLE_LIVE_LINES = 18;
 const DEFAULT_VISIBLE_LIST_LINES = 14;
 export class GoalMonitorController {
@@ -215,6 +216,9 @@ export class GoalMonitorController {
             truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width),
             truncateToWidth(theme.fg(this.activePane === "live" ? "accent" : "muted", `${this.activePane === "live" ? "▶ " : "  "}LIVE: ${view.liveTitle}`), width),
         ];
+        const auditSummary = this.scope.kind === "controller" ? extractLatestAuditSummary(dag.ledgerEvents) : undefined;
+        if (auditSummary)
+            lines.push(truncateToWidth(theme.fg("warning", auditSummary), width));
         if (view.liveDiagnostic)
             lines.push(truncateToWidth(theme.fg("warning", view.liveDiagnostic), width));
         if (view.liveLines.length === 0)
@@ -487,6 +491,63 @@ function currentControllerBlockerDiagnostic(goal, dag) {
     if (["blocked", "failed", "budgetLimited", "usageLimited"].includes(goal.status))
         return `Current blocker: goal status=${goal.status}`;
     return undefined;
+}
+/**
+ * Extracts the latest controller audit summary from ledger events.
+ * Returns a compact single-line summary suitable for monitor display,
+ * or `undefined` when no controller audit has run.
+ */
+function extractLatestAuditSummary(ledgerEvents) {
+    if (!ledgerEvents || ledgerEvents.length === 0)
+        return undefined;
+    // Find the most recent controller_audit_finished event.
+    let latestFinished;
+    for (const event of ledgerEvents) {
+        if (event.type === "controller_audit_finished") {
+            latestFinished = event;
+        }
+    }
+    if (!latestFinished)
+        return undefined;
+    const details = latestFinished.details ?? {};
+    const decision = details;
+    if (!decision.risk || !decision.summary)
+        return undefined;
+    // Collect applied-action events that occurred at or after the finished event.
+    const finishedAt = latestFinished.at;
+    const appliedActions = [];
+    for (const event of ledgerEvents) {
+        if (event.type !== "controller_audit_action_applied")
+            continue;
+        if (event.at < finishedAt)
+            continue;
+        const actionDetails = (event.details ?? {});
+        const actionKind = actionDetails.action ?? "pause-goal";
+        const findingKind = actionDetails.matchedFindingKind ?? "unknown";
+        const findingConfidence = actionDetails.matchedFindingConfidence ?? "high";
+        appliedActions.push({
+            action: {
+                action: actionKind,
+                reason: actionDetails.reason ?? "",
+                requiresUserApproval: false,
+                nodeId: actionDetails.nodeId,
+                subagentId: actionDetails.subagentId,
+            },
+            matchedFinding: {
+                kind: findingKind,
+                nodeId: actionDetails.nodeId,
+                subagentId: actionDetails.subagentId,
+                evidence: [],
+                confidence: findingConfidence,
+            },
+        });
+    }
+    try {
+        return formatAuditSummary(decision, appliedActions);
+    }
+    catch {
+        return undefined;
+    }
 }
 function formatControllerHistoryDetails(eventName, details) {
     if (eventName === "goal.created" && typeof details.objective === "string")

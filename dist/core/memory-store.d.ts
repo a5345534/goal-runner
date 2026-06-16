@@ -1,4 +1,10 @@
+import type { GoalControllerAuditDecision } from "./controller-audit.js";
 import type { ContinuationReservation, GoalDagNode, GoalLedgerEvent, GoalRecord, GoalSessionMetadata, GoalStore, GoalSubagentRecord, GoalSummary, WorkspaceProfile } from "./types.js";
+export interface GoalAuditDecisionRecord {
+    decision: GoalControllerAuditDecision;
+    finishedAt: string;
+    appliedActionNames: string[];
+}
 export declare class MemoryGoalStore implements GoalStore {
     private goals;
     private reservations;
@@ -32,4 +38,9 @@ export declare class MemoryGoalStore implements GoalStore {
     pruneLedgerEvents(goalId: string, options: {
         maxEvents: number;
     }): Promise<number>;
+    /**
+     * Returns the latest controller audit decision and applied action names,
+     * or `undefined` when no audit has completed for this goal.
+     */
+    getLatestAuditDecision(goalId: string): Promise<GoalAuditDecisionRecord | undefined>;
 }

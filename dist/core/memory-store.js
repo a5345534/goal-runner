@@ -104,6 +104,39 @@ export class MemoryGoalStore {
         this.ledger = this.ledger.filter((event) => !toRemove.has(event.eventId));
         return excess;
     }
+    /**
+     * Returns the latest controller audit decision and applied action names,
+     * or `undefined` when no audit has completed for this goal.
+     */
+    async getLatestAuditDecision(goalId) {
+        const events = this.ledger.filter((event) => event.goalId === goalId);
+        // Find the most recent controller_audit_finished event.
+        let latestFinished;
+        for (const event of events) {
+            if (event.type === "controller_audit_finished") {
+                latestFinished = event;
+            }
+        }
+        if (!latestFinished)
+            return undefined;
+        const details = (latestFinished.details ?? {});
+        const decision = details;
+        if (!decision.risk || !decision.summary)
+            return undefined;
+        // Collect applied actions recorded after the finished event.
+        const finishedAt = latestFinished.at;
+        const appliedActionNames = [];
+        for (const event of events) {
+            if (event.type !== "controller_audit_action_applied")
+                continue;
+            if (event.at < finishedAt)
+                continue;
+            const actionDetails = (event.details ?? {});
+            const actionName = actionDetails.action ?? "pause-goal";
+            appliedActionNames.push(actionName);
+        }
+        return { decision, finishedAt, appliedActionNames };
+    }
 }
 function dagNodeKey(goalId, nodeId) {
     return `${goalId}:${nodeId}`;
