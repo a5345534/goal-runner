@@ -1,6 +1,8 @@
 import { createGoalDagNodes, type GoalDagPlanNodeInput, type GoalDagPlanOptions } from "./dag-scheduler.js";
 import { assertKnownModelScenario, parseGoalModelRoutingConfig, selectModelScenarioForNode, type GoalModelRoutingConfig } from "./model-routing.js";
 import type { GoalDagConflictHints, GoalDagNode, GoalDagValidationContract, GoalValidationArtifactLock } from "./types.js";
+import type { GoalValidationEvidenceRequirement } from "./validation-evidence.js";
+import { isSupportedRequiredEvidence, SUPPORTED_REQUIRED_EVIDENCE } from "./validation-evidence.js";
 import type { GoalDagPlannedNodesResult, GoalDagPlannerResult } from "./dag-planner.js";
 
 export interface GoalDagFileDocument {
@@ -210,7 +212,7 @@ function parseValidationContract(input: unknown, path: string): GoalDagValidatio
   if (input.testSpecNodeId !== undefined) contract.testSpecNodeId = requireKebabId(input.testSpecNodeId, `${path}.testSpecNodeId`);
   if (input.approvedByNodeId !== undefined) contract.approvedByNodeId = requireKebabId(input.approvedByNodeId, `${path}.approvedByNodeId`);
   if (input.artifactLocks !== undefined) contract.artifactLocks = parseArtifactLocks(input.artifactLocks, `${path}.artifactLocks`);
-  if (input.requiredEvidence !== undefined) contract.requiredEvidence = parseStringArray(input.requiredEvidence, `${path}.requiredEvidence`);
+  if (input.requiredEvidence !== undefined) contract.requiredEvidence = parseRequiredEvidence(input.requiredEvidence, `${path}.requiredEvidence`);
   if (input.onAuditTestGap !== undefined) contract.onAuditTestGap = requireNonEmptyString(input.onAuditTestGap, `${path}.onAuditTestGap`);
   if (input.diffBaseRef !== undefined) contract.diffBaseRef = requireNonEmptyString(input.diffBaseRef, `${path}.diffBaseRef`);
   if (input.auditReportPaths !== undefined) contract.auditReportPaths = parseStringArray(input.auditReportPaths, `${path}.auditReportPaths`);
@@ -320,6 +322,24 @@ function parseIdArray(input: unknown, path: string): string[] {
 function parseStringArray(input: unknown, path: string): string[] {
   if (!Array.isArray(input)) throw new Error(`Invalid goal DAG file: ${path} must be an array`);
   return input.map((item, index) => requireNonEmptyString(item, `${path}[${index}]`));
+}
+
+function parseRequiredEvidence(input: unknown, path: string): GoalValidationEvidenceRequirement[] {
+  const values = parseStringArray(input, path);
+  const unsupported = values.filter((v) => !isSupportedRequiredEvidence(v));
+  if (unsupported.length > 0) {
+    throw new Error(
+      `Invalid goal DAG file: ${path} contains unsupported required evidence: ${unsupported.join(", ")}. ` +
+      `Supported evidence tokens: ${SUPPORTED_REQUIRED_EVIDENCE.join(", ")}. ` +
+      `Natural-language acceptance checks belong in validators, audit reports, objective/scope, path policy, or producer trace/review metadata.`,
+    );
+  }
+  const seen = new Set<string>();
+  for (const v of values) {
+    if (seen.has(v)) throw new Error(`Invalid goal DAG file: ${path} contains duplicate required evidence: ${v}`);
+    seen.add(v);
+  }
+  return values as GoalValidationEvidenceRequirement[];
 }
 
 function requireKebabId(input: unknown, path: string): string {
