@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, isAbsolute, resolve } from "node:path";
 import type { GoalControllerValidationRequest, GoalControllerValidationResult, GoalControllerValidator } from "./controller-loop.js";
-import type { GoalValidationEvidenceRequirement } from "./types.js";
+import { isSupportedRequiredEvidence, SUPPORTED_REQUIRED_EVIDENCE, type GoalValidationEvidenceRequirement } from "./validation-evidence.js";
 
 export interface ControllerValidationRunnerOptions {
   /** Execute node.validators as shell commands. Defaults true so declared validators are enforced. */
@@ -47,6 +47,23 @@ export function runControllerValidation(
   request: GoalControllerValidationRequest,
   options: ControllerValidationRunnerOptions = {},
 ): GoalControllerValidationResult {
+  // Old-state guard: reject persisted unsupported requiredEvidence tokens.
+  // Subagents cannot repair an invalid DAG contract, so no followupPrompt.
+  const unsupportedEvidence = (request.node.validation?.requiredEvidence ?? [])
+    .filter((token) => !isSupportedRequiredEvidence(token));
+  if (unsupportedEvidence.length > 0) {
+    return {
+      status: "blocked",
+      summary:
+        `Invalid validation contract: unsupported requiredEvidence token(s): ${unsupportedEvidence.join(", ")}. ` +
+        `Supported evidence tokens: ${SUPPORTED_REQUIRED_EVIDENCE.join(", ")}. ` +
+        `Natural-language acceptance checks belong in validators, audit reports, objective/scope, path policy, or producer trace/review metadata.`,
+      validationSignals: [
+        `invalid contract: unsupported required evidence: ${unsupportedEvidence.join(", ")}`,
+      ],
+    };
+  }
+
   const result: ControllerValidationRunResult = {
     missingOutputs: expectedOutputsMissing(request),
     skippedValidators: [],
@@ -185,6 +202,8 @@ function highRiskValidationPolicyFailures(request: GoalControllerValidationReque
   const node = request.node;
   if (node.kind !== "implementation" || node.risk !== "high") return [];
   const contract = node.validation;
+  const hasSupportedRequiredEvidence = (contract?.requiredEvidence ?? [])
+    .filter((token) => isSupportedRequiredEvidence(token)).length > 0;
   const hasValidation =
     node.expectedOutputs.length > 0 ||
     node.validators.length > 0 ||
@@ -192,7 +211,7 @@ function highRiskValidationPolicyFailures(request: GoalControllerValidationReque
     Boolean(contract?.testSpecNodeId) ||
     Boolean(contract?.approvedByNodeId) ||
     Boolean(contract?.artifactLocks?.length) ||
-    Boolean(contract?.requiredEvidence?.length);
+    hasSupportedRequiredEvidence;
   return hasValidation ? [] : ["high-risk implementation nodes require validators, outputs, a validation profile, or an approved test contract"];
 }
 

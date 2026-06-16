@@ -218,7 +218,34 @@ A node can declare a generic validation contract. Runtime persists this metadata
 
 Every subagent launch includes a controller execution policy in the executor prompt. The policy restates the assigned node boundary, allowed/forbidden paths when configured, the exact completion markers, and the requirement to inspect diff/status plus run or explain validators before `SUBAGENT_RESULT`. This is prompt-time guidance only; controller validation remains authoritative and fails closed on scope/policy violations.
 
-Supported built-in evidence labels include `validators-ran`, `locked-artifacts-unchanged`, `implementation-diff-present`, `non-test-diff-present`, `post-merge-validation-ran`, and `audit-report-present`. `post-merge-validation-ran` is deferred to native Git integration and is only satisfied by the post-merge validation gate, not by ordinary pre-integration validator execution. `audit-report-present` requires a readable report file and fails if the report explicitly says violations remain (for example `9 violation paths / 98 files remain`). Unknown labels fail closed until a planner/runtime adapter teaches the controller how to satisfy them.
+`validation.requiredEvidence` is a **closed** token list:
+
+- `validators-ran`: all declared `validators` ran successfully.
+- `locked-artifacts-unchanged`: all configured `artifactLocks` were verified unchanged.
+- `implementation-diff-present`: there is at least one changed implementation-relevant path.
+- `non-test-diff-present`: at least one changed path is not a test/validation artifact path.
+- `post-merge-validation-ran`: deferred to native-git integration and satisfied only by the post-merge validation gate.
+- `audit-report-present`: at least one configured report path exists and reports zero remaining violations.
+
+A node parser rejects unsupported labels immediately (`parseGoalDagFileContent`), so unsupported `requiredEvidence` fails fast before scheduling. In addition, the controller keeps an old-state runtime guard: if an existing durable node contains unsupported labels, validation returns `blocked` with `Invalid validation contract: unsupported requiredEvidence token(s)...`, preventing completion on legacy or malformed persisted state.
+
+`post-merge-validation-ran` is satisfied by an explicit `post-merge-validation` completion gate (or `post-merge-validation-ran` in `requiredEvidence`), which re-runs node validators in the controller workspace after branch integration. `audit-report-present` requires a readable report file and fails if the report explicitly says violations remain (for example `9 violation paths / 98 files remain`).
+
+#### Natural-language acceptance checks map to explicit fields
+
+Map common prose checks into explicit contract fields instead of inventing custom evidence tokens:
+
+| Natural-language check | DAG field mapping |
+| --- | --- |
+| "run tests/lint/build checks" | `validators` + `requiredEvidence: ["validators-ran"]` |
+| "do not change this approved file" / "keep test fixture stable" | `artifactLocks` + `requiredEvidence: ["locked-artifacts-unchanged"]` |
+| "produce a real code change" / "change implementation files" | expected `outputs` and `requiredEvidence: ["implementation-diff-present"]` |
+| "do not only touch tests" | `requiredEvidence: ["non-test-diff-present"]` |
+| "re-validate after merge" | `completionGates: ["post-merge-validation"]` (or `requiredEvidence: ["post-merge-validation-ran"]`) |
+| "final manual review or audit report" | `auditReportPaths` + `requiredEvidence: ["audit-report-present"]` |
+| "scope/forbidden-path policy" | `validation.allowedPaths` / `validation.forbiddenPaths` |
+
+Unsupported natural-language checks should stay in producer metadata (`objective`, `scope`, producer trace/review docs) and `requiredEvidence` should only use the closed list above.
 
 For high-risk `kind=implementation` nodes, controller validation fails if the node has no validators, outputs, validation profile, approved test-spec reference, artifact locks, or required evidence. This prevents high-risk work from completing on self-report alone.
 
