@@ -1,4 +1,4 @@
-import type { GoalDagNode, GoalLedgerEvent, GoalSubagentRecord, GoalSummary } from "../../core/index.js";
+import type { ContinuationReservation, GoalDagNode, GoalLedgerEvent, GoalSubagentRecord, GoalSummary, HarnessState } from "../../core/index.js";
 import type { PiBackgroundRunnerRecord } from "./runner-ops.js";
 import type { GoalListThemeLike } from "./goal-list-ui.js";
 export type GoalMonitorAction = "close" | "pause" | "resume" | "clear" | "openSession";
@@ -29,6 +29,58 @@ export interface GoalMonitorDagSnapshot {
     ledgerEvents?: GoalLedgerEvent[];
     refreshedAt?: string;
 }
+export type MonitorSessionState = "active-turn" | "idle" | "missing" | "not-materialized" | "unknown";
+export type MonitorHiddenContinuationState = "eligible" | "suppressed" | "reserved" | "started" | "not-configured" | "not-eligible" | "unknown";
+export type MonitorControllerPollState = "active" | "leased" | "skipped" | "stopped" | "unknown";
+export interface GoalMonitorRuntimeSummary {
+    session: {
+        state: MonitorSessionState;
+        activeTurnId?: string;
+    };
+    hiddenContinuation: {
+        state: MonitorHiddenContinuationState;
+        reason?: string;
+        attemptId?: string;
+    };
+    controllerPoll: {
+        state: MonitorControllerPollState;
+        reason?: string;
+        leaseOwner?: string;
+        lastPollAt?: string;
+    };
+    runners: {
+        running: number;
+        stopped: number;
+        duplicateStopped: number;
+        archived: number;
+        failed: number;
+    };
+}
+export type MonitorHealth = "OK" | "Needs attention" | "Waiting" | "Stalled" | "Blocked";
+export declare const SESSION_STATE_LABELS: Record<MonitorSessionState, string>;
+export declare const HIDDEN_CONTINUATION_STATE_LABELS: Record<MonitorHiddenContinuationState, string>;
+export declare const CONTROLLER_POLL_STATE_LABELS: Record<MonitorControllerPollState, string>;
+/** Options passed to `buildGoalMonitorRuntimeSummary`. */
+export interface BuildRuntimeSummaryOptions {
+    harnessState?: HarnessState;
+    reservation?: ContinuationReservation;
+    ledgerEvents?: GoalLedgerEvent[];
+    runners?: PiBackgroundRunnerRecord[];
+    controllerPollGraceMs?: number;
+}
+/**
+ * Derive a `GoalMonitorRuntimeSummary` synchronously from existing runtime
+ * and adapter state. No async calls — uses only already-loaded data.
+ */
+export declare function buildGoalMonitorRuntimeSummary(goal: GoalSummary, subagents: GoalSubagentRecord[], options?: BuildRuntimeSummaryOptions): GoalMonitorRuntimeSummary;
+/**
+ * Derive a monitor health status from the runtime summary and DAG state.
+ * Returns { health, nextAction } where nextAction is a one-line recommendation.
+ */
+export declare function deriveMonitorHealth(summary: GoalMonitorRuntimeSummary, goal: GoalSummary, _subagents: GoalSubagentRecord[]): {
+    health: MonitorHealth;
+    nextAction: string;
+};
 export declare class GoalMonitorController {
     private readonly goal;
     private readonly readTranscript;
