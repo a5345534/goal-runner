@@ -99,7 +99,10 @@ export type MonitorHealth =
   | "Needs attention"
   | "Waiting"
   | "Stalled"
-  | "Blocked";
+  | "Blocked"
+  | "Running"
+  | "Complete"
+  | "Complete with warnings";
 
 // Canonical state labels shared across Pi TUI and OpenCode monitors.
 export const SESSION_STATE_LABELS: Record<MonitorSessionState, string> = {
