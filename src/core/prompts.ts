@@ -103,6 +103,130 @@ ${policy}
 Approve only if the current artifacts and evidence satisfy every explicit requirement in the objective while respecting higher-priority policy. Reject weak, indirect, missing, or unverifiable evidence.`;
 }
 
+export function renderControllerAuditPrompt(snapshot: unknown): string {
+  const snapshotText =
+    snapshot === undefined
+      ? "(snapshot unavailable)"
+      : typeof snapshot === "string"
+        ? snapshot
+        : JSON.stringify(snapshot, null, 2);
+
+  return `You are the goal-controller audit model.
+
+Your role is DIAGNOSTIC ONLY. You do not plan, complete goals or nodes, modify files, modify or rewrite DAGs, replan execution, merge branches, or override deterministic validation.
+You must return exactly one JSON object and nothing else.
+Subagent self-reports are not validation authority.
+
+Audit input snapshot (trusted):
+${snapshotText}
+
+Return JSON matching this schema exactly:
+{
+  "risk": "low" | "medium" | "high" | "critical",
+  "summary": "string",
+  "findings": [
+    {
+      "kind": "retry-loop | no-progress | invalid-contract-suspected | cost-spike | stale-runner | repeated-validation-failure | integration-loop | provider-or-quota-issue | unknown",
+      "nodeId": "optional string",
+      "subagentId": "optional string",
+      "evidence": ["string"],
+      "confidence": "low" | "medium" | "high"
+    }
+  ],
+  "recommendedActions": [
+    {
+      "action": "noop | pause-goal | cap-retries | stop-launching-new-subagents | reduce-concurrency | request-user-intervention | open-diagnostic-report | run-deterministic-contract-check | mark-node-blocked",
+      "nodeId": "optional string",
+      "subagentId": "optional string",
+      "reason": "string",
+      "requiresUserApproval": boolean
+    }
+  ]
+}
+
+If evidence is insufficient, choose low confidence and prefer a low-risk noop.
+
+Example retry-loop pattern:
+{
+  "risk": "critical",
+  "summary": "Node repeats follow-up with unchanged validation state",
+  "findings": [
+    {
+      "kind": "retry-loop",
+      "nodeId": "final-verification",
+      "evidence": ["retries increased without state changes", "validation summary unchanged"],
+      "confidence": "high"
+    }
+  ],
+  "recommendedActions": [
+    {
+      "action": "pause-goal",
+      "nodeId": "final-verification",
+      "reason": "Suspicious retry cycle with no progress",
+      "requiresUserApproval": true
+    }
+  ]
+}
+
+Example no-progress pattern:
+{
+  "risk": "medium",
+  "summary": "Progress signals are flat while runtime remains active",
+  "findings": [
+    {
+      "kind": "no-progress",
+      "nodeId": "final-verification",
+      "evidence": ["completedNodesLastWindow=0", "lastProgressAt unchanged"],
+      "confidence": "medium"
+    }
+  ],
+  "recommendedActions": [
+    {
+      "action": "noop",
+      "nodeId": "final-verification",
+      "reason": "No clear intervention needed yet; monitor for additional signals",
+      "requiresUserApproval": false
+    }
+  ]
+}
+
+Example cost-spike pattern:
+{
+  "risk": "critical",
+  "summary": "Token burn is high while progress is flat",
+  "findings": [
+    {
+      "kind": "cost-spike",
+      "nodeId": "final-verification",
+      "evidence": ["tokensLastWindow increased 4x", "no new completed nodes"],
+      "confidence": "high"
+    }
+  ],
+  "recommendedActions": [
+    {
+      "action": "pause-goal",
+      "nodeId": "final-verification",
+      "reason": "Cost exposure risk without measurable progress",
+      "requiresUserApproval": true
+    }
+  ]
+}
+
+Example healthy-progress pattern:
+{
+  "risk": "low",
+  "summary": "Execution appears healthy with steady node completion",
+  "findings": [],
+  "recommendedActions": [
+    {
+      "action": "noop",
+      "reason": "No intervention needed",
+      "requiresUserApproval": false
+    }
+  ]
+}`;
+}
+
 function fenceFor(text: string): string {
   let fence = "```";
   while (text.includes(fence)) fence += "`";
