@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1.0",
+  "changeName": "redesign-monitor-overview-dashboard",
+  "generatedAt": "2026-06-16T15:05:32.247081+00:00",
+  "sources": [
+    {
+      "path": "proposal.md",
+      "kind": "proposal",
+      "sha256": "843898e0e0ae4ea05463ed74c15007d5c56f8ee39fcf8d437188649e62f0f774"
+    },
+    {
+      "path": "design.md",
+      "kind": "design",
+      "sha256": "fdb8bd52dfc164835ff0a751dd72dd5215e13383ceefe52d13066619988d1fd9"
+    },
+    {
+      "path": "tasks.md",
+      "kind": "tasks",
+      "sha256": "2d7b8bbdc2b656c22f82a927a8a4d1b84d7b4e0246384746f860b9cf14246cdb"
+    },
+    {
+      "path": "specs/goal-monitor-overview-dashboard/spec.md",
+      "kind": "spec-delta",
+      "sha256": "2a5e6da6d9b75aec26ed0197fcdbdc9963305189240130145f1a85750d008931"
+    }
+  ]
+}

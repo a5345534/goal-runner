@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="openspec-explainer-mode" content="decision-review">
+  <title>redesign-monitor-overview-dashboard 決策審查</title>
+  <style>
+    :root{color-scheme:light;--bg:#f7f8fb;--card:#fff;--ink:#172033;--muted:#5b667a;--line:#d8deea;--accent:#3157d5;--danger:#b42318;--ok:#027a48;--warn:#b54708}
+    *{box-sizing:border-box}body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--ink);line-height:1.6}
+    header{padding:32px clamp(16px,4vw,56px);background:linear-gradient(135deg,#172033,#3157d5);color:white}
+    h1{margin:0 0 8px;font-size:clamp(1.8rem,4vw,3.2rem)}
+    nav{position:sticky;top:0;z-index:10;display:flex;gap:8px;overflow:auto;padding:10px clamp(12px,3vw,40px);background:#ffffffee;border-bottom:1px solid var(--line);backdrop-filter:blur(10px)}
+    nav a{white-space:nowrap;color:var(--accent);text-decoration:none;font-weight:700;padding:8px 10px;border-radius:999px}
+    main{width:min(1180px,100%);margin:0 auto;padding:24px clamp(14px,3vw,32px) 56px}
+    section{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px;margin:18px 0;box-shadow:0 8px 28px rgba(23,32,51,.06)}
+    h2{margin-top:0}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .card{border:1px solid var(--line);border-radius:14px;padding:16px;background:#fbfcff}
+    .tag{display:inline-block;border-radius:999px;padding:3px 9px;font-size:.84rem;font-weight:700;background:#eef2ff;color:#3157d5;margin:2px}
+    table{width:100%;border-collapse:collapse}th,td{text-align:left;vertical-align:top;border-bottom:1px solid var(--line);padding:10px}th{background:#f2f4f7}
+    button.copy-button{border:0;border-radius:10px;padding:8px 10px;background:var(--accent);color:white;font-weight:700;cursor:pointer}
+    pre{overflow:auto;background:#101828;color:#e7eefc;padding:14px;border-radius:12px;font-size:.9rem}
+    @media(max-width:1023px){nav{flex-wrap:wrap;overflow:visible}nav a{white-space:normal}}
+    @media(max-width:760px){.grid,.three{grid-template-columns:1fr}section{padding:16px}nav{position:static;font-size:.92rem}table,thead,tbody,tr,th,td{display:block;width:100%}thead{border:0}th{margin-top:6px}td{border-bottom:0}tr{border-bottom:1px solid var(--line);padding:6px 0}}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>redesign-monitor-overview-dashboard</h1>
+    <p>將 /goal monitor 第一屏從 debug dump 重新設計為 overview-first dashboard。完成後的 goal 不再顯示 Health=Blocked；問題摘要為 node-centric；runtime 標籤為 user-facing；預設模式顯示 recent events 而非完整 controller history。</p>
+    <p><span class="tag">monitor UX</span><span class="tag">overview-first</span><span class="tag">view-model only</span></p>
+  </header>
+
+  <nav role="navigation">
+    <a href="#why">Why</a><a href="#what-changes">What Changes</a><a href="#before-after">Before/After</a><a href="#flow">Flow</a><a href="#affected-surfaces">Surfaces</a><a href="#scope-boundaries">Scope</a><a href="#rollout">Rollout</a><a href="#current-status">Status</a><a href="#decision-points">Decisions</a><a href="#implementation-slices">Slices</a><a href="#verification-plan">Verification</a><a href="#risk-register">Risks</a><a href="#agent-prompts">Prompts</a>
+  </nav>
+
+  <main>
+    <section id="why"><h2>Why</h2><p>當前 monitor 第一屏顯示 raw runtime data 的單行 key=value dump，包含冗長的 subagent ID 和 18 行 controller history。Completed goal 會顯示 Health=Blocked。使用者無法快速回答「完成了嗎？健康嗎？問題是什麼？」。</p></section>
+
+    <section id="what-changes"><h2>What Changes</h2>
+      <div class="grid three">
+        <div class="card"><h3>Overview model</h3><p>新增 GoalMonitorOverview 結構化 view model，統一 health/problem/runtime/events 邏輯。</p></div>
+        <div class="card"><h3>Health 修正</h3><p>Completed goal 永遠不會顯示 Blocked；新增 Complete / Complete with warnings / Running。</p></div>
+        <div class="card"><h3>問題摘要</h3><p>node-centric 短語，不顯示完整 subagent ID。</p></div>
+      </div>
+    </section>
+
+    <section id="before-after"><h2>Before / After</h2>
+      <div class="grid">
+        <div class="card"><h3>變更前</h3><pre>scope=controller focus=list rowOp=nodeList status=complete/complete
+Health=Blocked
+Current blocker: subagent-final-verification-retry-1-retry-1...
+Session=NOT-MATERIALIZED Hidden=SUPPRESSED Poll=LEASED</pre></div>
+        <div class="card"><h3>變更後</h3><pre>Goal 8c3b603b  COMPLETE WITH WARNINGS
+Health    Complete with warnings
+Problem   final-verification · required integration incomplete
+Runtime   session not materialized · hidden suppressed · poll inactive
+Next      inspect final-verification runner detail</pre></div>
+      </div>
+    </section>
+
+    <section id="affected-surfaces">
+      <h2>Affected Surfaces</h2>
+      <ul><li>Pi TUI monitor: overview sections, health, problem, events</li><li>OpenCode monitor: structured sections, matching terminology</li><li>Runtime data: no new persistence; derived from existing state</li></ul>
+    </section>
+
+    <section id="flow">
+      <h2>Flow</h2>
+      <div class="svg-wrap"><svg viewBox="0 0 800 160" role="img"><defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#3157d5"/></marker></defs>
+        <rect x="10" y="30" width="150" height="50" rx="14" fill="#eef2ff" stroke="#3157d5"/><text x="85" y="52" text-anchor="middle" font-size="13">Snapshot loaded</text><text x="85" y="68" text-anchor="middle" font-size="11">goal + dag + runtime</text>
+        <line x1="160" y1="55" x2="230" y2="55" stroke="#3157d5" stroke-width="3" marker-end="url(#arrow)"/>
+        <rect x="230" y="30" width="160" height="50" rx="14" fill="#ecfdf3" stroke="#027a48"/><text x="310" y="52" text-anchor="middle" font-size="13">buildOverview()</text><text x="310" y="68" text-anchor="middle" font-size="11">health + problem + runtime</text>
+        <line x1="390" y1="55" x2="460" y2="55" stroke="#3157d5" stroke-width="3" marker-end="url(#arrow)"/>
+        <rect x="460" y="30" width="150" height="50" rx="14" fill="#fff7ed" stroke="#b54708"/><text x="535" y="52" text-anchor="middle" font-size="13">Pi TUI render</text><text x="535" y="68" text-anchor="middle" font-size="11">overview sections</text>
+        <line x1="610" y1="55" x2="680" y2="55" stroke="#3157d5" stroke-width="3" marker-end="url(#arrow)"/>
+        <rect x="680" y="30" width="100" height="50" rx="14" fill="#f8fafc" stroke="#98a2b3"/><text x="730" y="52" text-anchor="middle" font-size="13">OpenCode</text><text x="730" y="68" text-anchor="middle" font-size="11">sections</text>
+        <rect x="230" y="100" width="430" height="40" rx="14" fill="#f0f9ff" stroke="#0284c7"/><text x="445" y="118" text-anchor="middle" font-size="13">Shared health/problem/runtime/event logic → consistent terminology</text><text x="445" y="134" text-anchor="middle" font-size="11">Existing row actions unchanged</text>
+      </svg></div>
+    </section>
+
+    <section id="affected-surfaces"><h2>Affected Surfaces</h2>
+      <ul><li>Pi TUI monitor: overview sections, health, problem, events</li><li>OpenCode monitor: structured sections, matching terminology</li><li>Runtime data: no new persistence; derived from existing state</li></ul>
+    </section>
+
+    <section id="scope-boundaries"><h2>Scope</h2><p>Pure display/view-model refinement。不改 controller scheduling、hidden continuation、subagent lifecycle。不改 goal-contract/goal-dag/goal-spec。</p></section>
+    <section id="rollout"><h2>Rollout</h2><p>不需要 migration。Display-only change。現有 row actions 保留。</p></section>
+    <section id="current-status"><h2>Status</h2><p>OpenSpec change 已建立為 draft。待實作 Pi/OpenCode overview 佈局。</p></section>
+
+    <section id="decision-points"><h2>Decision Points</h2>
+      <table><thead><tr><th>決策</th><th>選擇</th><th>取捨</th><th>信心</th></tr></thead>
+        <tr><td>Health taxonomy</td><td>Complete / Complete with warnings / Running 擴充</td><td>更準確，但需要 migration of existing health logic</td><td>High</td></tr>
+        <tr><td>Overview model</td><td>Structured, derived, shared</td><td>Pi/OpenCode 用同一邏輯</td><td>High</td></tr>
+        <tr><td>Event filter</td><td>3-8 meaningful events default</td><td>full logs on demand</td><td>High</td></tr>
+      </table>
+    </section>
+
+    <section id="implementation-slices"><h2>Slices</h2>
+      <ol><li>Overview model + health + problem + runtime + events</li><li>Pi TUI overview rendering</li><li>OpenCode overview rendering</li><li>Tests</li></ol>
+    </section>
+
+    <section id="verification-plan"><h2>Verification</h2>
+      <ul><li>Complete clean → Health=Complete</li><li>Complete + residual failures → Complete with warnings</li><li>Active healthy → Running</li><li>Active blocked → Needs attention</li><li>80-column rendering</li><li>OpenCode sections match Pi terminology</li><li><code>npm run check</code></li></ul>
+    </section>
+
+    <section id="risk-register"><h2>Risk Register</h2>
+      <p><strong>High-risk filter：</strong><span data-filter="high-risk">會誤導使用者的健康判斷標為高風險。</span></p>
+      <div class="grid">
+        <div class="card"><h3>Health semantics change</h3><p>Low — old Blocked+complete was the bug.</p></div>
+        <div class="card"><h3>Narrow terminal</h3><p>Low — separate 80-column rendering mode tested.</p></div>
+      </div>
+    </section>
+
+    <section id="copy-controls">
+      <button class="copy-button" data-copy="#decision-summary">複製決策摘要</button>
+      <button class="copy-button" data-copy="#task-json">複製任務 JSON</button>
+      <pre id="decision-summary">Decision: redesign /goal monitor first screen into overview-first dashboard. Fix health so completed goals never show Blocked. Summarize problems to node-centric phrases. Use user-facing runtime labels. Show recent events, not full logs, by default.</pre>
+      <script id="task-json" type="application/json">{"change":"redesign-monitor-overview-dashboard","tasks":["overview-model","health-taxonomy","problem-summarizer","runtime-labels","pi-tui-render","opencode-render","event-filter","tests"]}</script>
+    </section>
+
+    <section id="agent-prompts"><h2>Agent Prompts</h2>
+      <div class="grid three">
+        <div class="card"><h3>Implementation agent prompt</h3><p>Implement GoalMonitorOverview model with health taxonomy, problem summarizer, runtime label mapper, event filter. Render in Pi TUI and OpenCode as overview-first dashboard. Never show Blocked for complete goals.</p></div>
+        <div class="card"><h3>Review agent prompt</h3><p>Review that completed goal never shows Health=Blocked. Problem line is node-centric. Both adapters use identical health/runtime terminology. Row actions unchanged.</p></div>
+        <div class="card"><h3>Verification agent prompt</h3><p>Run monitor tests for both adapters. Confirm all health states render correctly. npm run check passes.</p></div>
+      </div>
+    </section>
+  </main>
+  <script>for(const b of document.querySelectorAll('[data-copy]'))b.addEventListener('click',async()=>{const t=document.querySelector(b.getAttribute('data-copy')),x=t?t.textContent.trim():'';navigator.clipboard&&await navigator.clipboard.writeText(x);b.textContent='已複製';setTimeout(()=>{b.textContent=b.getAttribute('data-copy').includes('task')?'複製任務 JSON':'複製決策摘要'},1200)});</script>
+</body>
+</html>
