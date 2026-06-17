@@ -1037,3 +1037,129 @@ test("goal slugs are stable and safe for branch names", () => {
   assert.equal(slugForGoalSubagent("abcdef12-3456", "Implement Attendance DocTypes"), "abcdef12-implement-attendance-doctypes");
   assert.match(slugForGoal("目標", "完成"), /^[a-f0-9-]+$/);
 });
+
+test("legacy goal/final-verification branch does not block new goal-scoped allocation", () => {
+  const repo = createRepo();
+  const manager = new NativeGitWorkspaceManager({ branchPrefix: "goal", fetch: false });
+
+  // Simulate legacy branch from old goal.
+  const legacyBranch = "goal/final-verification";
+  git(repo, ["checkout", "-b", legacyBranch]);
+  writeFileSync(join(repo, "legacy.md"), "# old goal\n");
+  git(repo, ["add", "legacy.md"]);
+  git(repo, ["commit", "-m", "legacy"]);
+  git(repo, ["checkout", "main"]);
+
+  // New goal's allocation must not be blocked.
+  const allocation = manager.allocateSubagentWorkspace({
+    invocationCwd: repo,
+    goalId: "16c4f3b3-5ffb-4be9-a556-b7874b069cf1",
+    nodeId: "final-verification",
+    nodeSlug: "final-verification",
+    subagentId: "subagent-final-verification",
+  });
+
+  assert.ok(allocation.worktreePath, "worktree must be allocated");
+  assert.ok(allocation.branch, "branch must be set");
+  // Branch must be goal-scoped, NOT the legacy one.
+  assert.notEqual(allocation.branch, legacyBranch, "must not reuse legacy branch");
+  assert.ok(allocation.branch?.startsWith("goal/16c4f3b3"), `branch must contain goal id prefix, got: ${allocation.branch}`);
+  // Verify legacy branch still exists.
+  const branches = git(repo, ["branch", "--list", legacyBranch]).trim();
+  assert.ok(branches.length > 0, "legacy branch must be preserved");
+});
+
+test("same node id in different goals creates different branches", () => {
+  const repo = createRepo();
+  const manager = new NativeGitWorkspaceManager({ branchPrefix: "goal", fetch: false });
+
+  const allocA = manager.allocateSubagentWorkspace({
+    invocationCwd: repo,
+    goalId: "aaaaaaaa-1111-1111-1111-111111111111",
+    nodeId: "final-verification",
+    nodeSlug: "final-verification",
+    subagentId: "subagent-fv-a",
+  });
+
+  const allocB = manager.allocateSubagentWorkspace({
+    invocationCwd: repo,
+    goalId: "bbbbbbbb-2222-2222-2222-222222222222",
+    nodeId: "final-verification",
+    nodeSlug: "final-verification",
+    subagentId: "subagent-fv-b",
+  });
+
+  assert.ok(allocA.branch, "goal A branch must be set");
+  assert.ok(allocB.branch, "goal B branch must be set");
+  assert.notEqual(allocA.branch, allocB.branch, "different goals must have different branches");
+  assert.ok(allocA.branch?.startsWith("goal/aaaaaaaa-1"), `goal A branch: ${allocA.branch}`);
+  assert.ok(allocB.branch?.startsWith("goal/bbbbbbbb-2"), `goal B branch: ${allocB.branch}`);
+  assert.ok(allocA.worktreePath !== allocB.worktreePath, "different goals must have different worktree paths");
+});
+
+test("explicitly-bound subagent workspace reuses clean matching branch", () => {
+  const repo = createRepo();
+  const manager = new NativeGitWorkspaceManager({ branchPrefix: "goal", fetch: false });
+
+  // First allocation creates the workspace.
+  const first = manager.allocateSubagentWorkspace({
+    invocationCwd: repo,
+    goalId: "cccccccc-3333-3333-3333-333333333333",
+    nodeId: "bound-node",
+    nodeSlug: "bound-node",
+    subagentId: "subagent-bound",
+    worktreeSlug: "bound-node",
+    branch: "goal/cccccccc-3/bound-node",
+  });
+  assert.ok(first.created, "first allocation must create");
+
+  // Simulate clean reuse: same args again.
+  const second = manager.allocateSubagentWorkspace({
+    invocationCwd: repo,
+    goalId: "cccccccc-3333-3333-3333-333333333333",
+    nodeId: "bound-node",
+    nodeSlug: "bound-node",
+    subagentId: "subagent-bound",
+    worktreeSlug: "bound-node",
+    branch: "goal/cccccccc-3/bound-node",
+  });
+
+  assert.equal(second.created, false, "second allocation must reuse existing workspace");
+  assert.equal(second.worktreePath, first.worktreePath, "must reuse same path");
+  assert.equal(second.branch, first.branch, "must reuse same branch");
+});
+
+test("dirty explicitly-bound workspace is rejected", () => {
+  const repo = createRepo();
+  const manager = new NativeGitWorkspaceManager({ branchPrefix: "goal", fetch: false });
+
+  const first = manager.allocateSubagentWorkspace({
+    invocationCwd: repo,
+    goalId: "dddddddd-4444-4444-4444-444444444444",
+    nodeId: "dirty-node",
+    nodeSlug: "dirty-node",
+    subagentId: "subagent-dirty",
+    worktreeSlug: "dirty-node",
+    branch: "goal/dddddddd-4/dirty-node",
+  });
+  assert.ok(first.created);
+
+  // Make the workspace dirty.
+  writeFileSync(join(first.worktreePath ?? "", "uncommitted.txt"), "dirty");
+  git(first.worktreePath ?? repo, ["add", "uncommitted.txt"]);
+
+  assert.throws(
+    () =>
+      manager.allocateSubagentWorkspace({
+        invocationCwd: repo,
+        goalId: "dddddddd-4444-4444-4444-444444444444",
+        nodeId: "dirty-node",
+        nodeSlug: "dirty-node",
+        subagentId: "subagent-dirty",
+        worktreeSlug: "dirty-node",
+        branch: "goal/dddddddd-4/dirty-node",
+      }),
+    /uncommitted changes/,
+    "dirty workspace must be rejected",
+  );
+});
