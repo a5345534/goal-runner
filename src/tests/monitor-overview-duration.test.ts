@@ -1,13 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildGoalMonitorOverview,
   buildNodeDurationSummary,
   buildRunnerDurationSummary,
 } from "../adapters/monitor-overview.js";
+import {
+  buildGoalMonitorRuntimeSummary,
+} from "../adapters/pi/monitor-ui.js";
 import type {
   GoalDagNode,
   GoalLedgerEvent,
   GoalSubagentRecord,
+  GoalSummary,
 } from "../core/index.js";
 
 function makeNode(overrides: Partial<GoalDagNode> = {}): GoalDagNode {
@@ -35,6 +40,23 @@ function makeSubagent(overrides: Partial<GoalSubagentRecord> = {}): GoalSubagent
     harnessAdapterId: "pi",
     status: "running",
     prompts: ["start"],
+    createdAt: "2026-06-01T00:00:00.000Z",
+    updatedAt: "2026-06-01T00:10:00.000Z",
+    lastActivityAt: "2026-06-01T00:10:00.000Z",
+    ...overrides,
+  };
+}
+
+function makeGoal(overrides: Partial<GoalSummary> = {}): GoalSummary {
+  return {
+    sessionKey: "session-1",
+    goalId: "goal-1",
+    shortGoalId: "g1",
+    objective: "Build graph",
+    objectiveSummary: "Build graph",
+    status: "complete",
+    tokensUsed: 0,
+    timeUsedSeconds: 600,
     createdAt: "2026-06-01T00:00:00.000Z",
     updatedAt: "2026-06-01T00:10:00.000Z",
     lastActivityAt: "2026-06-01T00:10:00.000Z",
@@ -252,4 +274,27 @@ test("buildRunnerDurationSummary falls back to createdAt and records terminal ru
   assert.equal(withTerminal.confidence, "ledger-derived");
   assert.equal(withTerminal.attemptRuntimeLabel, "attempt 8m");
   assert.equal(withTerminal.statusAgeLabel, "failed for 2m");
+});
+
+test("execution plan summary omits last label for terminal nodes", () => {
+  const now = new Date("2026-06-01T00:10:00.000Z");
+  const node = makeNode({
+    status: "complete",
+    createdAt: "2026-06-01T00:01:00.000Z",
+    updatedAt: "2026-06-01T00:09:00.000Z",
+    nodeId: "n1",
+    slug: "n1",
+  });
+
+  const goal = makeGoal({ status: "complete" });
+  const runtimeSummary = buildGoalMonitorRuntimeSummary(goal, [makeSubagent({ status: "complete", nodeId: "n1", subagentId: "subagent-1" })]);
+  const overview = buildGoalMonitorOverview(
+    goal,
+    { nodes: [node], subagents: [makeSubagent({ status: "complete", nodeId: "n1", subagentId: "subagent-1" })] },
+    runtimeSummary,
+    { now },
+  );
+
+  assert.doesNotMatch(overview.nodeDisplayStates[0]!.summary, /last /);
+  assert.match(overview.nodeDisplayStates[0]!.summary, /completed|complete|terminal/);
 });

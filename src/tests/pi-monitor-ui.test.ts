@@ -449,6 +449,7 @@ test("goal monitor enters runner list and binds live output to selected runner",
     assert.match(first, /first runner transcript/);
     assert.doesNotMatch(first, /second runner transcript/);
     assert.match(first, /RUNNER SUMMARY/);
+    assert.ok(first.indexOf("RUNNER SUMMARY") < first.indexOf("first runner transcript"));
     assert.match(first, /LIST: Runners for build-node 1\/2/);
     assert.match(first, /> 1\. .*subagent-build-node-1.*attempt/);
     assert.match(first, /> 1\. .*subagent-build-node-1.*process/);
@@ -460,6 +461,7 @@ test("goal monitor enters runner list and binds live output to selected runner",
 
     assert.match(second, /LIVE: Runner subagent-build-node-2 model=verify-fast -> openai-codex\/gpt-5\.3-codex-spark -> \[high\] tokens=12/);
     assert.match(second, /RUNNER SUMMARY/);
+    assert.ok(second.indexOf("RUNNER SUMMARY") < second.indexOf("second runner transcript"));
     assert.match(second, /second runner transcript/);
     assert.match(second, /note: working second/);
     assert.match(second, /> 2\. .*subagent-build-node-2/);
@@ -907,7 +909,7 @@ test("health line shows Running when active session + suppressed continuation + 
   assert.match(ov.nextActionLabel, /monitor progress/);
 });
 
-test("Pi monitor render includes runtime band lines with Session/Hidden/Poll/Runners", () => {
+test("Pi monitor render includes runtime band lines with Session/Hidden/Poll/Runners in debug mode", () => {
   const now = new Date("2026-05-31T00:05:00.000Z");
   const ledgerEvents = [
     ledgerEvent({
@@ -928,6 +930,7 @@ test("Pi monitor render includes runtime band lines with Session/Hidden/Poll/Run
     () => now,
   );
 
+  controller.handleInput("c"); // debug mode shows raw runtime band
   const rendered = controller.render(160, theme).join("\n");
 
   assert.match(rendered, /Session=/);
@@ -1010,8 +1013,8 @@ test("Pi monitor running runners with active session not shown as stalled", () =
   assert.doesNotMatch(rendered, /Health: Stalled|Health=Stalled/);
   // Should show Running health.
   assert.match(rendered, /Health: Running|Health=Running/);
-  // Runners count should show running runners.
-  assert.match(rendered, /Runners=1 running|Runners:\s*1\s*running/);
+  // Workers line should show running runners.
+  assert.match(rendered, /Workers:\s*1 active|Workers:\s*1 running|1 running/);
 });
 
 test("Pi monitor narrow width rendering keeps runtime state visible", () => {
@@ -1043,20 +1046,22 @@ test("Pi monitor narrow width rendering keeps runtime state visible", () => {
   // Render at narrow width (80 columns).
   const narrow = controller.render(80, theme).join("\n");
 
-  // All key runtime state labels should still appear in the narrow output.
-  assert.match(narrow, /Session=/);
-  assert.match(narrow, /Hidden=/);
-  assert.match(narrow, /Poll=/);
-  assert.match(narrow, /Runners=/);
-  assert.match(narrow, /Health=/);
-  assert.match(narrow, /Next:/);
-  // Overview fields should be visible at 80 columns.
+  // Default mode should hide debug band; keep user-facing overview lines visible.
+  assert.doesNotMatch(narrow, /Session=/);
+  assert.doesNotMatch(narrow, /Hidden=/);
+  assert.doesNotMatch(narrow, /Poll=/);
+  assert.doesNotMatch(narrow, /Runners=/);
+
+  // Overview fields should still be visible at 80 columns.
   assert.match(narrow, /Health:/);
   assert.match(narrow, /Progress:/);
   assert.match(narrow, /Runtime:/);
   assert.match(narrow, /Next:/);
 
-  const bandLines = narrow.split("\n").filter((line) => line.includes("Session=") || line.includes("Poll=") || line.includes("Health="));
+  // Debug mode restores raw runtime band lines.
+  controller.handleInput("c");
+  const narrowDebug = controller.render(80, theme).join("\n");
+  const bandLines = narrowDebug.split("\n").filter((line) => line.includes("Session=") || line.includes("Poll=") || line.includes("Health="));
   assert.ok(bandLines.length >= 2, `Expected at least 2 runtime band lines, got ${bandLines.length}`);
 
   const veryNarrow = controller.render(40, theme).join("\n");
@@ -1165,8 +1170,9 @@ test("Pi: complete with residual failed runners renders Complete with warnings",
 
   assert.match(rendered, /Health: Complete with warnings|Health=Complete with warnings/);
   assert.doesNotMatch(rendered, /Health: Blocked/);
-  // Problem line should show the affected node, not "Blocked".
-  assert.match(rendered, /n2|Problem:.*n2/);
+  // Problem/selected detail should show the affected node, not "Blocked".
+  assert.match(rendered, /Problem:.*n2/);
+  assert.match(rendered, /Node: n2/);
 });
 
 // 4.3 Pi: complete with warnings shows node-centric Problem line

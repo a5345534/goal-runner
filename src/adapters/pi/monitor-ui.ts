@@ -695,20 +695,16 @@ export class GoalMonitorController {
     lines.push(truncateToWidth(theme.fg("dim", `row-action monitor • ←→ select row op • Enter confirm • b/Backspace back • l/v focus • c compact/debug • Tab switch • ↑↓ move/scroll • PgUp/PgDn • Esc close`), width));
 
     // ── RUNTIME BAND + DEBUG META ──
-    lines.push(truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width));
-    const healthLabel = EXTENDED_MONITOR_HEALTH_LABELS[overview.health] ?? overview.health;
-    const sessionPart = `Session=${SESSION_STATE_LABELS[runtimeSummary.session.state]}`;
-    const hiddenPart = `Hidden=${HIDDEN_CONTINUATION_STATE_LABELS[runtimeSummary.hiddenContinuation.state]}`;
-    const pollPart = `Poll=${CONTROLLER_POLL_STATE_LABELS[runtimeSummary.controllerPoll.state]}`;
-    const runnersPart = `Runners=${formatRunnerSummary(runtimeSummary.runners)}`;
-    const fullBand = `${sessionPart}  ${hiddenPart}  ${pollPart}  ${runnersPart}  Health=${healthLabel}  Next: ${overview.nextActionLabel}`;
-
-    if (fullBand.length > width && width > 0) {
-      lines.push(truncateToWidth(theme.fg("dim", `${sessionPart}  ${hiddenPart}`), width));
-      lines.push(truncateToWidth(theme.fg("dim", `${pollPart}  ${runnersPart}`), width));
-      lines.push(truncateToWidth(theme.fg("dim", `Health=${healthLabel}  Next: ${overview.nextActionLabel}`), width));
-    } else {
-      lines.push(truncateToWidth(theme.fg("dim", fullBand), width));
+    const showDebugBand = this.controllerHistoryMode === "debug" || this.activePane === "live";
+    if (showDebugBand) {
+      lines.push(
+        ...formatRuntimeBandLines(
+          runtimeSummary,
+          { health: overview.health, nextAction: overview.nextActionLabel },
+          width,
+          theme,
+        ),
+      );
     }
 
     const compactMeta = isNarrow
@@ -838,7 +834,7 @@ export class GoalMonitorController {
       liveTitle: formatRunnerLiveTitle(node, runner, transcript, runnerRecords),
       liveLines: renderRunnerLiveLines(node, runner, transcript, enrichedSummary),
       liveDiagnostic: transcript.diagnostic,
-      liveFollowsTail: Boolean(runner.sessionFile),
+      liveFollowsTail: false,
       listTitle: `Runners for ${shortenMiddle(node.slug || node.nodeId, 48)} ${nodeSubagents.length ? `${Math.min(this.listIndex + 1, nodeSubagents.length)}/${nodeSubagents.length}` : "0"}`,
       listRows: nodeSubagents.map((subagent, index) => {
         const summary = buildRunnerDurationSummary(subagent, dag.ledgerEvents ?? [], now);
@@ -1553,8 +1549,8 @@ function formatRuntimeBandLines(
 
   const fullLine = [sessionPart, hiddenPart, pollPart, runnersPart].join("  ");
   const healthColor =
-    health.health === "OK" ? "success" :
-    health.health === "Needs attention" ? "warning" :
+    health.health === "OK" || health.health === "Complete" || health.health === "Running" ? "success" :
+    health.health === "Needs attention" || health.health === "Complete with warnings" ? "warning" :
     health.health === "Blocked" ? "error" : "dim";
   const healthLine = `Health=${health.health}  Next: ${health.nextAction}`;
 

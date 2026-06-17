@@ -186,10 +186,12 @@ export function deriveMonitorHealth(summary, goal, subagents, nodes) {
 export function summarizeMonitorProblem(goal, nodes, subagents) {
     // Completed goals have no "problem" — residual warnings are covered by health.
     if (goal.status === "complete") {
+        const warningNode = findResidualWarningNode(nodes, subagents);
+        if (warningNode) {
+            return `${truncateSlug(warningNode.slug || warningNode.nodeId, 40)} · residual issues after completion`;
+        }
         const hasWarnings = subagents.some((s) => ["blocked", "failed", "needsFollowup"].includes(s.status)) || nodes.some((n) => ["blocked", "failed"].includes(n.status));
-        return hasWarnings
-            ? `${nodes.find((n) => ["blocked", "failed"].includes(n.status))?.slug ?? "some node"} · residual issues after completion`
-            : "none";
+        return hasWarnings ? "some node · residual issues after completion" : "none";
     }
     // Blocked nodes first.
     const blockedNode = nodes.find((n) => ["blocked", "failed"].includes(n.status));
@@ -202,12 +204,7 @@ export function summarizeMonitorProblem(goal, nodes, subagents) {
     }
     // Blocked/failed subagents (not associated with blocked node).
     // Only count subagents that don't have a newer replacement.
-    const failedWithoutReplacement = subagents.filter((s) => ["blocked", "failed", "needsFollowup"].includes(s.status)).filter((failed) => {
-        const hasReplacement = subagents.some((other) => other.nodeId === failed.nodeId &&
-            other.subagentId !== failed.subagentId &&
-            ["running", "complete"].includes(other.status));
-        return !hasReplacement;
-    });
+    const failedWithoutReplacement = subagents.filter((s) => ["blocked", "failed", "needsFollowup"].includes(s.status)).filter((failed) => !hasReplacementSubagent(failed, subagents));
     const blockedSub = failedWithoutReplacement[0];
     if (blockedSub) {
         const reason = blockedSub.selfReportedResult ?? blockedSub.integrationError ?? blockedSub.integrationStatus ?? "blocked";
@@ -479,20 +476,32 @@ function formatNextActionLabel(health, problem, goal) {
 function selectNodeForOverview(nodes, subagents, health) {
     if (nodes.length === 0)
         return undefined;
-    if (health === "Blocked" || health === "Needs attention") {
-        const blockedNode = nodes.find((n) => ["blocked", "failed", "superseded"].includes(n.status));
-        if (blockedNode)
-            return blockedNode;
-        const failedSub = nodes.find((n) => {
-            const subs = subagents.filter((s) => s.nodeId === n.nodeId);
-            return subs.some((s) => ["blocked", "failed", "needsFollowup"].includes(s.status));
-        });
-        if (failedSub)
-            return failedSub;
+    if (health === "Blocked" || health === "Needs attention" || health === "Complete with warnings") {
+        const warningNode = findResidualWarningNode(nodes, subagents);
+        if (warningNode)
+            return warningNode;
     }
     return nodes.find((n) => ["running", "controllerValidating"].includes(n.status))
         ?? nodes.find((n) => n.status === "ready")
         ?? nodes[0];
+}
+function findResidualWarningNode(nodes, subagents) {
+    const blockedNode = nodes.find((n) => ["blocked", "failed", "superseded"].includes(n.status));
+    if (blockedNode)
+        return blockedNode;
+    const failedSubagents = subagents
+        .filter((s) => ["blocked", "failed", "needsFollowup"].includes(s.status))
+        .filter((s) => !hasReplacementSubagent(s, subagents))
+        .sort((left, right) => Date.parse(right.updatedAt ?? right.createdAt) - Date.parse(left.updatedAt ?? left.createdAt));
+    if (failedSubagents.length === 0)
+        return undefined;
+    const relatedNodeId = failedSubagents[0].nodeId;
+    return nodes.find((n) => n.nodeId === relatedNodeId);
+}
+function hasReplacementSubagent(subagent, allSubagents) {
+    return allSubagents.some((other) => other.nodeId === subagent.nodeId &&
+        other.subagentId !== subagent.subagentId &&
+        ["running", "complete"].includes(other.status));
 }
 function buildNodeSelectedDetailLines(node, subagents, ledgerEvents, now) {
     const relatedSubs = subagents.filter((sub) => sub.nodeId === node.nodeId);
@@ -518,7 +527,12 @@ function formatSelectedNodeDetail(node, subagents, ledgerEvents, now) {
 }
 function formatNodeExecutionPlanSummary(node, relatedSubagents, ledgerEvents, now) {
     const duration = buildNodeDurationSummary(node, relatedSubagents, ledgerEvents, now);
-    const parts = [duration.totalLabel, duration.phaseLabel, `last ${duration.lastLabel}`].filter(Boolean);
+    const isTerminal = ["complete", "blocked", "failed", "superseded"].includes(node.status);
+    const parts = [
+        duration.totalLabel,
+        duration.phaseLabel,
+        ...(isTerminal ? [] : [`last ${duration.lastLabel}`]),
+    ].filter(Boolean);
     return parts.join(" · ");
 }
 function buildNodeExecutionPlanSummary(node, relatedSubagents, ledgerEvents, now) {
