@@ -109,9 +109,7 @@ test("renderOpencodeMonitorLines includes node and subagent lines", () => {
   // Subagent info is in the EXECUTION PLAN section via display states.
   assert.match(joined, /EXECUTION PLAN/);
   assert.equal(outputLines[0], "═".repeat(96));
-  assert.equal(outputLines[1], "═".repeat(96));
   assert.equal(outputLines[outputLines.length - 1], "═".repeat(96));
-  assert.equal(outputLines[outputLines.length - 2], "═".repeat(96));
 });
 
 test("OpenCode EXECUTION PLAN includes node duration and phase labels", () => {

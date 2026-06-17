@@ -38,7 +38,6 @@ export function renderOpencodeMonitorLines(goal, state, options = {}) {
     const lines = [];
     const uiBoundary = "═".repeat(Math.max(0, maxLineWidth));
     lines.push(uiBoundary);
-    lines.push(uiBoundary);
     // ── Build the runtime summary (shared with Pi TUI) ──
     const runtimeSummary = buildGoalMonitorRuntimeSummary(goal, state.subagents, {
         harnessState: options.harnessState,
@@ -109,7 +108,6 @@ export function renderOpencodeMonitorLines(goal, state, options = {}) {
             lines.push(truncate(evt, maxLineWidth));
         }
     }
-    lines.push(uiBoundary);
     lines.push(uiBoundary);
     return lines;
 }
