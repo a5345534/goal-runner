@@ -662,6 +662,7 @@ export class GoalMonitorController {
       this.goal,
       { nodes: dag.nodes, subagents: dag.subagents, ledgerEvents: dag.ledgerEvents },
       runtimeSummary,
+      { now: new Date() },
     );
 
     const isNarrow = width <= 80;

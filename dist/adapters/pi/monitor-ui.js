@@ -449,7 +449,7 @@ export class GoalMonitorController {
             runners: dag.runners,
         });
         // ── Build the structured overview model (shared with OpenCode adapter) ──
-        const overview = buildGoalMonitorOverview(this.goal, { nodes: dag.nodes, subagents: dag.subagents, ledgerEvents: dag.ledgerEvents }, runtimeSummary);
+        const overview = buildGoalMonitorOverview(this.goal, { nodes: dag.nodes, subagents: dag.subagents, ledgerEvents: dag.ledgerEvents }, runtimeSummary, { now: new Date() });
         const isNarrow = width <= 80;
         const lines = [];
         // ── OVERVIEW HEADER ──

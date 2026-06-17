@@ -133,6 +133,7 @@ const RUNTIME_POLL_USER_LABELS: Record<string, string> = {
 export interface BuildGoalMonitorOverviewOptions {
   maxRecentEvents?: number;
   minRecentEvents?: number;
+  now?: Date;
 }
 
 /**
@@ -147,8 +148,14 @@ export function buildGoalMonitorOverview(
 ): GoalMonitorOverview {
   const health = deriveMonitorHealth(runtimeSummary, goal, dag.subagents, dag.nodes);
   const problem = summarizeMonitorProblem(goal, dag.nodes, dag.subagents);
-  const runtimeLabel = formatRuntimeSummaryForOverview(runtimeSummary);
-  const progress = formatProgressLabel(goal, dag.nodes, dag.subagents);
+  const progress = formatProgressLabel(goal, dag.nodes);
+  const workers = formatWorkersLabel(dag.subagents);
+  const duration = buildGoalDurationSummary(goal, dag.ledgerEvents ?? [], options.now ?? new Date());
+  const runtimeLabel = [
+    duration.goalAgeLabel,
+    duration.activeWorkLabel,
+    duration.lastEventLabel,
+  ].filter(Boolean).join(" · ");
   const nextAction = formatNextActionLabel(health, problem, goal);
   const selectedDetail = formatSelectedDetail(goal, dag.nodes, dag.subagents, health, problem);
   const recentEvents = formatRecentEvents(dag.ledgerEvents ?? [], options);
@@ -553,32 +560,31 @@ function findLatestSubagent(
 // ── Progress label ──
 
 function formatProgressLabel(
-  goal: GoalSummary,
+  _goal: GoalSummary,
   nodes: GoalDagNode[],
-  subagents: GoalSubagentRecord[],
 ): string {
   if (nodes.length === 0) return "no DAG nodes planned";
-
   const complete = nodes.filter((n) => n.status === "complete").length;
   const running = nodes.filter((n) => ["running", "controllerValidating"].includes(n.status)).length;
   const blocked = nodes.filter((n) => ["blocked", "failed"].includes(n.status)).length;
   const planned = nodes.filter((n) => ["planned", "ready"].includes(n.status)).length;
-
   const parts: string[] = [];
   if (complete > 0) parts.push(`${complete}/${nodes.length} nodes complete`);
   if (running > 0) parts.push(`${running} running`);
   if (blocked > 0) parts.push(`${blocked} blocked`);
   if (planned > 0 && running === 0 && blocked === 0) parts.push(`${planned} planned`);
+  return parts.join(" · ") || "no activity";
+}
 
-  const totalSubagents = subagents.length;
-  const runningSubs = subagents.filter((s) => s.status === "running").length;
-  if (runningSubs > 0) parts.push(`${runningSubs}/${totalSubagents} subagents running`);
-
-  const tokens = typeof goal.tokenBudget === "number"
-    ? `${formatCompactNumber(goal.tokensUsed)}/${formatCompactNumber(goal.tokenBudget)} tokens`
-    : `${formatCompactNumber(goal.tokensUsed)} tokens`;
-
-  return `${parts.join(" · ")}${parts.length ? " · " : ""}${tokens} · ${formatElapsedShort(goal.timeUsedSeconds)}`;
+function formatWorkersLabel(subagents: GoalSubagentRecord[]): string {
+  const running = subagents.filter((s) => s.status === "running").length;
+  const archived = subagents.filter((s) => ["complete", "superseded"].includes(s.status)).length;
+  const failed = subagents.filter((s) => ["blocked", "failed"].includes(s.status)).length;
+  const parts: string[] = [];
+  if (running > 0) parts.push(`${running} active`);
+  if (archived > 0) parts.push(`${archived} archived`);
+  if (failed > 0) parts.push(`${failed} failed`);
+  return parts.join(" · ") || "none";
 }
 
 // ── Next action ──
@@ -672,4 +678,152 @@ function formatElapsedShort(seconds: number): string {
   if (seconds < 60) return `${Math.round(seconds)}s`;
   if (seconds < 3_600) return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
   return `${Math.floor(seconds / 3_600)}h ${Math.floor((seconds % 3_600) / 60)}m`;
+}
+
+// ── Duration helpers ──
+
+export type StaleLevel = "fresh" | "quiet" | "stale" | "dead" | "unknown";
+
+export interface MonitorDurationSummary {
+  totalLabel: string;
+  phaseLabel?: string;
+  statusLabel?: string;
+  lastLabel: string;
+  staleLevel: StaleLevel;
+}
+
+export function formatDuration(ms: number): string {
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return m > 0 ? `${h}h${m}m` : `${h}h`;
+  }
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  return h > 0 ? `${d}d${h}h` : `${d}d`;
+}
+
+export function formatAgo(date: Date, now: Date): string {
+  const ms = Math.max(0, now.getTime() - date.getTime());
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return m > 0 ? `${h}h${m}m ago` : `${h}h ago`;
+  }
+  return `${Math.floor(seconds / 86400)}d ago`;
+}
+
+export function classifyStaleness(lastAt: Date, now: Date): StaleLevel {
+  const ms = now.getTime() - lastAt.getTime();
+  if (ms < 2 * 60_000) return "fresh";
+  if (ms < 5 * 60_000) return "quiet";
+  if (ms < 10 * 60_000) return "stale";
+  if (ms < 30 * 60_000) return "stale";
+  return "dead";
+}
+
+function findLastLedgerEventAt(events: { at: string }[], prefix?: string): Date | undefined {
+  let latest: Date | undefined;
+  for (const e of events) {
+    const at = new Date(e.at);
+    if (isNaN(at.getTime())) continue;
+    if (!latest || at > latest) latest = at;
+  }
+  return latest;
+}
+
+function findFirstNodeLedgerEvent(events: { at: string; details?: Record<string, unknown> }[], nodeId: string): Date | undefined {
+  let first: Date | undefined;
+  for (const e of events) {
+    const de = e.details as Record<string, unknown> | undefined;
+    if (de?.nodeId !== nodeId) continue;
+    const at = new Date(e.at);
+    if (isNaN(at.getTime())) continue;
+    if (!first || at < first) first = at;
+  }
+  return first;
+}
+
+function findLastNodeLedgerEvent(events: { at: string; details?: Record<string, unknown> }[], nodeId: string): Date | undefined {
+  let last: Date | undefined;
+  for (const e of events) {
+    const de = e.details as Record<string, unknown> | undefined;
+    if (de?.nodeId !== nodeId) continue;
+    const at = new Date(e.at);
+    if (isNaN(at.getTime())) continue;
+    if (!last || at > last) last = at;
+  }
+  return last;
+}
+
+export function buildGoalDurationSummary(
+  goal: { createdAt: string; timeUsedSeconds: number; updatedAt: string },
+  ledgerEvents: { at: string }[],
+  now: Date,
+): { goalAgeLabel: string; activeWorkLabel?: string; lastEventLabel: string } {
+  const createdAt = new Date(goal.createdAt);
+  const goalAge = Math.max(0, now.getTime() - createdAt.getTime());
+  const lastEvent = findLastLedgerEventAt(ledgerEvents);
+  return {
+    goalAgeLabel: `goal age ${formatDuration(goalAge)}`,
+    activeWorkLabel: goal.timeUsedSeconds > 0 ? `active work ${formatDuration(goal.timeUsedSeconds * 1000)}` : undefined,
+    lastEventLabel: lastEvent ? `last event ${formatAgo(lastEvent, now)}` : "no events",
+  };
+}
+
+export function buildNodeDurationSummary(
+  node: { nodeId: string; status: string; lifecyclePhase?: string; createdAt?: string; updatedAt?: string },
+  ledgerEvents: { at: string; details?: Record<string, unknown> }[],
+  now: Date,
+): MonitorDurationSummary {
+  const createdAt = node.createdAt ? new Date(node.createdAt) : undefined;
+  const startAt = findFirstNodeLedgerEvent(ledgerEvents, node.nodeId) ?? createdAt;
+  const lastAt = findLastNodeLedgerEvent(ledgerEvents, node.nodeId) ?? (node.updatedAt ? new Date(node.updatedAt) : now);
+  const isTerminal = ["complete", "blocked", "failed"].includes(node.status);
+
+  const totalMs = isTerminal && startAt
+    ? Math.max(0, lastAt.getTime() - startAt.getTime())
+    : startAt
+      ? Math.max(0, now.getTime() - startAt.getTime())
+      : createdAt
+        ? Math.max(0, now.getTime() - createdAt.getTime())
+        : 0;
+
+  const phase = node.lifecyclePhase ?? node.status;
+  const staleLevel = classifyStaleness(lastAt, now);
+
+  return {
+    totalLabel: isTerminal
+      ? `runtime ${formatDuration(totalMs)}`
+      : `runtime ${formatDuration(totalMs)}`,
+    phaseLabel: isTerminal
+      ? `completed ${formatAgo(lastAt, now)}`
+      : `phase ${phase} · last ${formatAgo(lastAt, now)}`,
+    lastLabel: formatAgo(lastAt, now),
+    staleLevel,
+  };
+}
+
+export function buildRunnerDurationSummary(
+  subagent: { subagentId: string; status: string; createdAt?: string; updatedAt?: string; lastActivityAt?: string; integrationState?: string },
+  ledgerEvents: { at: string; details?: Record<string, unknown> }[],
+  now: Date,
+): { attemptRuntimeLabel: string; statusAgeLabel?: string; lastActivityLabel: string; staleLevel: StaleLevel } {
+  const createdAt = subagent.createdAt ? new Date(subagent.createdAt) : undefined;
+  const lastActivity = subagent.lastActivityAt ? new Date(subagent.lastActivityAt) : (subagent.updatedAt ? new Date(subagent.updatedAt) : now);
+  const attemptMs = createdAt ? Math.max(0, now.getTime() - createdAt.getTime()) : 0;
+  const staleLevel = classifyStaleness(lastActivity, now);
+
+  return {
+    attemptRuntimeLabel: createdAt ? `attempt ${formatDuration(attemptMs)}` : "unknown runtime",
+    statusAgeLabel: subagent.status,
+    lastActivityLabel: `last activity ${formatAgo(lastActivity, now)}`,
+    staleLevel,
+  };
 }
