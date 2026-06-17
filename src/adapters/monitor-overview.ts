@@ -77,10 +77,12 @@ export interface GoalMonitorOverview {
   problemLabel: string;
   progressLabel: string;
   runtimeLabel: string;
+  workersLabel: string;
   nextActionLabel: string;
   selectedDetail: string;
+  selectedNodeDetailLines?: string[];
   recentEvents: string[];
-  nodeDisplayStates: Array<{ nodeId: string; slug: string; displayState: MonitorNodeDisplayState; summary: string }>;
+  nodeDisplayStates: Array<{ nodeId: string; slug: string; displayState: MonitorNodeDisplayState; summary: string; duration: MonitorDurationSummary }>;
 }
 
 // ── User-facing action labels ──
@@ -149,7 +151,7 @@ export function buildGoalMonitorOverview(
   const health = deriveMonitorHealth(runtimeSummary, goal, dag.subagents, dag.nodes);
   const problem = summarizeMonitorProblem(goal, dag.nodes, dag.subagents);
   const progress = formatProgressLabel(goal, dag.nodes);
-  const workers = formatWorkersLabel(dag.subagents);
+  const workersLabel = formatWorkersLabel(dag.subagents, dag.nodes);
   const duration = buildGoalDurationSummary(goal, dag.ledgerEvents ?? [], options.now ?? new Date());
   const runtimeLabel = [
     duration.goalAgeLabel,
@@ -157,13 +159,21 @@ export function buildGoalMonitorOverview(
     duration.lastEventLabel,
   ].filter(Boolean).join(" · ");
   const nextAction = formatNextActionLabel(health, problem, goal);
-  const selectedDetail = formatSelectedDetail(goal, dag.nodes, dag.subagents, health, problem);
+  const selectedNode = selectNodeForOverview(dag.nodes, dag.subagents, health);
+  const selectedDetail = selectedNode
+    ? formatSelectedNodeDetail(selectedNode, dag.subagents, dag.ledgerEvents ?? [], options.now ?? new Date())
+    : "";
+  const selectedNodeDetailLines = selectedNode
+    ? buildNodeSelectedDetailLines(selectedNode, dag.subagents, dag.ledgerEvents ?? [], options.now ?? new Date())
+    : undefined;
   const recentEvents = formatRecentEvents(dag.ledgerEvents ?? [], options);
+  const subagentsByNode = groupSubagentsByNode(dag.subagents);
   const nodeDisplayStates = dag.nodes.map((node) => ({
     nodeId: node.nodeId,
     slug: node.slug || node.nodeId,
-    displayState: formatNodeDisplayState(node, dag.subagents),
-    summary: formatNodeOverviewSummary(node, dag.subagents),
+    displayState: formatNodeDisplayState(node, subagentsByNode.get(node.nodeId) ?? []),
+    summary: formatNodeExecutionPlanSummary(node, subagentsByNode.get(node.nodeId) ?? [], dag.ledgerEvents ?? [], options.now ?? new Date()),
+    duration: buildNodeDurationSummary(node, subagentsByNode.get(node.nodeId) ?? [], dag.ledgerEvents ?? [], options.now ?? new Date()),
   }));
 
   return {
@@ -173,8 +183,10 @@ export function buildGoalMonitorOverview(
     problemLabel: problem,
     progressLabel: progress,
     runtimeLabel,
+    workersLabel,
     nextActionLabel: nextAction,
     selectedDetail,
+    selectedNodeDetailLines,
     recentEvents,
     nodeDisplayStates,
   };
@@ -576,7 +588,7 @@ function formatProgressLabel(
   return parts.join(" · ") || "no activity";
 }
 
-function formatWorkersLabel(subagents: GoalSubagentRecord[]): string {
+function formatWorkersLabel(subagents: GoalSubagentRecord[], _nodes?: GoalDagNode[]): string {
   const running = subagents.filter((s) => s.status === "running").length;
   const archived = subagents.filter((s) => ["complete", "superseded"].includes(s.status)).length;
   const failed = subagents.filter((s) => ["blocked", "failed"].includes(s.status)).length;
@@ -607,65 +619,94 @@ function formatNextActionLabel(
 
 // ── Selected detail ──
 
-function formatSelectedDetail(
-  goal: GoalSummary,
+function selectNodeForOverview(
   nodes: GoalDagNode[],
   subagents: GoalSubagentRecord[],
   health: ExtendedMonitorHealth,
-  problem: string,
-): string {
-  if (nodes.length === 0) {
-    return `Workspace: ${goal.executionWorkspace ?? "legacy"} · Session: ${goal.sessionFile ?? "none"}`;
-  }
-
-  // Find the most important node to highlight based on health.
-  let targetNode: GoalDagNode | undefined;
+): GoalDagNode | undefined {
+  if (nodes.length === 0) return undefined;
 
   if (health === "Blocked" || health === "Needs attention") {
-    targetNode = nodes.find((n) => ["blocked", "failed"].includes(n.status))
-      ?? nodes.find((n) => {
-        const subs = subagents.filter((s) => s.nodeId === n.nodeId);
-        return subs.some((s) => ["blocked", "failed", "needsFollowup"].includes(s.status));
-      });
+    const blockedNode = nodes.find((n) => ["blocked", "failed", "superseded"].includes(n.status));
+    if (blockedNode) return blockedNode;
+    const failedSub = nodes.find((n) => {
+      const subs = subagents.filter((s) => s.nodeId === n.nodeId);
+      return subs.some((s) => ["blocked", "failed", "needsFollowup"].includes(s.status));
+    });
+    if (failedSub) return failedSub;
   }
 
-  if (!targetNode) {
-    targetNode = nodes.find((n) => ["running", "controllerValidating"].includes(n.status))
-      ?? nodes[0];
-  }
-
-  if (!targetNode) return "";
-
-  const subs = subagents.filter((s) => s.nodeId === targetNode!.nodeId);
-  const subCount = subs.length;
-  const runningSubs = subs.filter((s) => s.status === "running").length;
-  const model = targetNode.modelScenario || targetNode.modelArg
-    ? ` · model=${targetNode.modelScenario ? `${targetNode.modelScenario}/` : ""}${targetNode.modelArg ?? ""}`
-    : "";
-
-  return `${truncateSlug(targetNode.slug || targetNode.nodeId, 36)} · status=${targetNode.status} · subagents=${subCount}${runningSubs > 0 ? ` (${runningSubs} running)` : ""}${model}`;
+  return nodes.find((n) => ["running", "controllerValidating"].includes(n.status))
+    ?? nodes.find((n) => n.status === "ready")
+    ?? nodes[0];
 }
 
-// ── Node overview summary ──
-
-function formatNodeOverviewSummary(
+function buildNodeSelectedDetailLines(
   node: GoalDagNode,
   subagents: GoalSubagentRecord[],
-): string {
-  const subs = subagents.filter((s) => s.nodeId === node.nodeId);
-  const statuses = new Map<string, number>();
-  for (const s of subs) statuses.set(s.status, (statuses.get(s.status) ?? 0) + 1);
-
-  const parts: string[] = [];
-  for (const [status, count] of [...statuses.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-    parts.push(`${status}=${count}`);
-  }
-
+  ledgerEvents: GoalLedgerEvent[],
+  now: Date,
+): string[] {
+  const relatedSubs = subagents.filter((sub) => sub.nodeId === node.nodeId);
+  const duration = buildNodeDurationSummary(node, relatedSubs, ledgerEvents, now);
+  const workers = relatedSubs.length;
+  const runningWorkers = relatedSubs.filter((s) => s.status === "running").length;
   const model = node.modelScenario || node.modelArg
-    ? ` model=${node.modelScenario ?? node.modelArg}`
-    : "";
+    ? `${node.modelScenario ? `${node.modelScenario}/` : ""}${node.modelArg ?? ""}`
+    : "unknown";
 
-  return `subagents: ${parts.join(", ")}${model}`;
+  return [
+    `Node: ${truncateSlug(node.slug || node.nodeId, 40)}`,
+    `Status: ${node.status}`,
+    `Runtime: ${duration.totalLabel}`,
+    duration.phaseLabel ? `Phase: ${duration.phaseLabel}` : undefined,
+    `Last: ${duration.lastLabel}`,
+    `Worker: ${workers} subagent${workers === 1 ? "" : "s"}${runningWorkers > 0 ? ` (${runningWorkers} active)` : ""}`,
+    `Model: ${model}`,
+  ].filter((line): line is string => Boolean(line)).map((line) => `  ${line}`);
+}
+
+function formatSelectedNodeDetail(
+  node: GoalDagNode,
+  subagents: GoalSubagentRecord[],
+  ledgerEvents: GoalLedgerEvent[],
+  now: Date,
+): string {
+  const lines = buildNodeSelectedDetailLines(node, subagents, ledgerEvents, now);
+  return lines.join(" · ");
+}
+
+function formatNodeExecutionPlanSummary(
+  node: GoalDagNode,
+  relatedSubagents: GoalSubagentRecord[],
+  ledgerEvents: GoalLedgerEvent[],
+  now: Date,
+): string {
+  const duration = buildNodeDurationSummary(node, relatedSubagents, ledgerEvents, now);
+  const parts = [duration.totalLabel, duration.phaseLabel, `last ${duration.lastLabel}`].filter(Boolean);
+  return parts.join(" · ");
+}
+
+function buildNodeExecutionPlanSummary(
+  node: GoalDagNode,
+  relatedSubagents: GoalSubagentRecord[],
+  ledgerEvents: GoalLedgerEvent[],
+  now: Date,
+): string {
+  return formatNodeExecutionPlanSummary(node, relatedSubagents, ledgerEvents, now);
+}
+
+function groupSubagentsByNode(subagents: GoalSubagentRecord[]): Map<string, GoalSubagentRecord[]> {
+  const map = new Map<string, GoalSubagentRecord[]>();
+  for (const subagent of subagents) {
+    const list = map.get(subagent.nodeId) ?? [];
+    list.push(subagent);
+    map.set(subagent.nodeId, list);
+  }
+  for (const list of map.values()) {
+    list.sort((left, right) => (parseDate(right.updatedAt)?.getTime() ?? 0) - (parseDate(left.updatedAt)?.getTime() ?? 0));
+  }
+  return map;
 }
 
 function formatCompactNumber(value: number): string {
@@ -684,16 +725,36 @@ function formatElapsedShort(seconds: number): string {
 
 export type StaleLevel = "fresh" | "quiet" | "stale" | "dead" | "unknown";
 
+export type DurationConfidence = "exact" | "ledger-derived" | "fallback";
+
 export interface MonitorDurationSummary {
   totalLabel: string;
   phaseLabel?: string;
   statusLabel?: string;
   lastLabel: string;
   staleLevel: StaleLevel;
+  confidence: DurationConfidence;
+}
+
+export interface GoalDurationSummary {
+  goalAgeLabel: string;
+  activeWorkLabel?: string;
+  lastEventLabel: string;
+  confidence: DurationConfidence;
+}
+
+export interface RunnerDurationSummary {
+  attemptRuntimeLabel: string;
+  statusAgeLabel?: string;
+  integrationAgeLabel?: string;
+  processSeenLabel?: string;
+  lastActivityLabel: string;
+  staleLevel: StaleLevel;
+  confidence: DurationConfidence;
 }
 
 export function formatDuration(ms: number): string {
-  const seconds = Math.round(ms / 1000);
+  const seconds = Math.round(Math.abs(ms) / 1000);
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
   if (seconds < 86400) {
@@ -721,6 +782,7 @@ export function formatAgo(date: Date, now: Date): string {
 
 export function classifyStaleness(lastAt: Date, now: Date): StaleLevel {
   const ms = now.getTime() - lastAt.getTime();
+  if (ms < 0) return "fresh";
   if (ms < 2 * 60_000) return "fresh";
   if (ms < 5 * 60_000) return "quiet";
   if (ms < 10 * 60_000) return "stale";
@@ -728,102 +790,389 @@ export function classifyStaleness(lastAt: Date, now: Date): StaleLevel {
   return "dead";
 }
 
-function findLastLedgerEventAt(events: { at: string }[], prefix?: string): Date | undefined {
-  let latest: Date | undefined;
+function getEventName(event: GoalLedgerEvent): string {
+  const details = event.details ?? {};
+  if (typeof details.event === "string") return details.event;
+  if (typeof details.eventKind === "string") return details.eventKind;
+  return event.type;
+}
+
+function parseDate(value: unknown): Date | undefined {
+  if (typeof value !== "string") return undefined;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? undefined : d;
+}
+
+function matchesNodeEvent(event: GoalLedgerEvent, nodeId: string): boolean {
+  const details = event.details;
+  if (!details || typeof details !== "object") return false;
+  return details.nodeId === nodeId;
+}
+
+function matchesNodeFromSubagent(event: GoalLedgerEvent, subagent: GoalSubagentRecord): boolean {
+  const details = event.details;
+  if (!details || typeof details !== "object") return false;
+  return details.subagentId === subagent.subagentId || details.subagent_id === subagent.subagentId;
+}
+
+function inferNodeEventDate(event: GoalLedgerEvent): Date | undefined {
+  return parseDate(event.at);
+}
+
+const NODE_START_EVENTS = new Set([
+  "node.started",
+  "node.lifecycle.started",
+  "subagent.started",
+  "validation.started",
+  "integration.started",
+]);
+
+const NODE_TERMINAL_EVENTS = new Set([
+  "node.complete",
+  "node.blocked",
+  "node.failed",
+  "node.superseded",
+  "dag.terminal",
+]);
+
+const NODE_PHASE_ENTER_EVENTS = new Set([
+  "node.phaseChanged",
+  "node.lifecycle",
+  "validation.started",
+  "validation.blocked",
+  "integration.started",
+  "integration.passed",
+  "recovery.actionStarted",
+  "subagent.started",
+  "subagent.needsFollowup",
+]);
+
+const SUBAGENT_STATUS_EVENTS = new Set([
+  "subagent.started",
+  "subagent.statusChanged",
+  "subagent.result",
+  "subagent.needsFollowup",
+  "subagent.failed",
+  "subagent.blocked",
+]);
+
+const SUBAGENT_INTEGRATION_EVENTS = new Set([
+  "integration.started",
+  "integration.passed",
+  "integration.failed",
+  "integration.followup",
+  "integration.blocked",
+]);
+
+function inferNodePhaseName(eventName: string, details: Record<string, unknown>): string | undefined {
+  switch (eventName) {
+    case "validation.started":
+    case "validation.blocked":
+    case "validation.passed":
+    case "validation.failed":
+    case "validation.holding":
+    case "validation.followupCapped":
+      return "validating";
+    case "integration.started":
+    case "integration.passed":
+    case "integration.failed":
+    case "integration.followup":
+    case "integration.blocked":
+      return "integrating";
+    case "subagent.started":
+    case "subagent.result":
+      return "runnerActive";
+    case "subagent.needsFollowup":
+      return "needsFollowup";
+    case "recovery.actionStarted":
+    case "recovery.actionFailed":
+    case "recovery.actionTimedOut":
+    case "recovery.actionSucceeded":
+      return "recovery";
+    case "node.phaseChanged":
+      return typeof details.to === "string" ? details.to : typeof details.phase === "string" ? details.phase : undefined;
+    case "node.lifecycle":
+      return typeof details.phase === "string" ? details.phase : undefined;
+    case "node.started":
+      return "runnerActive";
+    case "node.lifecycle.started":
+      return typeof details.phase === "string" ? details.phase : "runnerActive";
+    default:
+      return undefined;
+  }
+}
+
+function findFirstNodeLedgerEvent(events: GoalLedgerEvent[], nodeId: string): { at: Date; confidence: DurationConfidence } | undefined {
+  let result: { at: Date; confidence: DurationConfidence } | undefined;
   for (const e of events) {
-    const at = new Date(e.at);
-    if (isNaN(at.getTime())) continue;
-    if (!latest || at > latest) latest = at;
+    if (!matchesNodeEvent(e, nodeId)) continue;
+    const eventName = getEventName(e);
+    if (!NODE_START_EVENTS.has(eventName)) continue;
+    const at = inferNodeEventDate(e);
+    if (!at) continue;
+    if (!result || at.getTime() < result.at.getTime()) {
+      result = { at, confidence: eventName === "node.started" || eventName === "node.lifecycle.started" ? "exact" : "ledger-derived" };
+    }
+  }
+
+  return result;
+}
+
+function findLastNodeLedgerEvent(events: GoalLedgerEvent[], nodeId: string): { at: Date; confidence: DurationConfidence } | undefined {
+  let result: { at: Date; confidence: DurationConfidence } | undefined;
+  for (const e of events) {
+    if (!matchesNodeEvent(e, nodeId)) continue;
+    const eventName = getEventName(e);
+    if (!NODE_TERMINAL_EVENTS.has(eventName)) continue;
+    const at = inferNodeEventDate(e);
+    if (!at) continue;
+    if (!result || at.getTime() > result.at.getTime()) {
+      result = { at, confidence: "ledger-derived" };
+    }
+  }
+  return result;
+}
+
+function findNodeCurrentPhaseStartAt(events: GoalLedgerEvent[], nodeId: string, targetPhase: string): { at: Date; phase: string; confidence: DurationConfidence } | undefined {
+  let exact: { at: Date; phase: string; confidence: DurationConfidence } | undefined;
+  let any: { at: Date; phase: string; confidence: DurationConfidence } | undefined;
+  for (const e of events) {
+    if (!matchesNodeEvent(e, nodeId)) continue;
+    const eventName = getEventName(e);
+    if (!NODE_PHASE_ENTER_EVENTS.has(eventName)) continue;
+    const details = (e.details ?? {}) as Record<string, unknown>;
+    const phase = inferNodePhaseName(eventName, details);
+    if (!phase) continue;
+    const at = inferNodeEventDate(e);
+    if (!at) continue;
+
+    const candidate = {
+      at,
+      phase,
+      confidence: (phase === targetPhase ? "exact" : "ledger-derived") as DurationConfidence,
+    };
+    if (!any || at.getTime() > any.at.getTime()) any = candidate;
+    if (phase === targetPhase && (!exact || at.getTime() > exact.at.getTime())) exact = candidate;
+  }
+
+  const best = exact ?? any;
+  if (!best) return undefined;
+  return best;
+}
+
+function findLastNodeActivityFromSubagents(subagents: GoalSubagentRecord[]): Date | undefined {
+  let latest: Date | undefined;
+  for (const sub of subagents) {
+    const candidates = [parseDate(sub.lastActivityAt), parseDate(sub.updatedAt)];
+    for (const at of candidates) {
+      if (!at) continue;
+      if (!latest || at.getTime() > latest.getTime()) latest = at;
+    }
   }
   return latest;
 }
 
-function findFirstNodeLedgerEvent(events: { at: string; details?: Record<string, unknown> }[], nodeId: string): Date | undefined {
-  let first: Date | undefined;
-  for (const e of events) {
-    const de = e.details as Record<string, unknown> | undefined;
-    if (de?.nodeId !== nodeId) continue;
-    const at = new Date(e.at);
-    if (isNaN(at.getTime())) continue;
-    if (!first || at < first) first = at;
-  }
-  return first;
-}
+function findLastNodeActivityAt(
+  node: GoalDagNode,
+  subagents: GoalSubagentRecord[],
+  events: GoalLedgerEvent[],
+  now: Date,
+): Date {
+  let latest = parseDate(node.updatedAt) ?? now;
 
-function findLastNodeLedgerEvent(events: { at: string; details?: Record<string, unknown> }[], nodeId: string): Date | undefined {
-  let last: Date | undefined;
+  const subLatest = findLastNodeActivityFromSubagents(subagents);
+  if (subLatest && subLatest.getTime() > latest.getTime()) latest = subLatest;
+
   for (const e of events) {
-    const de = e.details as Record<string, unknown> | undefined;
-    if (de?.nodeId !== nodeId) continue;
-    const at = new Date(e.at);
-    if (isNaN(at.getTime())) continue;
-    if (!last || at > last) last = at;
+    if (!matchesNodeEvent(e, node.nodeId)) continue;
+    const at = inferNodeEventDate(e);
+    if (!at) continue;
+    if (at.getTime() > latest.getTime()) latest = at;
   }
-  return last;
+
+  return latest;
 }
 
 export function buildGoalDurationSummary(
   goal: { createdAt: string; timeUsedSeconds: number; updatedAt: string },
-  ledgerEvents: { at: string }[],
+  ledgerEvents: GoalLedgerEvent[],
   now: Date,
-): { goalAgeLabel: string; activeWorkLabel?: string; lastEventLabel: string } {
-  const createdAt = new Date(goal.createdAt);
+): GoalDurationSummary {
+  const createdAt = parseDate(goal.createdAt) ?? now;
   const goalAge = Math.max(0, now.getTime() - createdAt.getTime());
-  const lastEvent = findLastLedgerEventAt(ledgerEvents);
+  let latest: Date | undefined;
+  for (const e of ledgerEvents) {
+    const at = parseDate(e.at);
+    if (!at) continue;
+    if (!latest || at.getTime() > latest.getTime()) latest = at;
+  }
   return {
     goalAgeLabel: `goal age ${formatDuration(goalAge)}`,
-    activeWorkLabel: goal.timeUsedSeconds > 0 ? `active work ${formatDuration(goal.timeUsedSeconds * 1000)}` : undefined,
-    lastEventLabel: lastEvent ? `last event ${formatAgo(lastEvent, now)}` : "no events",
+    activeWorkLabel: goal.timeUsedSeconds > 0 ? `active work ${formatDuration(goal.timeUsedSeconds * 1_000)}` : undefined,
+    lastEventLabel: latest ? `last event ${formatAgo(latest, now)}` : "no events",
+    confidence: "ledger-derived",
   };
 }
 
 export function buildNodeDurationSummary(
-  node: { nodeId: string; status: string; lifecyclePhase?: string; createdAt?: string; updatedAt?: string },
-  ledgerEvents: { at: string; details?: Record<string, unknown> }[],
+  node: GoalDagNode,
+  relatedSubagents: GoalSubagentRecord[],
+  ledgerEvents: GoalLedgerEvent[],
   now: Date,
 ): MonitorDurationSummary {
-  const createdAt = node.createdAt ? new Date(node.createdAt) : undefined;
-  const startAt = findFirstNodeLedgerEvent(ledgerEvents, node.nodeId) ?? createdAt;
-  const lastAt = findLastNodeLedgerEvent(ledgerEvents, node.nodeId) ?? (node.updatedAt ? new Date(node.updatedAt) : now);
-  const isTerminal = ["complete", "blocked", "failed"].includes(node.status);
+  const createdAt = parseDate(node.createdAt);
+  const start = findFirstNodeLedgerEvent(ledgerEvents, node.nodeId);
+  const terminal = findLastNodeTerminalEvent(ledgerEvents, node.nodeId);
+  const baseAt = start ? start.at : (createdAt ?? now);
+  const isTerminal = ["complete", "blocked", "failed", "superseded"].includes(node.status);
+  const endAt = isTerminal ? terminal?.at ?? parseDate(node.updatedAt) ?? now : now;
+  const totalMs = Math.max(0, endAt.getTime() - baseAt.getTime());
 
-  const totalMs = isTerminal && startAt
-    ? Math.max(0, lastAt.getTime() - startAt.getTime())
-    : startAt
-      ? Math.max(0, now.getTime() - startAt.getTime())
-      : createdAt
-        ? Math.max(0, now.getTime() - createdAt.getTime())
-        : 0;
+  const phaseTarget = node.lifecyclePhase ?? node.status;
+  const phaseStart = findNodeCurrentPhaseStartAt(ledgerEvents, node.nodeId, phaseTarget);
+  const lastActivityAt = findLastNodeActivityAt(node, relatedSubagents, ledgerEvents, now);
+  const staleLevel = classifyStaleness(lastActivityAt, now);
 
-  const phase = node.lifecyclePhase ?? node.status;
-  const staleLevel = classifyStaleness(lastAt, now);
+  let confidence: DurationConfidence = start ? start.confidence : "fallback";
+  if (isTerminal && !terminal && (confidence !== "ledger-derived")) confidence = "fallback";
+
+  const totalLabel = isTerminal
+    ? `runtime ${formatDuration(totalMs)}`
+    : `${confidence === "fallback" ? "age" : "runtime"} ${formatDuration(totalMs)}`;
+  const phaseLabel = isTerminal
+    ? `completed ${formatAgo(endAt, now)}`
+    : phaseStart
+      ? `phase ${phaseStart.phase} for ${formatDuration(Math.max(0, now.getTime() - phaseStart.at.getTime()) )}`
+      : `phase ${phaseTarget} · updated ${formatAgo(lastActivityAt, now)}`;
 
   return {
-    totalLabel: isTerminal
-      ? `runtime ${formatDuration(totalMs)}`
-      : `runtime ${formatDuration(totalMs)}`,
-    phaseLabel: isTerminal
-      ? `completed ${formatAgo(lastAt, now)}`
-      : `phase ${phase} · last ${formatAgo(lastAt, now)}`,
-    lastLabel: formatAgo(lastAt, now),
+    totalLabel,
+    phaseLabel,
+    statusLabel: `${isTerminal ? "terminal" : "active"} ${formatAgo(lastActivityAt, now)}`,
+    lastLabel: formatAgo(lastActivityAt, now),
     staleLevel,
+    confidence,
   };
 }
 
+function findLastNodeTerminalEvent(events: GoalLedgerEvent[], nodeId: string): { at: Date; confidence: DurationConfidence } | undefined {
+  let latest: { at: Date; confidence: DurationConfidence } | undefined;
+  for (const e of events) {
+    if (!matchesNodeEvent(e, nodeId)) continue;
+    const eventName = getEventName(e);
+    if (!NODE_TERMINAL_EVENTS.has(eventName)) continue;
+    const at = inferNodeEventDate(e);
+    if (!at) continue;
+    if (!latest || at.getTime() > latest.at.getTime()) {
+      latest = { at, confidence: "ledger-derived" };
+    }
+  }
+  return latest;
+}
+
+function findSubagentStatusTransitionAt(
+  subagent: GoalSubagentRecord,
+  events: GoalLedgerEvent[],
+): { at: Date; confidence: DurationConfidence } | undefined {
+  let latest: { at: Date; confidence: DurationConfidence } | undefined;
+  for (const e of events) {
+    if (!matchesNodeFromSubagent(e, subagent)) continue;
+    const eventName = getEventName(e);
+    if (!SUBAGENT_STATUS_EVENTS.has(eventName)) continue;
+    const at = inferNodeEventDate(e);
+    if (!at) continue;
+    if (!latest || at.getTime() > latest.at.getTime()) {
+      latest = { at, confidence: eventName === "subagent.started" ? "exact" : "ledger-derived" };
+    }
+  }
+  return latest;
+}
+
+function findSubagentTerminalAt(
+  subagent: GoalSubagentRecord,
+  events: GoalLedgerEvent[],
+): { at: Date; confidence: DurationConfidence } | undefined {
+  let latest: { at: Date; confidence: DurationConfidence } | undefined;
+  for (const e of events) {
+    if (!matchesNodeFromSubagent(e, subagent)) continue;
+    const eventName = getEventName(e);
+    if (eventName !== "subagent.result" && eventName !== "subagent.needsFollowup" && eventName !== "subagent.failed" && eventName !== "subagent.blocked") continue;
+    const at = inferNodeEventDate(e);
+    if (!at) continue;
+    if (!latest || at.getTime() > latest.at.getTime()) latest = { at, confidence: "ledger-derived" };
+  }
+  return latest;
+}
+
+function findSubagentIntegrationStartAt(
+  subagent: GoalSubagentRecord,
+  events: GoalLedgerEvent[],
+): { at: Date; confidence: DurationConfidence } | undefined {
+  let latest: { at: Date; confidence: DurationConfidence } | undefined;
+  for (const e of events) {
+    if (!matchesNodeFromSubagent(e, subagent)) continue;
+    const eventName = getEventName(e);
+    if (!SUBAGENT_INTEGRATION_EVENTS.has(eventName)) continue;
+    const at = inferNodeEventDate(e);
+    if (!at) continue;
+    if (!latest || at.getTime() > latest.at.getTime()) latest = { at, confidence: eventName === "integration.started" ? "exact" : "ledger-derived" };
+  }
+  return latest;
+}
+
+function findLastSubagentEventAt(subagent: GoalSubagentRecord, events: GoalLedgerEvent[]): { at: Date; confidence: DurationConfidence } | undefined {
+  let latest: { at: Date; confidence: DurationConfidence } | undefined;
+  for (const e of events) {
+    if (!matchesNodeFromSubagent(e, subagent)) continue;
+    const at = inferNodeEventDate(e);
+    if (!at) continue;
+    if (!latest || at.getTime() > latest.at.getTime()) latest = { at, confidence: "ledger-derived" };
+  }
+  return latest;
+}
+
+function findLastSubagentActivityAt(subagent: GoalSubagentRecord, events: GoalLedgerEvent[], now: Date): Date {
+  let latest = parseDate(subagent.lastActivityAt) ?? parseDate(subagent.updatedAt) ?? now;
+  const lastEvent = findLastSubagentEventAt(subagent, events);
+  if (lastEvent && lastEvent.at.getTime() > latest.getTime()) latest = lastEvent.at;
+  return latest;
+}
+
 export function buildRunnerDurationSummary(
-  subagent: { subagentId: string; status: string; createdAt?: string; updatedAt?: string; lastActivityAt?: string; integrationState?: string },
-  ledgerEvents: { at: string; details?: Record<string, unknown> }[],
+  subagent: GoalSubagentRecord,
+  events: GoalLedgerEvent[],
   now: Date,
-): { attemptRuntimeLabel: string; statusAgeLabel?: string; lastActivityLabel: string; staleLevel: StaleLevel } {
-  const createdAt = subagent.createdAt ? new Date(subagent.createdAt) : undefined;
-  const lastActivity = subagent.lastActivityAt ? new Date(subagent.lastActivityAt) : (subagent.updatedAt ? new Date(subagent.updatedAt) : now);
-  const attemptMs = createdAt ? Math.max(0, now.getTime() - createdAt.getTime()) : 0;
-  const staleLevel = classifyStaleness(lastActivity, now);
+): RunnerDurationSummary {
+  const createdAt = parseDate(subagent.createdAt) ?? now;
+  const createdConfidence = createdAt === now ? "fallback" : "exact";
+  const terminal = findSubagentTerminalAt(subagent, events);
+  const endAt = terminal?.at ?? now;
+  const attemptMs = Math.max(0, endAt.getTime() - createdAt.getTime());
+
+  const statusTransition = findSubagentStatusTransitionAt(subagent, events);
+  const lastActivityAt = findLastSubagentActivityAt(subagent, events, now);
+  const staleLevel = classifyStaleness(lastActivityAt, now);
+  const statusPhase = subagent.integrationState && ["pending", "integrating", "complete", "failed"].includes(subagent.integrationState)
+    ? subagent.integrationState
+    : undefined;
+  const integrationAt = findSubagentIntegrationStartAt(subagent, events);
+
+  const statusAgeLabel = statusTransition
+    ? `${subagent.status} for ${formatDuration(Math.max(0, now.getTime() - statusTransition.at.getTime()))}`
+    : `${subagent.status} · updated ${formatAgo(lastActivityAt, now)}`;
+
+  const integrationAgeLabel = statusPhase === "pending" || statusPhase === "integrating"
+    ? integrationAt
+      ? `${statusPhase} for ${formatDuration(Math.max(0, now.getTime() - integrationAt.at.getTime()))}`
+      : `${statusPhase}`
+    : undefined;
 
   return {
-    attemptRuntimeLabel: createdAt ? `attempt ${formatDuration(attemptMs)}` : "unknown runtime",
-    statusAgeLabel: subagent.status,
-    lastActivityLabel: `last activity ${formatAgo(lastActivity, now)}`,
+    attemptRuntimeLabel: createdAt ? `${createdConfidence === "fallback" ? "age" : "attempt"} ${formatDuration(attemptMs)}` : "attempt unknown",
+    statusAgeLabel,
+    integrationAgeLabel,
+    lastActivityLabel: `last activity ${formatAgo(lastActivityAt, now)}`,
     staleLevel,
+    confidence: statusTransition ? statusTransition.confidence : createdConfidence,
   };
 }

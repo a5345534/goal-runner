@@ -1,7 +1,8 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { formatAuditSummary, } from "../../core/index.js";
-import { buildGoalMonitorOverview, EXTENDED_MONITOR_HEALTH_LABELS, MONITOR_NODE_DISPLAY_STATE_CHARS, ACTION_DISPLAY_LABELS, } from "../monitor-overview.js";
+import { buildGoalMonitorOverview, EXTENDED_MONITOR_HEALTH_LABELS, MONITOR_NODE_DISPLAY_STATE_CHARS, ACTION_DISPLAY_LABELS, buildNodeDurationSummary, buildRunnerDurationSummary, formatAgo, } from "../monitor-overview.js";
+import { filterPiBackgroundRunnersForSubagent } from "./runner-ops.js";
 // Canonical state labels shared across Pi TUI and OpenCode monitors.
 export const SESSION_STATE_LABELS = {
     "active-turn": "ACTIVE-TURN",
@@ -426,7 +427,16 @@ export class GoalMonitorController {
     render(width, theme) {
         const controllerTranscript = this.readTranscript();
         const dag = this.readDagSnapshot();
-        const view = this.buildView(dag, controllerTranscript);
+        // ── Runtime summary ──
+        const runtimeSummary = buildGoalMonitorRuntimeSummary(this.goal, dag.subagents, {
+            harnessState: dag.harnessState,
+            reservation: dag.reservation,
+            ledgerEvents: dag.ledgerEvents,
+            runners: dag.runners,
+        });
+        // ── Build the structured overview model (shared with OpenCode adapter) ──
+        const overview = buildGoalMonitorOverview(this.goal, { nodes: dag.nodes, subagents: dag.subagents, ledgerEvents: dag.ledgerEvents }, runtimeSummary, { now: new Date() });
+        const view = this.buildView(dag, controllerTranscript, overview);
         const visibleLiveCount = DEFAULT_VISIBLE_LIVE_LINES;
         const visibleListCount = DEFAULT_VISIBLE_LIST_LINES;
         this.lastListItems = view.listItems;
@@ -441,15 +451,6 @@ export class GoalMonitorController {
             this.liveScroll = Math.max(0, view.liveLines.length - visibleLiveCount);
         else
             this.liveScroll = clampScroll(this.liveScroll, view.liveLines.length, visibleLiveCount);
-        // ── Runtime summary ──
-        const runtimeSummary = buildGoalMonitorRuntimeSummary(this.goal, dag.subagents, {
-            harnessState: dag.harnessState,
-            reservation: dag.reservation,
-            ledgerEvents: dag.ledgerEvents,
-            runners: dag.runners,
-        });
-        // ── Build the structured overview model (shared with OpenCode adapter) ──
-        const overview = buildGoalMonitorOverview(this.goal, { nodes: dag.nodes, subagents: dag.subagents, ledgerEvents: dag.ledgerEvents }, runtimeSummary, { now: new Date() });
         const isNarrow = width <= 80;
         const lines = [];
         // ── OVERVIEW HEADER ──
@@ -468,28 +469,26 @@ export class GoalMonitorController {
         }
         // ── KEY BINDS ──
         lines.push(truncateToWidth(theme.fg("dim", `row-action monitor • ←→ select row op • Enter confirm • b/Backspace back • l/v focus • c compact/debug • Tab switch • ↑↓ move/scroll • PgUp/PgDn • Esc close`), width));
-        // ── DEBUG META + RUNTIME BAND (only in debug mode or LIVE focus) ──
-        if (this.controllerHistoryMode === "debug" || this.activePane === "live") {
-            lines.push(truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width));
-            const healthLabel = EXTENDED_MONITOR_HEALTH_LABELS[overview.health] ?? overview.health;
-            const sessionPart = `Session=${SESSION_STATE_LABELS[runtimeSummary.session.state]}`;
-            const hiddenPart = `Hidden=${HIDDEN_CONTINUATION_STATE_LABELS[runtimeSummary.hiddenContinuation.state]}`;
-            const pollPart = `Poll=${CONTROLLER_POLL_STATE_LABELS[runtimeSummary.controllerPoll.state]}`;
-            const runnersPart = `Runners=${formatRunnerSummary(runtimeSummary.runners)}`;
-            const fullBand = `${sessionPart}  ${hiddenPart}  ${pollPart}  ${runnersPart}  Health=${healthLabel}  Next: ${overview.nextActionLabel}`;
-            if (fullBand.length > width && width > 0) {
-                lines.push(truncateToWidth(theme.fg("dim", `${sessionPart}  ${hiddenPart}`), width));
-                lines.push(truncateToWidth(theme.fg("dim", `${pollPart}  ${runnersPart}`), width));
-                lines.push(truncateToWidth(theme.fg("dim", `Health=${healthLabel}  Next: ${overview.nextActionLabel}`), width));
-            }
-            else {
-                lines.push(truncateToWidth(theme.fg("dim", fullBand), width));
-            }
-            const compactMeta = isNarrow
-                ? `scope=${view.scopeLabel} focus=${this.activePane} rowOp=${formatPlainOperation(this.lastSelectedOperations[this.rowOperationIndex])}`
-                : `scope=${view.scopeLabel} focus=${this.activePane} rowOp=${formatPlainOperation(this.lastSelectedOperations[this.rowOperationIndex])} status=${derivedMonitorStatus(this.goal, dag)} tokens=${formatMonitorTokens(this.goal)} DAG nodes=${formatStatusCounts(dag.nodes.map((node) => node.status))} subagents=${formatStatusCounts(dag.subagents.map((subagent) => subagent.status))} elapsed=${formatElapsedSeconds(this.goal.timeUsedSeconds)}`;
-            lines.push(truncateToWidth(theme.fg("dim", compactMeta), width));
+        // ── RUNTIME BAND + DEBUG META ──
+        lines.push(truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width));
+        const healthLabel = EXTENDED_MONITOR_HEALTH_LABELS[overview.health] ?? overview.health;
+        const sessionPart = `Session=${SESSION_STATE_LABELS[runtimeSummary.session.state]}`;
+        const hiddenPart = `Hidden=${HIDDEN_CONTINUATION_STATE_LABELS[runtimeSummary.hiddenContinuation.state]}`;
+        const pollPart = `Poll=${CONTROLLER_POLL_STATE_LABELS[runtimeSummary.controllerPoll.state]}`;
+        const runnersPart = `Runners=${formatRunnerSummary(runtimeSummary.runners)}`;
+        const fullBand = `${sessionPart}  ${hiddenPart}  ${pollPart}  ${runnersPart}  Health=${healthLabel}  Next: ${overview.nextActionLabel}`;
+        if (fullBand.length > width && width > 0) {
+            lines.push(truncateToWidth(theme.fg("dim", `${sessionPart}  ${hiddenPart}`), width));
+            lines.push(truncateToWidth(theme.fg("dim", `${pollPart}  ${runnersPart}`), width));
+            lines.push(truncateToWidth(theme.fg("dim", `Health=${healthLabel}  Next: ${overview.nextActionLabel}`), width));
         }
+        else {
+            lines.push(truncateToWidth(theme.fg("dim", fullBand), width));
+        }
+        const compactMeta = isNarrow
+            ? `scope=${view.scopeLabel} focus=${this.activePane} rowOp=${formatPlainOperation(this.lastSelectedOperations[this.rowOperationIndex])}`
+            : `scope=${view.scopeLabel} focus=${this.activePane} rowOp=${formatPlainOperation(this.lastSelectedOperations[this.rowOperationIndex])} status=${derivedMonitorStatus(this.goal, dag)} tokens=${formatMonitorTokens(this.goal)} DAG nodes=${formatStatusCounts(dag.nodes.map((node) => node.status))} subagents=${formatStatusCounts(dag.subagents.map((subagent) => subagent.status))} elapsed=${formatElapsedSeconds(this.goal.timeUsedSeconds)}`;
+        lines.push(truncateToWidth(theme.fg("dim", compactMeta), width));
         // ── LIVE PANE ──
         // Always use the original live view (compact/debug controller history or runner transcript).
         // Recent events from the overview are shown above as a dedicated section.
@@ -534,7 +533,7 @@ export class GoalMonitorController {
         lines.push(truncateToWidth(theme.fg("dim", formatListRange(listStart, listEnd, view.listRows.length, this.listIndex, this.activePane === "list")), width));
         return lines;
     }
-    buildView(dag, controllerTranscript) {
+    buildView(dag, controllerTranscript, overview) {
         const now = this.now();
         const nodesById = new Map(dag.nodes.map((node) => [node.nodeId, node]));
         const subagentsByNode = groupSubagentsByNode(dag.subagents);
@@ -556,13 +555,28 @@ export class GoalMonitorController {
             };
         }
         if (scope.kind === "nodes") {
+            const selectedNode = dag.nodes.length
+                ? dag.nodes[Math.min(Math.max(0, this.listIndex), dag.nodes.length - 1)]
+                : undefined;
+            const durationByNode = new Map(overview.nodeDisplayStates.map((state) => [state.nodeId, state.duration]));
             return {
                 scopeLabel: "nodes",
                 liveTitle: "Node list mode",
-                liveLines: [],
+                liveLines: selectedNode
+                    ? [
+                        `selected node: ${shortenMiddle(selectedNode.slug || selectedNode.nodeId, 50)}`,
+                        `status: ${selectedNode.status}`,
+                        durationByNode.get(selectedNode.nodeId)?.totalLabel ? `runtime: ${durationByNode.get(selectedNode.nodeId).totalLabel}` : undefined,
+                        durationByNode.get(selectedNode.nodeId)?.phaseLabel ? `phase: ${durationByNode.get(selectedNode.nodeId).phaseLabel}` : undefined,
+                        durationByNode.get(selectedNode.nodeId)?.lastLabel ? `last: ${durationByNode.get(selectedNode.nodeId).lastLabel}` : undefined,
+                    ].filter((line) => Boolean(line))
+                    : [],
                 liveFollowsTail: false,
                 listTitle: `Nodes ${dag.nodes.length ? `${Math.min(this.listIndex + 1, dag.nodes.length)}/${dag.nodes.length}` : "0"}`,
-                listRows: dag.nodes.map((node, index) => renderNodeListRow(node, subagentsByNode.get(node.nodeId) ?? [], index, now)),
+                listRows: dag.nodes.map((node, index) => {
+                    const duration = durationByNode.get(node.nodeId);
+                    return renderNodeListRow(node, subagentsByNode.get(node.nodeId) ?? [], index, now, duration);
+                }),
                 listItems: dag.nodes.map((node) => ({ kind: "node", nodeId: node.nodeId })),
             };
         }
@@ -584,14 +598,21 @@ export class GoalMonitorController {
         }
         const transcript = readGoalTranscript(runner.sessionFile);
         const runnerRecords = (dag.runners ?? []).filter((record) => record.subagentId === runner.subagentId);
+        const runnerSummary = buildRunnerDurationSummary(runner, dag.ledgerEvents ?? [], now);
+        const enrichedSummary = enrichRunnerSummaryWithProcess(runnerSummary, runnerRecords, now);
         return {
             scopeLabel: `runners/${shortenMiddle(node.slug || node.nodeId, 40)}`,
             liveTitle: formatRunnerLiveTitle(node, runner, transcript, runnerRecords),
-            liveLines: renderRunnerLiveLines(node, runner, transcript, now),
+            liveLines: renderRunnerLiveLines(node, runner, transcript, enrichedSummary),
             liveDiagnostic: transcript.diagnostic,
             liveFollowsTail: Boolean(runner.sessionFile),
             listTitle: `Runners for ${shortenMiddle(node.slug || node.nodeId, 48)} ${nodeSubagents.length ? `${Math.min(this.listIndex + 1, nodeSubagents.length)}/${nodeSubagents.length}` : "0"}`,
-            listRows: nodeSubagents.map((subagent, index) => renderRunnerListRow(subagent, index, now, dag.runners)),
+            listRows: nodeSubagents.map((subagent, index) => {
+                const summary = buildRunnerDurationSummary(subagent, dag.ledgerEvents ?? [], now);
+                const matching = filterPiBackgroundRunnersForSubagent(dag.runners ?? [], subagent.subagentId);
+                const enriched = enrichRunnerSummaryWithProcess(summary, matching, now);
+                return renderRunnerListRow(subagent, index, now, enriched);
+            }),
             listItems: nodeSubagents.map((subagent) => ({ kind: "runner", nodeId: node.nodeId, subagentId: subagent.subagentId })),
         };
     }
@@ -887,27 +908,36 @@ function formatControllerHistoryDetails(eventName, details) {
     append("scenario", details.scenario, 48);
     return parts.join(" ");
 }
-function renderNodeListRow(node, subagents, index, now) {
-    const latest = latestSubagent(subagents);
-    const latestLabel = latest ? ` latest=${latest.status}` : " latest=-";
-    const phase = node.lifecyclePhase ? ` phase=${node.lifecyclePhase}` : " phase=-";
-    const resource = node.preparedResources?.workspacePath || node.preparedResources?.branch
-        ? ` resource=${shortenMiddle(node.preparedResources.workspacePath ?? node.preparedResources.branch ?? "", 34)}`
-        : "";
-    const observation = node.lastAdapterObservation ? ` obs=${node.lastAdapterObservation.kind}` : "";
-    const recovery = node.lastRecoveryDecision ? ` recovery=${node.lastRecoveryDecision.action}${node.lastRecoveryDecision.ruleId ? `:${shortenMiddle(node.lastRecoveryDecision.ruleId, 24)}` : ""}` : "";
+function renderNodeListRow(node, subagents, index, now, durationSummary) {
+    const summary = durationSummary ?? buildNodeDurationSummary(node, subagents, [], now);
+    const workers = subagents.length;
+    const phaseLabel = summary.phaseLabel ?? `phase ${node.lifecyclePhase ?? node.status}`;
     const model = formatNodeMonitorModel(node);
-    return `${index + 1}. [${node.status}] ${shortenMiddle(node.slug || node.nodeId, 44)} runners=${subagents.length}${latestLabel} updated=${formatAgo(node.updatedAt, now)}${phase}${resource}${observation}${recovery}${model ? ` model=${model}` : ""}`;
+    const lastText = formatDurationWithoutAgo(summary.lastLabel);
+    return `${index + 1}. ${shortenMiddle(node.slug || node.nodeId, 44)} ${node.status} · ${summary.totalLabel} · ${phaseLabel} · last ${lastText} · ${workers} runner${workers === 1 ? "" : "s"}${model ? ` model=${model}` : ""}`;
 }
-function renderRunnerListRow(subagent, index, now, runners = []) {
-    const activity = formatAgo(subagent.lastActivityAt ?? subagent.updatedAt, now);
-    const integration = subagent.integrationState ? ` integration=${subagent.integrationState}` : "";
-    const matchingRunners = runners.filter((runner) => runner.subagentId === subagent.subagentId);
-    const liveCount = matchingRunners.filter((runner) => runner.runnerAlive || runner.childAlive).length;
-    const processSummary = matchingRunners.length > 0
-        ? ` proc=${liveCount}/${matchingRunners.length}${matchingRunners[0]?.runnerPid ? ` pid=${matchingRunners[0].runnerPid}` : ""}`
-        : " proc=-";
-    return `${index + 1}. [${subagent.status}] ${shortenMiddle(subagent.subagentId, 62)} last=${activity}${integration}${processSummary}`;
+function renderRunnerListRow(subagent, index, now, summary) {
+    const statusText = normalizeRunnerStatusAgeLabel(summary.statusAgeLabel, renderRunnerStatus(subagent));
+    const lastText = formatDurationWithoutAgo(summary.lastActivityLabel).replace(/^last activity\s+/, "last ");
+    const processSummary = summary.processSeenLabel
+        ? ` · process ${formatRunnerProcessLabel(summary.processSeenLabel)}`
+        : " · process unknown";
+    return `${index + 1}. ${shortenMiddle(subagent.subagentId, 52)} ${statusText} · ${summary.attemptRuntimeLabel} · ${lastText}${summary.integrationAgeLabel ? ` · ${summary.integrationAgeLabel}` : ""}${processSummary}`;
+}
+function normalizeRunnerStatusAgeLabel(statusAgeLabel, fallback) {
+    if (!statusAgeLabel)
+        return fallback;
+    return statusAgeLabel.replace(/^status\s+/, "");
+}
+function formatDurationWithoutAgo(value) {
+    return value.replace(/ ago$/u, "");
+}
+function formatRunnerProcessLabel(value) {
+    if (value.startsWith("alive"))
+        return "alive";
+    if (value.startsWith("not alive"))
+        return "not alive";
+    return value;
 }
 function formatRunnerLiveTitle(node, subagent, transcript, runners) {
     const runnerRuntime = runners.find((runner) => runner.modelArg || runner.thinkingLevel);
@@ -917,14 +947,22 @@ function formatRunnerLiveTitle(node, subagent, transcript, runners) {
     const model = formatMonitorModel(scenario, modelArg, thinkingLevel);
     return `Runner ${subagent.subagentId} model=${model} tokens=${formatCompactNumber(transcript.tokenTotal ?? 0)}`;
 }
-function renderRunnerLiveLines(node, subagent, transcript, now) {
+function renderRunnerLiveLines(node, subagent, transcript, summary) {
     const integration = formatSubagentIntegration(subagent);
     const note = subagent.integrationStatus ?? subagent.selfReportedResult;
+    const prepared = formatPreparedResources(node);
     return [
-        `runner: [${subagent.status}] ${subagent.subagentId}`,
-        `node: ${node.nodeId} (${node.status}) phase=${node.lifecyclePhase ?? "-"}`,
-        `runtime=${formatRuntime(subagent.createdAt, now)} last=${formatAgo(subagent.lastActivityAt ?? subagent.updatedAt, now)}`,
-        node.preparedResources ? `prepared: ${formatPreparedResources(node)}` : undefined,
+        "RUNNER SUMMARY",
+        `Status: ${renderRunnerStatus(subagent)}`,
+        `Runtime: ${summary.attemptRuntimeLabel}`,
+        summary.statusAgeLabel ? `Status age: ${summary.statusAgeLabel}` : undefined,
+        `Activity: ${summary.lastActivityLabel}`,
+        summary.processSeenLabel ? `Process: ${summary.processSeenLabel}` : "Process: unknown",
+        summary.integrationAgeLabel ? `Integration: ${summary.integrationAgeLabel}` : undefined,
+        `Model: ${formatNodeMonitorModel(node) ?? "unknown"}`,
+        `Issue: ${formatMonitorValidationContract(node)}`,
+        `Node: ${node.nodeId} (${node.status})`,
+        node.preparedResources ? `prepared: ${prepared}` : undefined,
         subagent.branch ? `branch: ${subagent.branch}` : undefined,
         subagent.workspacePath ? `workspace: ${shortenPath(subagent.workspacePath)}` : undefined,
         subagent.sessionFile ? `session: ${shortenPath(subagent.sessionFile)}` : undefined,
@@ -935,6 +973,60 @@ function renderRunnerLiveLines(node, subagent, transcript, now) {
         "transcript:",
         ...transcript.lines,
     ].filter((line) => Boolean(line));
+}
+function enrichRunnerSummaryWithProcess(summary, runners, now) {
+    if (runners.length === 0)
+        return summary;
+    const liveCount = runners.filter((runner) => runner.runnerAlive || runner.childAlive).length;
+    const latestSeen = runners
+        .map((runner) => readRunnerRecordModifiedAt(runner))
+        .reduce((acc, at) => {
+        if (!at)
+            return acc;
+        if (!acc || at.getTime() > acc.getTime())
+            return at;
+        return acc;
+    }, undefined);
+    const status = liveCount > 0
+        ? `alive (${liveCount}/${runners.length})`
+        : `not alive (${runners.length})`;
+    const seen = latestSeen ? ` · seen ${formatAgo(latestSeen, now)}` : "";
+    return {
+        ...summary,
+        processSeenLabel: `${status}${seen}`,
+    };
+}
+function readRunnerRecordModifiedAt(record) {
+    const candidates = [record.readyPath, record.configPath, record.commandPath, record.logPath, record.runnerDir];
+    let latest;
+    for (const file of candidates) {
+        if (!file || !existsSync(file))
+            continue;
+        try {
+            const stat = statSync(file);
+            const candidate = stat.mtime;
+            if (Number.isFinite(candidate.getTime()) && (!latest || candidate.getTime() > latest.getTime()))
+                latest = candidate;
+        }
+        catch {
+            // ignore
+        }
+    }
+    return latest;
+}
+function renderRunnerStatus(subagent) {
+    if (subagent.status === "running")
+        return "running";
+    if (subagent.status === "idle") {
+        if (subagent.integrationState === "integrating")
+            return "waiting for integration";
+        return "idle";
+    }
+    if (subagent.status === "needsFollowup")
+        return "needs follow-up";
+    if (subagent.integrationState === "pending" && subagent.status !== "complete")
+        return "waiting for integration";
+    return subagent.status;
 }
 function formatPreparedResources(node) {
     const resources = node.preparedResources;
@@ -1013,22 +1105,6 @@ function formatCompactNumber(value) {
         return `${Number.isInteger(value / 1_000) ? value / 1_000 : (value / 1_000).toFixed(1)}k`;
     return `${Number.isInteger(value / 1_000_000) ? value / 1_000_000 : (value / 1_000_000).toFixed(1)}m`;
 }
-function formatRuntime(startedAt, now) {
-    if (!startedAt)
-        return "-";
-    const started = Date.parse(startedAt);
-    if (!Number.isFinite(started))
-        return "-";
-    return formatElapsedSeconds(Math.max(0, Math.floor((now.getTime() - started) / 1_000)));
-}
-function formatAgo(timestamp, now) {
-    if (!timestamp)
-        return "-";
-    const parsed = Date.parse(timestamp);
-    if (!Number.isFinite(parsed))
-        return "-";
-    return `${formatElapsedSeconds(Math.max(0, Math.floor((now.getTime() - parsed) / 1_000)))} ago`;
-}
 function formatElapsedSeconds(seconds) {
     if (seconds < 60)
         return `${seconds}s`;
@@ -1080,6 +1156,7 @@ function renderOverviewHeader(overview, _runtimeSummary, width, isNarrow, theme)
         }
         lines.push(truncateToWidth(theme.fg("dim", `Progress: ${overview.progressLabel}`), width));
         lines.push(truncateToWidth(theme.fg("dim", `Runtime: ${overview.runtimeLabel}`), width));
+        lines.push(truncateToWidth(theme.fg("dim", `Workers: ${overview.workersLabel ?? "none"}`), width));
         lines.push(truncateToWidth(theme.fg("dim", `Next: ${overview.nextActionLabel}`), width));
     }
     else {
@@ -1090,6 +1167,7 @@ function renderOverviewHeader(overview, _runtimeSummary, width, isNarrow, theme)
         lines.push(truncateToWidth(`${theme.fg(healthColor, `Health: ${healthLabel}`)}${problemPart ? theme.fg("warning", problemPart) : ""}`, width));
         lines.push(truncateToWidth(theme.fg("dim", `Progress: ${overview.progressLabel}`), width));
         lines.push(truncateToWidth(theme.fg("dim", `Runtime: ${overview.runtimeLabel}`), width));
+        lines.push(truncateToWidth(theme.fg("dim", `Workers: ${overview.workersLabel ?? "none"}`), width));
         lines.push(truncateToWidth(theme.fg("dim", `Next: ${overview.nextActionLabel}`), width));
     }
     return lines;
@@ -1120,7 +1198,19 @@ function renderExecutionPlanSection(overview, dag, width, isNarrow, theme) {
         }
     }
     // Selected Detail — highlights the most important node.
-    if (overview.selectedDetail) {
+    if (overview.selectedNodeDetailLines?.length) {
+        if (isNarrow) {
+            for (const line of overview.selectedNodeDetailLines.slice(0, 3)) {
+                lines.push(truncateToWidth(theme.fg("dim", `Selected: ${truncateNarrow(line, width - 10)}`), width));
+            }
+        }
+        else {
+            for (const line of overview.selectedNodeDetailLines) {
+                lines.push(truncateToWidth(theme.fg("dim", line), width));
+            }
+        }
+    }
+    else if (overview.selectedDetail) {
         if (isNarrow) {
             lines.push(truncateToWidth(theme.fg("dim", `Selected: ${truncateNarrow(overview.selectedDetail, width - 10)}`), width));
         }

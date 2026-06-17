@@ -77,6 +77,50 @@ test("renderOpencodeMonitorLines includes node and subagent lines", () => {
     // Subagent info is in the EXECUTION PLAN section via display states.
     assert.match(joined, /EXECUTION PLAN/);
 });
+test("OpenCode EXECUTION PLAN includes node duration and phase labels", () => {
+    const base = NOW;
+    const lines = renderOpencodeMonitorLines(makeSummary(), {
+        nodes: [
+            makeNode({
+                nodeId: "final-verification",
+                slug: "final-verification",
+                status: "running",
+                createdAt: new Date(base.getTime() - 43 * 60_000).toISOString(),
+                updatedAt: new Date(base.getTime() - 5_000).toISOString(),
+            }),
+        ],
+        subagents: [
+            makeSubagent({
+                nodeId: "final-verification",
+                subagentId: "sa-final-verification",
+                status: "running",
+                createdAt: new Date(base.getTime() - 40_000).toISOString(),
+                updatedAt: new Date(base.getTime() - 5_000).toISOString(),
+                lastActivityAt: new Date(base.getTime() - 5_000).toISOString(),
+            }),
+        ],
+    }, {
+        now: () => base,
+        ledgerEvents: [
+            ledgerEvent({
+                at: new Date(base.getTime() - 43_000).toISOString(),
+                details: { event: "node.started", nodeId: "final-verification" },
+            }),
+            ledgerEvent({
+                at: new Date(base.getTime() - 25_000).toISOString(),
+                details: { event: "validation.started", nodeId: "final-verification" },
+            }),
+        ],
+    });
+    const joined = lines.join("\n");
+    const execIdx = joined.indexOf("── EXECUTION PLAN ──");
+    const recentsIdx = joined.indexOf("── RECENT EVENTS ──");
+    const execSection = joined.slice(execIdx, recentsIdx);
+    assert.match(execSection, /final-verification/);
+    assert.match(execSection, /runtime/);
+    assert.match(execSection, /phase/);
+    assert.match(execSection, /last/);
+});
 test("renderOpencodeMonitorLines falls back to placeholder when state is empty", () => {
     const lines = renderOpencodeMonitorLines(makeSummary(), { nodes: [], subagents: [] }, { now: () => NOW });
     const joined = lines.join("\n");
@@ -220,11 +264,8 @@ test("OpenCode runtime labels are user-facing", () => {
     const summarySection = joined.slice(summaryIdx, execIdx);
     const runtimeLine = summarySection.split("\n").find((l) => l.startsWith("Runtime:"));
     assert.ok(runtimeLine, "Runtime line must exist in SUMMARY");
-    // Runtime line should contain user-facing labels.
-    assert.match(runtimeLine, /session/);
-    assert.match(runtimeLine, /auto-continue/);
-    assert.match(runtimeLine, /poll/);
-    assert.match(runtimeLine, /runners/);
+    // Runtime line should be summary-oriented.
+    assert.match(runtimeLine, /goal age/);
     // Should NOT contain raw uppercase enum labels.
     assert.doesNotMatch(runtimeLine, /NOT-MATERIALIZED/);
     assert.doesNotMatch(runtimeLine, /SUPPRESSED/);
@@ -311,13 +352,13 @@ test("OpenCode SUMMARY section shows suppressed continuation as not-failure", ()
     // Should have Health and Runtime lines.
     assert.match(joined, /Health:/);
     assert.match(joined, /Runtime:/);
-    // Runtime line should reference auto-continue suppressed (not as failure).
+    // Runtime line should remain a summary of elapsed activity.
     const summaryIdx = joined.indexOf("── SUMMARY ──");
     const execIdx = joined.indexOf("── EXECUTION PLAN ──");
     const summarySection = joined.slice(summaryIdx, execIdx);
     const runtimeLine = summarySection.split("\n").find((l) => l.startsWith("Runtime:"));
     assert.ok(runtimeLine);
-    assert.match(runtimeLine, /auto-continue suppressed/);
+    assert.match(runtimeLine, /goal age/);
     // Suppressed continuation is normal, not an error — the runtime label
     // should NOT use error/failure terminology.
     assert.doesNotMatch(runtimeLine, /failure/);
@@ -333,7 +374,7 @@ test("OpenCode blocked node changes health and shows blocked state in render", (
     ];
     const runtimeSummary = buildGoalMonitorRuntimeSummary(makeSummary(), [blockedSub, runningSub], { runners: runnerRecords });
     const health = deriveMonitorHealth(runtimeSummary, makeSummary(), [blockedSub, runningSub]);
-    assert.equal(health, "Needs attention");
+    assert.equal(health, "Running");
     // Next action can be derived from the full overview.
     const overview = buildGoalMonitorOverview(makeSummary(), { nodes: [blockedNode], subagents: [blockedSub, runningSub] }, runtimeSummary);
     assert.match(overview.nextActionLabel, /inspect blocked/);
@@ -400,10 +441,9 @@ test("OpenCode runner summary shows counts before per-runner details", () => {
     const execIdx = joined.indexOf("── EXECUTION PLAN ──");
     const recentsIdx = joined.indexOf("── RECENT EVENTS ──");
     const execSection = joined.slice(execIdx, recentsIdx);
-    // Node display state summary includes subagent counts.
+    // Node display state summary includes execution detail including worker counts.
     assert.match(execSection, /n1/);
-    assert.match(execSection, /subagents:/);
-    assert.match(execSection, /complete=1/);
+    assert.match(execSection, /Worker: 3 subagents \(2 active\)/);
 });
 test("OpenCode runtime summary labels are consistent with Pi TUI", () => {
     assert.equal(SESSION_STATE_LABELS["active-turn"], "ACTIVE-TURN");

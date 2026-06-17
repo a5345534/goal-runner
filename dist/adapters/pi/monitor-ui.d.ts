@@ -1,5 +1,5 @@
 import type { ContinuationReservation, GoalDagNode, GoalLedgerEvent, GoalSubagentRecord, GoalSummary, HarnessState } from "../../core/index.js";
-import type { PiBackgroundRunnerRecord } from "./runner-ops.js";
+import { type PiBackgroundRunnerRecord } from "./runner-ops.js";
 import type { GoalListThemeLike } from "./goal-list-ui.js";
 export type GoalMonitorAction = "close" | "pause" | "resume" | "clear" | "openSession";
 export type GoalMonitorRunnerOperation = "openSession" | "stop" | "kill" | "archive";

@@ -139,6 +139,7 @@ export function renderOpencodeMonitorLines(
   lines.push(`Problem: ${overview.problemLabel}`);
   lines.push(`Progress: ${overview.progressLabel}`);
   lines.push(`Runtime: ${overview.runtimeLabel}`);
+  lines.push(`Workers: ${overview.workersLabel ?? "none"}`);
   lines.push(`Next Action: ${overview.nextActionLabel}`);
 
   // ── EXECUTION PLAN section ──
@@ -156,7 +157,12 @@ export function renderOpencodeMonitorLines(
       );
     }
     // Selected detail — highlights the most important node based on health.
-    if (overview.selectedDetail) {
+    if (overview.selectedNodeDetailLines?.length) {
+      lines.push("");
+      for (const detail of overview.selectedNodeDetailLines) {
+        lines.push(`Detail: ${truncate(detail, maxLineWidth)}`);
+      }
+    } else if (overview.selectedDetail) {
       lines.push("");
       lines.push(
         `Detail: ${truncate(overview.selectedDetail, maxLineWidth)}`,

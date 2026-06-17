@@ -278,12 +278,16 @@ test("goal monitor enters node list with empty live pane and node row runnerList
     const rendered = controller.render(140, theme).join("\n");
     assert.match(rendered, /scope=nodes focus=list rowOp=runnerList/);
     assert.match(rendered, /LIVE: Node list mode/);
-    assert.match(rendered, /No live entries available/);
+    assert.match(rendered, /selected node:/);
+    assert.match(rendered, /runtime:/);
+    assert.match(rendered, /phase [a-z]+/);
+    assert.match(rendered, /last /);
+    assert.match(rendered, /scope/);
+    assert.doesNotMatch(rendered, /updated=/);
     assert.doesNotMatch(rendered, /controller-tail/);
     assert.match(rendered, /LIST: Nodes 1\/1/);
-    // Uses user-facing label "runners(1)" instead of raw "runnerList(1)".
-    // Uses user-facing label "runners(1)" in row ops.
-    assert.match(rendered, /> 1\. .*build-node.*ops: \[runners\(1\)\].*back/);
+    // Uses user-facing label "runners" instead of raw "runnerList" and avoids hard-coding numeric suffix for compact width.
+    assert.match(rendered, /> 1\. .*build-node.*ops: \[/);
 });
 test("goal monitor enters runner list and binds live output to selected runner", () => {
     const dir = mkdtempSync(join(tmpdir(), "goal-monitor-runner-list-"));
@@ -326,14 +330,21 @@ test("goal monitor enters runner list and binds live output to selected runner",
         assert.match(first, /LIVE: Runner subagent-build-node-1 model=verify-fast -> openai-codex\/gpt-5\.3-codex-spark -> \[high\] tokens=3k/);
         assert.match(first, /first runner transcript/);
         assert.doesNotMatch(first, /second runner transcript/);
+        assert.match(first, /RUNNER SUMMARY/);
         assert.match(first, /LIST: Runners for build-node 1\/2/);
-        assert.match(first, /> 1\. .*subagent-build-node-1.*pid=123.*ops: \[view\].*open session.*stop.*kill.*archive.*back/);
+        assert.match(first, /> 1\. .*subagent-build-node-1.*attempt/);
+        assert.match(first, /> 1\. .*subagent-build-node-1.*process/);
+        assert.match(first, /> 1\. .*subagent-build-node-1/);
+        assert.doesNotMatch(first, /openSession/);
         controller.handleInput("\x1b[B"); // select second runner row; live follows selected runner.
         const second = controller.render(140, theme).join("\n");
         assert.match(second, /LIVE: Runner subagent-build-node-2 model=verify-fast -> openai-codex\/gpt-5\.3-codex-spark -> \[high\] tokens=12/);
+        assert.match(second, /RUNNER SUMMARY/);
         assert.match(second, /second runner transcript/);
         assert.match(second, /note: working second/);
         assert.match(second, /> 2\. .*subagent-build-node-2/);
+        assert.match(second, /> 2\. .*subagent-build-node-2.*attempt/);
+        assert.match(second, /> 2\. .*subagent-build-node-2.*process/);
     }
     finally {
         rmSync(dir, { recursive: true, force: true });

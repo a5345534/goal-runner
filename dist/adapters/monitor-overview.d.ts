@@ -21,14 +21,17 @@ export interface GoalMonitorOverview {
     problemLabel: string;
     progressLabel: string;
     runtimeLabel: string;
+    workersLabel: string;
     nextActionLabel: string;
     selectedDetail: string;
+    selectedNodeDetailLines?: string[];
     recentEvents: string[];
     nodeDisplayStates: Array<{
         nodeId: string;
         slug: string;
         displayState: MonitorNodeDisplayState;
         summary: string;
+        duration: MonitorDurationSummary;
     }>;
 }
 export declare const ACTION_DISPLAY_LABELS: Record<string, string>;
@@ -75,12 +78,29 @@ export declare function formatRecentEvents(ledgerEvents: GoalLedgerEvent[], opti
     minRecentEvents?: number;
 }): string[];
 export type StaleLevel = "fresh" | "quiet" | "stale" | "dead" | "unknown";
+export type DurationConfidence = "exact" | "ledger-derived" | "fallback";
 export interface MonitorDurationSummary {
     totalLabel: string;
     phaseLabel?: string;
     statusLabel?: string;
     lastLabel: string;
     staleLevel: StaleLevel;
+    confidence: DurationConfidence;
+}
+export interface GoalDurationSummary {
+    goalAgeLabel: string;
+    activeWorkLabel?: string;
+    lastEventLabel: string;
+    confidence: DurationConfidence;
+}
+export interface RunnerDurationSummary {
+    attemptRuntimeLabel: string;
+    statusAgeLabel?: string;
+    integrationAgeLabel?: string;
+    processSeenLabel?: string;
+    lastActivityLabel: string;
+    staleLevel: StaleLevel;
+    confidence: DurationConfidence;
 }
 export declare function formatDuration(ms: number): string;
 export declare function formatAgo(date: Date, now: Date): string;
@@ -89,36 +109,6 @@ export declare function buildGoalDurationSummary(goal: {
     createdAt: string;
     timeUsedSeconds: number;
     updatedAt: string;
-}, ledgerEvents: {
-    at: string;
-}[], now: Date): {
-    goalAgeLabel: string;
-    activeWorkLabel?: string;
-    lastEventLabel: string;
-};
-export declare function buildNodeDurationSummary(node: {
-    nodeId: string;
-    status: string;
-    lifecyclePhase?: string;
-    createdAt?: string;
-    updatedAt?: string;
-}, ledgerEvents: {
-    at: string;
-    details?: Record<string, unknown>;
-}[], now: Date): MonitorDurationSummary;
-export declare function buildRunnerDurationSummary(subagent: {
-    subagentId: string;
-    status: string;
-    createdAt?: string;
-    updatedAt?: string;
-    lastActivityAt?: string;
-    integrationState?: string;
-}, ledgerEvents: {
-    at: string;
-    details?: Record<string, unknown>;
-}[], now: Date): {
-    attemptRuntimeLabel: string;
-    statusAgeLabel?: string;
-    lastActivityLabel: string;
-    staleLevel: StaleLevel;
-};
+}, ledgerEvents: GoalLedgerEvent[], now: Date): GoalDurationSummary;
+export declare function buildNodeDurationSummary(node: GoalDagNode, relatedSubagents: GoalSubagentRecord[], ledgerEvents: GoalLedgerEvent[], now: Date): MonitorDurationSummary;
+export declare function buildRunnerDurationSummary(subagent: GoalSubagentRecord, events: GoalLedgerEvent[], now: Date): RunnerDurationSummary;

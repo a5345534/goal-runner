@@ -70,6 +70,7 @@ export function renderOpencodeMonitorLines(goal, state, options = {}) {
     lines.push(`Problem: ${overview.problemLabel}`);
     lines.push(`Progress: ${overview.progressLabel}`);
     lines.push(`Runtime: ${overview.runtimeLabel}`);
+    lines.push(`Workers: ${overview.workersLabel ?? "none"}`);
     lines.push(`Next Action: ${overview.nextActionLabel}`);
     // ── EXECUTION PLAN section ──
     lines.push("");
@@ -83,7 +84,13 @@ export function renderOpencodeMonitorLines(goal, state, options = {}) {
             lines.push(truncate(`${stateChar} ${nds.slug}: ${nds.summary}`, maxLineWidth));
         }
         // Selected detail — highlights the most important node based on health.
-        if (overview.selectedDetail) {
+        if (overview.selectedNodeDetailLines?.length) {
+            lines.push("");
+            for (const detail of overview.selectedNodeDetailLines) {
+                lines.push(`Detail: ${truncate(detail, maxLineWidth)}`);
+            }
+        }
+        else if (overview.selectedDetail) {
             lines.push("");
             lines.push(`Detail: ${truncate(overview.selectedDetail, maxLineWidth)}`);
         }
