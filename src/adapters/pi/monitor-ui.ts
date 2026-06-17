@@ -691,12 +691,9 @@ export class GoalMonitorController {
       }
     }
 
-    // ── KEY BINDS ──
-    lines.push(truncateToWidth(theme.fg("dim", `row-action monitor • ←→ select row op • Enter confirm • b/Backspace back • l/v focus • c compact/debug • Tab switch • ↑↓ move/scroll • PgUp/PgDn • Esc close`), width));
-
     // ── RUNTIME BAND + DEBUG META ──
-    const showDebugBand = this.controllerHistoryMode === "debug" || this.activePane === "live";
-    if (showDebugBand) {
+    const showDebugMeta = this.controllerHistoryMode === "debug" || this.activePane === "live";
+    if (showDebugMeta) {
       lines.push(
         ...formatRuntimeBandLines(
           runtimeSummary,
@@ -710,7 +707,6 @@ export class GoalMonitorController {
     const compactMeta = isNarrow
       ? `scope=${view.scopeLabel} focus=${this.activePane} rowOp=${formatPlainOperation(this.lastSelectedOperations[this.rowOperationIndex])}`
       : `scope=${view.scopeLabel} focus=${this.activePane} rowOp=${formatPlainOperation(this.lastSelectedOperations[this.rowOperationIndex])} status=${derivedMonitorStatus(this.goal, dag)} tokens=${formatMonitorTokens(this.goal)} DAG nodes=${formatStatusCounts(dag.nodes.map((node) => node.status))} subagents=${formatStatusCounts(dag.subagents.map((subagent) => subagent.status))} elapsed=${formatElapsedSeconds(this.goal.timeUsedSeconds)}`;
-    lines.push(truncateToWidth(theme.fg("dim", compactMeta), width));
 
     // ── LIVE PANE ──
     // Always use the original live view (compact/debug controller history or runner transcript).
@@ -742,6 +738,11 @@ export class GoalMonitorController {
     lines.push(truncateToWidth(theme.fg(this.activePane === "list" ? "accent" : "muted", `${this.activePane === "list" ? "▶ " : "  "}LIST: ${view.listTitle}`), width));
     if (view.listRows.length === 0) {
       lines.push(truncateToWidth(theme.fg("muted", "No selectable rows for this scope"), width));
+      lines.push(truncateToWidth(buildMonitorActionsLine(this.lastSelectedOperations, this.rowOperationIndex, theme), width));
+      lines.push(truncateToWidth(theme.fg("dim", `Keys: ←→ select action · Enter confirm · b back · Tab switch · c debug · Esc close`), width));
+      if (showDebugMeta) {
+        lines.push(truncateToWidth(theme.fg("dim", `Debug: ${compactMeta}`), width));
+      }
       return lines;
     }
     const listStart = this.listScroll;
@@ -753,6 +754,13 @@ export class GoalMonitorController {
       lines.push(truncateToWidth(selected ? theme.fg("accent", `> ${row}${ops ? `  ops: ${ops}` : ""}`) : `  ${row}`, width));
     }
     lines.push(truncateToWidth(theme.fg("dim", formatListRange(listStart, listEnd, view.listRows.length, this.listIndex, this.activePane === "list")), width));
+
+    // ── FOOTER: actions + keys (+ optional debug metadata) ──
+    lines.push(truncateToWidth(buildMonitorActionsLine(this.lastSelectedOperations, this.rowOperationIndex, theme), width));
+    lines.push(truncateToWidth(theme.fg("dim", `Keys: ←→ select action · Enter confirm · b back · Tab switch · c debug · Esc close`), width));
+    if (showDebugMeta) {
+      lines.push(truncateToWidth(theme.fg("dim", `Debug: ${compactMeta}`), width));
+    }
     return lines;
   }
 
@@ -917,6 +925,21 @@ function formatRowOperations(operations: GoalMonitorRowOperation[], selectedInde
   return operations
     .map((operation, index) => index === selectedIndex ? theme.fg("accent", `[${operation.label}]`) : theme.fg("dim", ` ${operation.label} `))
     .join(" ");
+}
+
+function buildMonitorActionsLine(
+  operations: GoalMonitorRowOperation[],
+  selectedIndex: number,
+  theme: GoalListThemeLike,
+): string {
+  if (operations.length === 0) return theme.fg("dim", "Actions: none");
+  const labels = operations
+    .map((operation, index) => {
+      const text = `[${operation.label}]`;
+      return index === selectedIndex ? theme.fg("accent", text) : theme.fg("dim", text);
+    })
+    .join(" ");
+  return `${theme.fg("dim", "Actions:")} ${labels}`;
 }
 
 function groupSubagentsByNode(subagents: GoalSubagentRecord[]): Map<string, GoalSubagentRecord[]> {
