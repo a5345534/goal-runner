@@ -52,12 +52,13 @@ export class NativeGitWorkspaceManager {
         if (this.options.fetch)
             safeGit(repoRoot, ["fetch", this.options.remote, "--prune"]);
         const baseRef = this.resolveSubagentBaseRef(repoRoot, request);
+        const goalPrefix = sanitizeSlug(request.goalId).slice(0, 12);
         const baseSlug = request.worktreeSlug ? assertSafeWorktreeSlug(request.worktreeSlug) : slugForGoalSubagent(request.goalId, request.nodeSlug ?? request.nodeId, request.nodeObjective);
         const baseSubagentId = sanitizeSlug(request.subagentId ?? `subagent-${baseSlug}`);
         const worktreeRoot = this.resolveWorktreeRoot(repoRoot);
         mkdirSync(worktreeRoot, { recursive: true });
         if (request.worktreeSlug || request.branch) {
-            const branch = request.branch ?? `${this.options.branchPrefix}/${baseSlug}`;
+            const branch = request.branch ?? `${this.options.branchPrefix}/${goalPrefix}/${baseSlug}`;
             assertSafeBranchName(repoRoot, branch);
             return this.ensureBoundSubagentWorkspace({
                 repoRoot,
@@ -73,7 +74,7 @@ export class NativeGitWorkspaceManager {
         for (let attempt = 0; attempt < 100; attempt += 1) {
             const slug = attempt === 0 ? baseSlug : `${baseSlug}-${attempt + 1}`;
             const subagentId = attempt === 0 ? baseSubagentId : `${baseSubagentId}-${attempt + 1}`;
-            const branch = `${this.options.branchPrefix}/${slug}`;
+            const branch = `${this.options.branchPrefix}/${goalPrefix}/${slug}`;
             const worktreePath = resolve(worktreeRoot, slug);
             if (existsSync(worktreePath) || gitRefExists(repoRoot, branch))
                 continue;
@@ -104,7 +105,8 @@ export class NativeGitWorkspaceManager {
                 throw new Error(`bound subagent worktree path exists but is not a Git worktree: ${resolvedWorktree}`);
             const currentBranch = safeGit(resolvedWorktree, ["branch", "--show-current"]);
             if (currentBranch !== request.branch) {
-                throw new Error(`bound subagent worktree branch mismatch: expected ${request.branch}, got ${currentBranch || "detached"}`);
+                throw new Error(`bound subagent worktree branch mismatch: expected ${request.branch}, got ${currentBranch || "detached"}. ` +
+                    `This worktree may belong to a different goal or node. Remove it manually or use a different worktreeSlug.`);
             }
             const dirty = gitStatusPorcelain(resolvedWorktree);
             if (dirty)

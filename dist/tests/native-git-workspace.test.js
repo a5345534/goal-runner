@@ -253,7 +253,7 @@ test("native git subagent allocator plugs into controller loop workspace allocat
         assert.equal(starts.length, 1);
         assert.ok(starts[0]?.cwd);
         assert.equal(git(starts[0]?.cwd ?? repo, ["branch", "--show-current"]), starts[0]?.branch);
-        assert.match(starts[0]?.branch ?? "", /^goal\/goal-abc-implement-attendance/);
+        assert.match(starts[0]?.branch ?? "", /^goal\/goal-abcdef1\/goal-abc-implement-attendance/);
         assert.equal((await runtime.getGoalSubagent("goal-abcdef12", tick.started[0]?.subagentId ?? ""))?.workspacePath, starts[0]?.cwd);
         manager.cleanupWorkspace({ repoRoot: repo, worktreePath: starts[0]?.cwd ?? "", branch: starts[0]?.branch, force: true });
     }
