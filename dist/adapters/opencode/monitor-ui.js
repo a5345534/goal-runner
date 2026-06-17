@@ -36,6 +36,9 @@ export function renderOpencodeMonitorLines(goal, state, options = {}) {
     const maxLineWidth = options.maxLineWidth ?? DEFAULT_MAX_LINE_WIDTH;
     const now = options.now ?? (() => new Date());
     const lines = [];
+    const uiBoundary = "═".repeat(Math.max(0, maxLineWidth));
+    lines.push(uiBoundary);
+    lines.push(uiBoundary);
     // ── Build the runtime summary (shared with Pi TUI) ──
     const runtimeSummary = buildGoalMonitorRuntimeSummary(goal, state.subagents, {
         harnessState: options.harnessState,
@@ -106,6 +109,8 @@ export function renderOpencodeMonitorLines(goal, state, options = {}) {
             lines.push(truncate(evt, maxLineWidth));
         }
     }
+    lines.push(uiBoundary);
+    lines.push(uiBoundary);
     return lines;
 }
 // ── Private helpers ──

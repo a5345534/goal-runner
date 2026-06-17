@@ -673,6 +673,9 @@ export class GoalMonitorController {
 
     const isNarrow = width <= 80;
     const lines: string[] = [];
+    const uiBoundaryLine = truncateToWidth(theme.fg("borderMuted", "═".repeat(Math.max(0, width))), width);
+    const uiBoundary = [uiBoundaryLine, uiBoundaryLine];
+    lines.push(...uiBoundary);
 
     // ── OVERVIEW HEADER ──
     lines.push(...renderOverviewHeader(overview, runtimeSummary, width, isNarrow, theme));
@@ -743,6 +746,7 @@ export class GoalMonitorController {
       if (showDebugMeta) {
         lines.push(truncateToWidth(theme.fg("dim", `Debug: ${compactMeta}`), width));
       }
+      lines.push(...uiBoundary);
       return lines;
     }
     const listStart = this.listScroll;
@@ -761,6 +765,7 @@ export class GoalMonitorController {
     if (showDebugMeta) {
       lines.push(truncateToWidth(theme.fg("dim", `Debug: ${compactMeta}`), width));
     }
+    lines.push(...uiBoundary);
     return lines;
   }
 

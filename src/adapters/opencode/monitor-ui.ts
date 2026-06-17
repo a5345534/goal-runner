@@ -87,6 +87,9 @@ export function renderOpencodeMonitorLines(
   const maxLineWidth = options.maxLineWidth ?? DEFAULT_MAX_LINE_WIDTH;
   const now = options.now ?? (() => new Date());
   const lines: string[] = [];
+  const uiBoundary = "═".repeat(Math.max(0, maxLineWidth));
+  lines.push(uiBoundary);
+  lines.push(uiBoundary);
 
   // ── Build the runtime summary (shared with Pi TUI) ──
   const runtimeSummary = buildGoalMonitorRuntimeSummary(
@@ -181,6 +184,8 @@ export function renderOpencodeMonitorLines(
     }
   }
 
+  lines.push(uiBoundary);
+  lines.push(uiBoundary);
   return lines;
 }
 

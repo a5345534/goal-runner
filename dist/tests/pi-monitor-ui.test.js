@@ -80,10 +80,15 @@ test("goal monitor exposes lifecycle actions as controller row operations", () =
     assert.deepEqual(active.actions, ["pause", "resume", "clear", "close"]);
     assert.deepEqual(paused.actions, ["resume", "clear", "close"]);
     const rendered = active.render(140, theme).join("\n");
+    const outputLines = rendered.split("\n");
     assert.match(rendered, /Actions: \[nodes\]/);
     assert.match(rendered, /Keys: /);
     assert.doesNotMatch(rendered, /scope=controller/);
     assert.match(rendered, /EXECUTION PLAN/);
+    assert.equal(outputLines[0], "═".repeat(140));
+    assert.equal(outputLines[1], "═".repeat(140));
+    assert.equal(outputLines[outputLines.length - 1], "═".repeat(140));
+    assert.equal(outputLines[outputLines.length - 2], "═".repeat(140));
     active.handleInput("\x1b[C"); // select pause operation on the controller row.
     assert.deepEqual(active.handleInput("\r"), { kind: "action", action: "pause" });
 });
