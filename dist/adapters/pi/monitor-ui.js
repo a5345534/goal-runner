@@ -1227,12 +1227,27 @@ function renderExecutionPlanSection(overview, dag, width, isNarrow, theme) {
                     nds.displayState === "complete" ? "success" : "dim";
         if (isNarrow) {
             lines.push(truncateToWidth(theme.fg(nodeColor, `${stateChar} ${nds.slug}`), width));
+            continue;
         }
-        else {
-            lines.push(truncateToWidth(theme.fg(nodeColor, `${stateChar} ${nds.slug} · ${nds.summary}`), width));
-        }
+        const parts = parseExecutionPlanSummary(nds.summary);
+        const row = renderAlignedColumns([
+            `${stateChar}`,
+            shortenMiddle(nds.slug, 30),
+            parts.runtime,
+            parts.phase,
+            parts.last,
+        ], [2, 30, 14, 28, 14]);
+        lines.push(truncateToWidth(theme.fg(nodeColor, row), width));
     }
     return lines;
+}
+function parseExecutionPlanSummary(summary) {
+    const parts = summary.split(" · ").filter(Boolean);
+    return {
+        runtime: parts[0] ?? "",
+        phase: parts[1] ?? "",
+        last: parts.slice(2).join(" · "),
+    };
 }
 /** Truncate text for narrow terminals preserving key fields. */
 function truncateNarrow(text, maxLen) {

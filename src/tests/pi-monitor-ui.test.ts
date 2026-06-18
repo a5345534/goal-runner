@@ -283,6 +283,50 @@ test("goal monitor starts at controller row with explicit nodeList operation", (
   assert.match(rendered, /> \[controller\].*ops: \[nodes\].*pause.*resume.*clear/);
 });
 
+test("goal monitor execution plan uses aligned wide-row columns", () => {
+  const now = new Date("2026-05-31T00:10:00.000Z");
+  const nodes: ReturnType<typeof dagNode>[] = [
+    dagNode({
+      nodeId: "backend-read-apis-node",
+      slug: "backend-read-apis",
+      status: "planned",
+      lifecyclePhase: "runnerActive",
+      createdAt: "2026-05-31T00:00:00.000Z",
+      updatedAt: "2026-05-31T00:00:01.000Z",
+    }),
+    dagNode({
+      nodeId: "controller-validate-results",
+      slug: "controller-validate-results",
+      status: "running",
+      lifecyclePhase: "validating",
+      createdAt: "2026-05-31T00:01:00.000Z",
+      updatedAt: "2026-05-31T00:01:30.000Z",
+    }),
+  ];
+
+  const controller = new GoalMonitorController(
+    summary("active"),
+    () => ({ lines: ["controller-tail"], entryCount: 1, messageCount: 1 }),
+    () => ({
+      nodes,
+      subagents: [],
+      refreshedAt: now.toISOString(),
+    }),
+    () => now,
+  );
+
+  const rendered = controller.render(150, theme).join("\n").split("\n");
+  const execIndex = rendered.findIndex((line) => line === "EXECUTION PLAN");
+  assert.ok(execIndex >= 0, "execution plan heading exists");
+  const dataLines = rendered.slice(execIndex + 1, execIndex + 1 + nodes.length);
+
+  assert.equal(dataLines.length, 2);
+  const ageColumns = dataLines.map((line) => line.indexOf("age"));
+  assert.equal(ageColumns[0], ageColumns[1]);
+  assert.match(dataLines[0] ?? "", /age/);
+  assert.match(dataLines[0] ?? "", /phase/);
+});
+
 test("goal monitor controller live pane renders durable controller history events", () => {
   const now = new Date("2026-05-31T00:05:00.000Z");
   const nodes = [dagNode()];
