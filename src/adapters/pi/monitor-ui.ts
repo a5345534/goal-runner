@@ -740,6 +740,7 @@ export class GoalMonitorController {
     lines.push(truncateToWidth(theme.fg(this.activePane === "list" ? "accent" : "muted", `${this.activePane === "list" ? "▶ " : "  "}LIST: ${view.listTitle}`), width));
     if (view.listRows.length === 0) {
       lines.push(truncateToWidth(theme.fg("muted", "No selectable rows for this scope"), width));
+      lines.push(truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width));
       lines.push(truncateToWidth(theme.fg("dim", `Keys: ←→ select action · Enter confirm · b back · Tab switch · c debug · Esc close`), width));
       if (showDebugMeta) {
         lines.push(truncateToWidth(theme.fg("dim", `Debug: ${compactMeta}`), width));
@@ -755,9 +756,9 @@ export class GoalMonitorController {
       const ops = selected ? formatRowOperations(this.lastSelectedOperations, this.rowOperationIndex, theme) : "";
       lines.push(truncateToWidth(selected ? theme.fg("accent", `> ${row}${ops ? `  ops: ${ops}` : ""}`) : `  ${row}`, width));
     }
-    lines.push(truncateToWidth(theme.fg("dim", formatListRange(listStart, listEnd, view.listRows.length, this.listIndex, this.activePane === "list")), width));
 
     // ── FOOTER: keys (+ optional debug metadata) ──
+    lines.push(truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width));
     lines.push(truncateToWidth(theme.fg("dim", `Keys: ←→ select action · Enter confirm · b back · Tab switch · c debug · Esc close`), width));
     if (showDebugMeta) {
       lines.push(truncateToWidth(theme.fg("dim", `Debug: ${compactMeta}`), width));
@@ -867,10 +868,7 @@ function formatLiveRange(start: number, end: number, total: number, active: bool
   return `Live lines: ${start + 1}-${end}/${total}${details.length ? ` • ${details.join(" • ")}` : ""}`;
 }
 
-function formatListRange(start: number, end: number, total: number, selected: number, active: boolean): string {
-  const details = [active ? "active" : undefined, start > 0 ? `${start} previous rows` : undefined, total > end ? `${total - end} more rows` : undefined].filter(Boolean);
-  return `Rows: ${start + 1}-${end}/${total} selected=${Math.min(selected + 1, total)}${details.length ? ` • ${details.join(" • ")}` : ""}`;
-}
+
 
 function controllerActions(goal: GoalSummary): GoalMonitorAction[] {
   const actions: GoalMonitorAction[] = [];

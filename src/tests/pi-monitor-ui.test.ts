@@ -606,14 +606,14 @@ test("goal monitor scrolls overflowing node list after entering node scope", () 
   controller.handleInput("\r"); // nodeList
   const firstPage = controller.render(140, theme).join("\n");
   assert.match(firstPage, /ops: \[\s*runners(?:\([^\)]*\))?\s*\]/);
-  assert.match(firstPage, /Rows: 1-14\/20 selected=1 • active • 6 more rows/);
+  assert.doesNotMatch(firstPage, /Rows:/);
   assert.doesNotMatch(firstPage, /dag-node-20/);
 
   controller.handleInput("\x1b[6~"); // PageDown moves selection through the node list.
   const secondPage = controller.render(140, theme).join("\n");
 
   assert.match(secondPage, /dag-node-14/);
-  assert.match(secondPage, /Rows: 1-14\/20 selected=14 • active • 6 more rows/);
+  assert.doesNotMatch(secondPage, /Rows:/);
 });
 
 test("goal monitor live scroll remains available from controller scope", () => {
