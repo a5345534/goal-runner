@@ -184,6 +184,24 @@ export function buildGoalMonitorRuntimeSummary(
   return { session: sessionState, hiddenContinuation, controllerPoll, runners: runnerCounts };
 }
 
+function renderAlignedColumns(values: string[], widths: number[]): string {
+  return values
+    .map((value, index) => {
+      const width = widths[index] ?? 0;
+      if (!value) return "";
+      if (width <= 0) return value;
+      return fitColumn(value, width);
+    })
+    .join("  ")
+    .trimEnd();
+}
+
+function fitColumn(value: string, width: number): string {
+  if (value.length <= width) return value.padEnd(width, " ");
+  if (width <= 1) return value.slice(0, width);
+  return `${value.slice(0, width - 1)}…`;
+}
+
 function deriveSessionState(
   goal: GoalSummary,
   harness?: HarnessState,
@@ -1173,7 +1191,16 @@ function renderNodeListRow(
   const phaseLabel = summary.phaseLabel ?? `phase ${node.lifecyclePhase ?? node.status}`;
   const model = formatNodeMonitorModel(node);
   const lastText = formatDurationWithoutAgo(summary.lastLabel);
-  return `${index + 1}. ${shortenMiddle(node.slug || node.nodeId, 44)} ${node.status} · ${summary.totalLabel} · ${phaseLabel} · last ${lastText} · ${workers} runner${workers === 1 ? "" : "s"}${model ? ` model=${model}` : ""}`;
+  return renderAlignedColumns([
+    `${index + 1}.`,
+    shortenMiddle(node.slug || node.nodeId, 30),
+    node.status,
+    summary.totalLabel,
+    phaseLabel,
+    `last ${lastText}`,
+    `${workers} runner${workers === 1 ? "" : "s"}`,
+    model ? `model=${model}` : "",
+  ], [3, 30, 9, 9, 16, 10, 9, 16]);
 }
 
 function renderRunnerListRow(
@@ -1187,11 +1214,15 @@ function renderRunnerListRow(
     renderRunnerStatus(subagent),
   );
   const lastText = formatDurationWithoutAgo(summary.lastActivityLabel).replace(/^last activity\s+/, "last ");
-  const processSummary = summary.processSeenLabel
-    ? ` · process ${formatRunnerProcessLabel(summary.processSeenLabel)}`
-    : " · process unknown";
-
-  return `${index + 1}. ${shortenMiddle(subagent.subagentId, 52)} ${statusText} · ${summary.attemptRuntimeLabel} · ${lastText}${summary.integrationAgeLabel ? ` · ${summary.integrationAgeLabel}` : ""}${processSummary}`;
+  return renderAlignedColumns([
+    `${index + 1}.`,
+    shortenMiddle(subagent.subagentId, 40),
+    statusText,
+    summary.attemptRuntimeLabel,
+    lastText,
+    summary.integrationAgeLabel ?? "",
+    `process ${formatRunnerProcessLabel(summary.processSeenLabel ?? "unknown")}`,
+  ], [4, 40, 16, 10, 10, 14, 0]);
 }
 
 function normalizeRunnerStatusAgeLabel(
