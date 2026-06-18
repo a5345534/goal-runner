@@ -125,7 +125,7 @@ test("goal monitor exposes lifecycle actions as controller row operations", () =
 
   const rendered = active.render(140, theme).join("\n");
   const outputLines = rendered.split("\n");
-  assert.match(rendered, /Actions: \[nodes\]/);
+  assert.match(rendered, /> \[controller\].*ops: \[nodes\].*pause.*resume.*clear/);
   assert.match(rendered, /Keys: /);
   assert.doesNotMatch(rendered, /scope=controller/);
   assert.match(rendered, /EXECUTION PLAN/);
@@ -273,7 +273,7 @@ test("goal monitor starts at controller row with explicit nodeList operation", (
 
   const rendered = controller.render(140, theme).join("\n");
 
-  assert.match(rendered, /Actions: \[nodes\]/);
+  assert.match(rendered, /> \[controller\].*ops: \[nodes\].*pause.*resume.*clear/);
   assert.doesNotMatch(rendered, /scope=controller focus=/);
   assert.match(rendered, /nodes=1 \(running=1\) runners=1 \(running=1\)/);
   assert.match(rendered, /LIVE: Controller legacy transcript fallback \(1 line\)/);
@@ -389,13 +389,13 @@ test("goal monitor enters node list with empty live pane and node row runnerList
   controller.handleInput("\r"); // confirm controller nodeList operation.
   const rendered = controller.render(140, theme).join("\n");
 
-  assert.match(rendered, /Actions: \[runners(?:\([^\)]*\))?\]/);
+  assert.match(rendered, /ops: \[runners(?:\([^\)]*\))?\]/);
   assert.match(rendered, /LIVE: Node list mode/);
   assert.match(rendered, /selected node:/);
   assert.match(rendered, /runtime:/);
   assert.match(rendered, /phase [a-z]+/);
   assert.match(rendered, /last /);
-  assert.match(rendered, /Actions:/);
+  assert.match(rendered, /ops: \[runners(?:\([^\)]*\))?\]/);
   assert.doesNotMatch(rendered, /updated=/);
   assert.doesNotMatch(rendered, /controller-tail/);
   assert.match(rendered, /LIST: Nodes 1\/1/);
@@ -450,7 +450,7 @@ test("goal monitor enters runner list and binds live output to selected runner",
     controller.handleInput("\r"); // runnerList for selected node
     const first = controller.render(140, theme).join("\n");
 
-    assert.match(first, /Actions: \[view\]/);
+    assert.match(first, /ops: \[view\]/);
     assert.match(first, /LIVE: Runner subagent-build-node-1 model=verify-fast -> openai-codex\/gpt-5\.3-codex-spark -> \[high\] tokens=3k/);
     assert.match(first, /first runner transcript/);
     assert.doesNotMatch(first, /second runner transcript/);
@@ -577,13 +577,13 @@ test("goal monitor back navigation returns runner list to nodes to controller sc
   controller.handleInput("\r"); // controller -> nodes
   controller.render(140, theme);
   controller.handleInput("\r"); // nodes -> runners
-  assert.match(controller.render(140, theme).join("\n"), /Actions: \[view\]/);
+  assert.match(controller.render(140, theme).join("\n"), /ops: \[view\]/);
 
   controller.handleInput("b");
-  assert.match(controller.render(140, theme).join("\n"), /Actions: \[runners(?:\([^\)]*\))?\]/);
+  assert.match(controller.render(140, theme).join("\n"), /ops: \[runners(?:\([^\)]*\))?\]/);
 
   controller.handleInput("\x7f");
-  assert.match(controller.render(140, theme).join("\n"), /Actions: \[nodes\]/);
+  assert.match(controller.render(140, theme).join("\n"), /ops: \[nodes\]/);
 });
 
 test("goal monitor scrolls overflowing node list after entering node scope", () => {
@@ -605,7 +605,7 @@ test("goal monitor scrolls overflowing node list after entering node scope", () 
   controller.render(140, theme);
   controller.handleInput("\r"); // nodeList
   const firstPage = controller.render(140, theme).join("\n");
-  assert.match(firstPage, /Actions: \[\s*runners(?:\([^\)]*\))?\s*\]/);
+  assert.match(firstPage, /ops: \[\s*runners(?:\([^\)]*\))?\s*\]/);
   assert.match(firstPage, /Rows: 1-14\/20 selected=1 • active • 6 more rows/);
   assert.doesNotMatch(firstPage, /dag-node-20/);
 
@@ -621,7 +621,7 @@ test("goal monitor live scroll remains available from controller scope", () => {
   const controller = new GoalMonitorController(summary("active"), () => ({ lines, entryCount: lines.length, messageCount: lines.length }));
 
   const initial = controller.render(120, theme).join("\n");
-  assert.match(initial, /Actions: \[nodes\]/);
+  assert.match(initial, /ops: \[nodes\]/);
   assert.match(initial, /transcript-25/);
 
   controller.handleInput("v");
@@ -1415,7 +1415,7 @@ test("Pi: full subagent ID only in selected detail / runner scope", () => {
   // Runner list should show the full subagent ID in the LIST pane.
   assert.match(runnerRendered, new RegExp(longSubagentId));
   // But should show runner row actions, confirming we're in runner detail view.
-  assert.match(runnerRendered, /Actions: \[view\]/);
+  assert.match(runnerRendered, /ops: \[view\]/);
 });
 
 // 4.9 Pi: actions display user-facing labels but return existing operation IDs
@@ -1455,13 +1455,13 @@ test("Pi: actions display user-facing labels but return existing operation IDs",
   const debugMode = controller.render(140, theme).join("\n");
   assert.match(debugMode, /Debug: scope=controller focus=list rowOp=nodeList/);
 
-  // The footer actions are user-facing.
-  assert.match(rendered, /Actions: \[nodes\]/);
+  // The row actions are user-facing.
+  assert.match(rendered, /ops: \[nodes\]/);
 
   // Verify that confirmed operations still return raw IDs.
   // Controller row: first internal op is "nodeList", which navigates.
   controller.handleInput("\r"); // confirm "nodes" → enters node list
-  assert.match(controller.render(140, theme).join("\n"), /Actions: \[runners(?:\([^\)]*\))?\]/);
+  assert.match(controller.render(140, theme).join("\n"), /ops: \[runners(?:\([^\)]*\))?\]/);
 
   // Go back, select pause action (it's the first action after nodeList).
   controller.handleInput("b");

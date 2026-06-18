@@ -740,7 +740,6 @@ export class GoalMonitorController {
     lines.push(truncateToWidth(theme.fg(this.activePane === "list" ? "accent" : "muted", `${this.activePane === "list" ? "▶ " : "  "}LIST: ${view.listTitle}`), width));
     if (view.listRows.length === 0) {
       lines.push(truncateToWidth(theme.fg("muted", "No selectable rows for this scope"), width));
-      lines.push(truncateToWidth(buildMonitorActionsLine(this.lastSelectedOperations, this.rowOperationIndex, theme), width));
       lines.push(truncateToWidth(theme.fg("dim", `Keys: ←→ select action · Enter confirm · b back · Tab switch · c debug · Esc close`), width));
       if (showDebugMeta) {
         lines.push(truncateToWidth(theme.fg("dim", `Debug: ${compactMeta}`), width));
@@ -758,8 +757,7 @@ export class GoalMonitorController {
     }
     lines.push(truncateToWidth(theme.fg("dim", formatListRange(listStart, listEnd, view.listRows.length, this.listIndex, this.activePane === "list")), width));
 
-    // ── FOOTER: actions + keys (+ optional debug metadata) ──
-    lines.push(truncateToWidth(buildMonitorActionsLine(this.lastSelectedOperations, this.rowOperationIndex, theme), width));
+    // ── FOOTER: keys (+ optional debug metadata) ──
     lines.push(truncateToWidth(theme.fg("dim", `Keys: ←→ select action · Enter confirm · b back · Tab switch · c debug · Esc close`), width));
     if (showDebugMeta) {
       lines.push(truncateToWidth(theme.fg("dim", `Debug: ${compactMeta}`), width));
