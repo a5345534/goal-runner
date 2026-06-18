@@ -55,6 +55,7 @@ import {
   signalPiBackgroundRunners,
 } from "./runner-ops.js";
 import { PiHarnessSubagentAdapter } from "./subagent-adapter.js";
+import { createAuditModel, controllerAuditOptions } from "./controller-audit-model.js";
 import {
   parseGoalWorkspaceFlags,
   resolveWorkspaceBinding,
@@ -717,6 +718,8 @@ function buildPiGoalControllerLoopOptions(
       };
     },
     validator: createControllerValidationRunner(),
+    audit: controllerAuditOptions(),
+    auditModel: createAuditModel(),
     integrator: createNativeGitSubagentBranchIntegrator(workspaceManager, { controllerWorkspacePath: binding.workspace }),
     metadata: { controllerGoalId: goal.goalId },
   };
