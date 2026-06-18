@@ -992,7 +992,9 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
     integrationIssues: terminal.integrationIssues.length,
   });
 
+  let promotionStatus: ReturnType<NativeGitWorkspaceManager["promoteControllerBranch"]>["status"] = "notRequired";
   const manager = new NativeGitWorkspaceManager({ fetch: false });
+  const isAutoAllocated = isAutoAllocatedPiControllerWorkspace(binding);
   if (terminal.allComplete && terminal.integrationIssues.length === 0) {
     await recordPiControllerEvent(runtime, goalId, "promotion.started", {
       controllerBranch: binding.branch,
@@ -1000,6 +1002,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
       workspace: binding.workspace,
     });
     const promotion = promotePiControllerBranchIfRequired(manager, binding);
+    promotionStatus = promotion.result?.status ?? "notRequired";
     if (!promotion.ok) {
       await recordPiControllerEvent(runtime, goalId, "promotion.blocked", {
         summary: promotion.summary,
@@ -1020,7 +1023,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
       summary: promotion.summary,
       targetRef: binding.promotionTargetRef,
       controllerBranch: binding.branch,
-      status: promotion.result?.status ?? "not-required",
+      status: promotionStatus,
     });
   }
 
@@ -1034,7 +1037,10 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
     });
     stopPiGoalBackgroundResources(goalId);
     if (finalization.status === "complete") {
-      const cleanup = cleanupTerminalSubagentWorkspaces(manager, state);
+      const cleanup = cleanupTerminalSubagentWorkspaces(manager, state, {
+        verifySourceReachable: isAutoAllocated,
+        promotionStatus,
+      } as Parameters<typeof cleanupTerminalSubagentWorkspaces>[2]);
       const cleanupErrors = cleanup.filter((result) => result.action === "error");
       if (cleanupErrors.length > 0) {
         if (options.notify !== false) {
