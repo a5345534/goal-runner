@@ -461,16 +461,22 @@ export class GoalMonitorController {
         const visibleListCount = DEFAULT_VISIBLE_LIST_LINES;
         this.lastListItems = view.listItems;
         this.lastListLineCount = view.listRows.length;
+        const previousLiveLineCount = this.lastLiveLineCount;
         this.lastLiveLineCount = view.liveLines.length;
         this.listIndex = Math.min(Math.max(0, this.listIndex), Math.max(0, view.listRows.length - 1));
         this.keepSelectedListRowVisible();
         this.listScroll = clampScroll(this.listScroll, view.listRows.length, visibleListCount);
         this.lastSelectedOperations = operationsForListItem(this.lastListItems[this.listIndex], this.goal, dag);
         this.rowOperationIndex = Math.min(Math.max(0, this.rowOperationIndex), Math.max(0, this.lastSelectedOperations.length - 1));
-        if (view.liveFollowsTail && this.followLiveTail)
+        const previousLiveTail = Math.max(0, previousLiveLineCount - visibleLiveCount);
+        if (view.liveFollowsTail && (this.followLiveTail || this.liveScroll >= previousLiveTail)) {
+            this.followLiveTail = true;
             this.liveScroll = Math.max(0, view.liveLines.length - visibleLiveCount);
-        else
+        }
+        else {
+            this.followLiveTail = view.liveFollowsTail ? this.followLiveTail : false;
             this.liveScroll = clampScroll(this.liveScroll, view.liveLines.length, visibleLiveCount);
+        }
         const isNarrow = width <= 80;
         const lines = [];
         const uiBoundaryLine = truncateToWidth(theme.fg("borderMuted", "═".repeat(Math.max(0, width))), width);
@@ -527,7 +533,7 @@ export class GoalMonitorController {
         if (view.listRows.length === 0) {
             lines.push(truncateToWidth(theme.fg("muted", "No selectable rows for this scope"), width));
             lines.push(truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width));
-            lines.push(truncateToWidth(theme.fg("dim", `Keys: ←→ select action · Enter confirm · b back · Tab switch · c debug · Esc close`), width));
+            lines.push(truncateToWidth(theme.fg("dim", this.formatMonitorKeysHelp(this.activePane)), width));
             if (showDebugMeta) {
                 lines.push(truncateToWidth(theme.fg("dim", `Debug: ${compactMeta}`), width));
             }
@@ -544,12 +550,19 @@ export class GoalMonitorController {
         }
         // ── FOOTER: keys (+ optional debug metadata) ──
         lines.push(truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width));
-        lines.push(truncateToWidth(theme.fg("dim", `Keys: ←→ select action · Enter confirm · b back · Tab switch · c debug · Esc close`), width));
+        lines.push(truncateToWidth(theme.fg("dim", this.formatMonitorKeysHelp(this.activePane)), width));
         if (showDebugMeta) {
             lines.push(truncateToWidth(theme.fg("dim", `Debug: ${compactMeta}`), width));
         }
         lines.push(uiBoundaryLine);
         return lines;
+    }
+    formatMonitorKeysHelp(activePane) {
+        // Keep behavior stable on normal keys and add explicit Home/End navigation hints.
+        // Home always jumps to top in list or live view; End jumps to bottom or live tail.
+        const scopeLabel = activePane === "live" ? "LIVE" : "LIST";
+        const endMeaning = activePane === "live" ? "live tail" : "bottom";
+        return `Keys: ←→ select action · ↑↓/PgUp/PgDn scroll ${scopeLabel} · Home top · End ${endMeaning} · Enter confirm · b back · Tab switch · c debug · Esc close`;
     }
     buildView(dag, controllerTranscript, overview) {
         const now = this.now();

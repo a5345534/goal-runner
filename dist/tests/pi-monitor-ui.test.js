@@ -522,6 +522,36 @@ test("goal monitor render auto-follows controller live transcript tail", () => {
     lines = ["one", "two"];
     assert.ok(controller.render(120, theme).some((line) => line.includes("two")));
 });
+test("goal monitor keeps history and resumes auto-follow when returning to live tail", () => {
+    let lines = Array.from({ length: 25 }, (_, index) => `transcript-${String(index + 1).padStart(2, "0")}`);
+    const controller = new GoalMonitorController(summary("active"), () => ({ lines, entryCount: lines.length, messageCount: lines.length }));
+    controller.handleInput("v");
+    let output = controller.render(120, theme).join("\n");
+    assert.match(output, /transcript-25/);
+    controller.handleInput("\x1b[H"); // Pause tracking by scrolling to top.
+    output = controller.render(120, theme).join("\n");
+    assert.match(output, /transcript-01/);
+    assert.doesNotMatch(output, /transcript-25/);
+    lines = [...lines, "transcript-26", "transcript-27", "transcript-28"];
+    output = controller.render(120, theme).join("\n");
+    assert.match(output, /transcript-01/);
+    assert.doesNotMatch(output, /transcript-28/);
+    controller.handleInput("\x1b[F"); // Return to live tail.
+    output = controller.render(120, theme).join("\n");
+    assert.match(output, /transcript-28/);
+});
+test("goal monitor footer shows Home and End navigation hints", () => {
+    const controller = new GoalMonitorController(summary("active"), () => ({ lines: ["tail"], entryCount: 1, messageCount: 1 }));
+    const listFocused = controller.render(120, theme).join("\n");
+    assert.match(listFocused, /Keys:/);
+    assert.match(listFocused, /Home top/);
+    assert.match(listFocused, /End bottom/);
+    controller.handleInput("v");
+    const liveFocused = controller.render(120, theme).join("\n");
+    assert.match(liveFocused, /Keys:/);
+    assert.match(liveFocused, /Home top/);
+    assert.match(liveFocused, /End live tail/);
+});
 // ── Runtime band tests ──
 test("runtime summary shows active session + suppressed continuation as normal, not failure", () => {
     const harnessState = {

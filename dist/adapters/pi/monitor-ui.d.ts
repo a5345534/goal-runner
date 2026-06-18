@@ -116,6 +116,7 @@ export declare class GoalMonitorController {
     private goBack;
     private resetListAndLive;
     render(width: number, theme: GoalListThemeLike): string[];
+    private formatMonitorKeysHelp;
     private buildView;
 }
 export declare function readGoalTranscriptLines(sessionFile: string | undefined): string[];
