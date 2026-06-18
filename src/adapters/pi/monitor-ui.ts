@@ -733,7 +733,6 @@ export class GoalMonitorController {
     const liveStart = liveScrollVal;
     const liveEnd = Math.min(liveLines.length, liveStart + visibleLiveCount);
     for (const line of liveLines.slice(liveStart, liveEnd)) lines.push(truncateToWidth(line, width));
-    if (liveLines.length > 0) lines.push(truncateToWidth(theme.fg("dim", formatLiveRange(liveStart, liveEnd, liveLines.length, this.activePane === "live", followTail)), width));
 
     // ── LIST PANE ──
     lines.push(truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width));
@@ -862,12 +861,6 @@ export class GoalMonitorController {
 function clampScroll(scroll: number, totalLines: number, visibleLines: number): number {
   return Math.min(Math.max(0, scroll), Math.max(0, totalLines - visibleLines));
 }
-
-function formatLiveRange(start: number, end: number, total: number, active: boolean, followTail: boolean): string {
-  const details = [active ? "active" : undefined, followTail ? "live" : undefined, start > 0 ? `${start} previous live lines` : undefined, total > end ? `${total - end} more live lines` : undefined].filter(Boolean);
-  return `Live lines: ${start + 1}-${end}/${total}${details.length ? ` • ${details.join(" • ")}` : ""}`;
-}
-
 
 
 function controllerActions(goal: GoalSummary): GoalMonitorAction[] {

@@ -476,11 +476,9 @@ test("goal monitor live scroll remains available from controller scope", () => {
     assert.match(top, /focus=live/);
     assert.match(top, /transcript-01/);
     assert.doesNotMatch(top, /transcript-25/);
-    assert.match(top, /Live lines: 1-18\/25 • active • 7 more live lines/);
     controller.handleInput("\x1b[F"); // End restores live tail.
     const tail = controller.render(120, theme).join("\n");
     assert.match(tail, /transcript-25/);
-    assert.match(tail, /Live lines: 8-25\/25 • active • live • 7 previous live lines/);
 });
 test("goal monitor render auto-follows controller live transcript tail", () => {
     let lines = ["one"];
