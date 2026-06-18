@@ -1176,9 +1176,8 @@ test("Pi: complete with residual failed runners renders Complete with warnings",
 
   assert.match(rendered, /Health: Complete with warnings|Health=Complete with warnings/);
   assert.doesNotMatch(rendered, /Health: Blocked/);
-  // Problem/selected detail should show the affected node, not "Blocked".
+  // Problem should show the affected node, not "Blocked".
   assert.match(rendered, /Problem:.*n2/);
-  assert.match(rendered, /Node: n2/);
 });
 
 // 4.3 Pi: complete with warnings shows node-centric Problem line

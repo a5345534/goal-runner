@@ -1183,7 +1183,7 @@ function renderOverviewHeader(overview, _runtimeSummary, width, isNarrow, theme)
     return lines;
 }
 /**
- * Render the Execution Plan section with node display states and Selected Detail.
+ * Render the Execution Plan section with node display states.
  * Uses single-char icons for narrow terminals.
  */
 function renderExecutionPlanSection(overview, dag, width, isNarrow, theme) {
@@ -1205,27 +1205,6 @@ function renderExecutionPlanSection(overview, dag, width, isNarrow, theme) {
         }
         else {
             lines.push(truncateToWidth(theme.fg(nodeColor, `${stateChar} ${nds.slug} · ${nds.summary}`), width));
-        }
-    }
-    // Selected Detail — highlights the most important node.
-    if (overview.selectedNodeDetailLines?.length) {
-        if (isNarrow) {
-            for (const line of overview.selectedNodeDetailLines.slice(0, 3)) {
-                lines.push(truncateToWidth(theme.fg("dim", `Selected: ${truncateNarrow(line, width - 10)}`), width));
-            }
-        }
-        else {
-            for (const line of overview.selectedNodeDetailLines) {
-                lines.push(truncateToWidth(theme.fg("dim", line), width));
-            }
-        }
-    }
-    else if (overview.selectedDetail) {
-        if (isNarrow) {
-            lines.push(truncateToWidth(theme.fg("dim", `Selected: ${truncateNarrow(overview.selectedDetail, width - 10)}`), width));
-        }
-        else {
-            lines.push(truncateToWidth(theme.fg("dim", `Selected: ${overview.selectedDetail}`), width));
         }
     }
     return lines;

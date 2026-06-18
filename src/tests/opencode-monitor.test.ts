@@ -582,7 +582,7 @@ test("OpenCode empty state still renders all four sections", () => {
   assert.match(joined, /no DAG nodes or subagents yet/);
 });
 
-test("OpenCode runner summary shows counts before per-runner details", () => {
+test("OpenCode execution plan stays compact in controller output", () => {
   const nodes = [makeNode({ nodeId: "n1" })];
   const subagents = [
     makeSubagent({ nodeId: "n1", subagentId: "sa-1", status: "running" }),
@@ -602,9 +602,10 @@ test("OpenCode runner summary shows counts before per-runner details", () => {
   const recentsIdx = joined.indexOf("── RECENT EVENTS ──");
   const execSection = joined.slice(execIdx, recentsIdx);
 
-  // Node display state summary includes execution detail including worker counts.
+  // Node display state summary stays compact on controller output.
   assert.match(execSection, /n1/);
-  assert.match(execSection, /Worker: 3 subagents \(2 active\)/);
+  assert.doesNotMatch(execSection, /Worker:/);
+  assert.doesNotMatch(execSection, /subagents/);
 });
 
 test("OpenCode runtime summary labels are consistent with Pi TUI", () => {

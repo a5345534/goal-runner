@@ -158,18 +158,6 @@ export function renderOpencodeMonitorLines(
         truncate(`${stateChar} ${nds.slug}: ${nds.summary}`, maxLineWidth),
       );
     }
-    // Selected detail — highlights the most important node based on health.
-    if (overview.selectedNodeDetailLines?.length) {
-      lines.push("");
-      for (const detail of overview.selectedNodeDetailLines) {
-        lines.push(`Detail: ${truncate(detail, maxLineWidth)}`);
-      }
-    } else if (overview.selectedDetail) {
-      lines.push("");
-      lines.push(
-        `Detail: ${truncate(overview.selectedDetail, maxLineWidth)}`,
-      );
-    }
   }
 
   // ── RECENT EVENTS section ──
