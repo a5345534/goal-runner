@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
-import { subagentIntegrationTerminalSuccess } from "./integration.js";
+import { requiredSubagentIntegrationTerminalSuccess } from "./integration.js";
 import type { GoalControllerIntegrator, GoalControllerWorkspaceAllocator, GoalControllerWorkspaceAllocationRequest } from "./controller-loop.js";
 import type { GoalDagNode, GoalOrchestrationState, GoalSubagentRecord } from "./types.js";
 
@@ -760,7 +760,7 @@ function cleanupDecision(subagent: GoalSubagentRecord, policy: NativeGitSubagent
     };
   }
 
-  if (!subagentIntegrationTerminalSuccess(subagent)) {
+  if (!requiredSubagentIntegrationTerminalSuccess(subagent)) {
     return {
       action,
       forceAuthorized: false,

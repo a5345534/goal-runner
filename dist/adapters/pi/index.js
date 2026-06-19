@@ -825,7 +825,9 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(runtime, ctx, goalId, bindi
         allComplete: terminal.allComplete,
         integrationIssues: terminal.integrationIssues.length,
     });
+    let promotionStatus = "notRequired";
     const manager = new NativeGitWorkspaceManager({ fetch: false });
+    const isAutoAllocated = isAutoAllocatedPiControllerWorkspace(binding);
     if (terminal.allComplete && terminal.integrationIssues.length === 0) {
         await recordPiControllerEvent(runtime, goalId, "promotion.started", {
             controllerBranch: binding.branch,
@@ -833,6 +835,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(runtime, ctx, goalId, bindi
             workspace: binding.workspace,
         });
         const promotion = promotePiControllerBranchIfRequired(manager, binding);
+        promotionStatus = promotion.result?.status ?? "notRequired";
         if (!promotion.ok) {
             await recordPiControllerEvent(runtime, goalId, "promotion.blocked", {
                 summary: promotion.summary,
@@ -854,7 +857,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(runtime, ctx, goalId, bindi
             summary: promotion.summary,
             targetRef: binding.promotionTargetRef,
             controllerBranch: binding.branch,
-            status: promotion.result?.status ?? "not-required",
+            status: promotionStatus,
         });
     }
     const finalization = await runtime.finalizeGoalFromDagTerminalState(goalId);
@@ -867,7 +870,10 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(runtime, ctx, goalId, bindi
         });
         stopPiGoalBackgroundResources(goalId);
         if (finalization.status === "complete") {
-            const cleanup = cleanupTerminalSubagentWorkspaces(manager, state);
+            const cleanup = cleanupTerminalSubagentWorkspaces(manager, state, {
+                verifySourceReachable: isAutoAllocated,
+                promotionStatus,
+            });
             const cleanupErrors = cleanup.filter((result) => result.action === "error");
             if (cleanupErrors.length > 0) {
                 if (options.notify !== false) {
