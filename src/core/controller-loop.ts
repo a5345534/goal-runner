@@ -2,7 +2,7 @@ import type { GoalDagSchedulingPolicy } from "./dag-scheduler.js";
 import type { ControllerExceptionHandler } from "./exception-handler.js";
 import { normalizeExceptionSignature } from "./exception-handler.js";
 import { renderExecutorGuardrailLines } from "./executor-prompt.js";
-import { nodeRequiresSubagentIntegration, requiredSubagentIntegrationTerminalSuccess } from "./integration.js";
+import { hasSubagentBranchOrWorkspaceEvidence, nodeRequiresSubagentIntegration, requiredSubagentIntegrationTerminalSuccess } from "./integration.js";
 import { attachPreparedResourcesToNode, recordAdapterObservationOnNode, recordRecoveryDecisionOnNode, supersedePreparedResourcesOnNode, withGoalDagNodeLifecyclePhase } from "./lifecycle.js";
 import type { HarnessSubagentAdapter, StartGoalSubagentOptions } from "./subagent-adapter.js";
 import type { GoalAdapterObservationRecord, GoalControllerActionAttemptRecord, GoalControllerTypedEventCategory, GoalDagNode, GoalLedgerEvent, GoalNodePreparedResources, GoalOrchestrationState, GoalRecord, GoalRecoveryDecisionRecord, GoalSubagentRecord } from "./types.js";
@@ -2416,7 +2416,8 @@ async function integrateOrCompleteValidatedSubagent(
   validationSummary?: string,
   validationSignals?: string[],
 ): Promise<void> {
-  if (!nodeRequiresSubagentIntegration(node, subagent)) {
+  const requiresDependencyPropagation = nodeHasDownstreamDependents(state, node) && hasSubagentBranchOrWorkspaceEvidence(subagent);
+  if (!nodeRequiresSubagentIntegration(node, subagent) && !requiresDependencyPropagation) {
     await completeValidatedSubagent(runtime, node, subagent, result, validationSummary, { integrationState: "not-required", integrationStatus: "integration not required" });
     return;
   }
@@ -2470,20 +2471,7 @@ async function integrateOrCompleteValidatedSubagent(
     tickStartedAt,
   });
   const integrationSummary = integration.summary ?? integration.error ?? `integration ${integration.status}`;
-  const integrationValidationResults = integration.validationSignals?.length
-    ? [...(integratingSubagent.controllerValidationResults ?? []), ...integration.validationSignals]
-    : integratingSubagent.controllerValidationResults;
-  const integrationPatch: Partial<GoalSubagentRecord> = {
-    controllerValidationResults: integrationValidationResults,
-    integrationSourceBranch: integration.sourceBranch ?? integratingSubagent.branch,
-    integrationSourceRef: integration.sourceRef ?? integratingSubagent.ref,
-    integrationSourceHead: integration.sourceHead ?? integratingSubagent.commitSha,
-    integrationCommitSha: integration.integrationCommitSha,
-    commitSha: integration.sourceHead ?? integratingSubagent.commitSha,
-    integrationCompletedAt: integration.status === "complete" || integration.status === "notRequired" ? integration.completedAt ?? tickStartedAt : undefined,
-    integrationStatus: integrationSummary,
-    integrationError: integration.error,
-  };
+  const integrationPatch = buildIntegrationSubagentPatch(integratingSubagent, integration, tickStartedAt);
 
   if (integration.status === "complete" || integration.status === "notRequired") {
     await recordControllerEvent(runtime, node.goalId, "integration.passed", {
@@ -2572,10 +2560,125 @@ async function completeValidatedSubagent(
   result.completed.push(completedNode);
 }
 
+function buildIntegrationSubagentPatch(
+  subagent: GoalSubagentRecord,
+  integration: GoalControllerIntegrationResult,
+  tickStartedAt: string,
+): Partial<GoalSubagentRecord> {
+  return {
+    controllerValidationResults: integration.validationSignals?.length
+      ? [...(subagent.controllerValidationResults ?? []), ...integration.validationSignals]
+      : subagent.controllerValidationResults,
+    integrationSourceBranch: integration.sourceBranch ?? subagent.branch,
+    integrationSourceRef: integration.sourceRef ?? subagent.ref,
+    integrationSourceHead: integration.sourceHead ?? subagent.commitSha,
+    integrationCommitSha: integration.integrationCommitSha,
+    commitSha: integration.sourceHead ?? subagent.commitSha,
+    integrationCompletedAt: integration.status === "complete" || integration.status === "notRequired" ? integration.completedAt ?? tickStartedAt : undefined,
+    integrationStatus: integration.summary ?? integration.error ?? `integration ${integration.status}`,
+    integrationError: integration.error,
+  };
+}
+
+function nodeHasDownstreamDependents(state: GoalOrchestrationState, node: GoalDagNode): boolean {
+  return state.nodes.some((candidate) => candidate.dependencyNodeIds.includes(node.nodeId));
+}
+
 function appendSummary(left: string | undefined, right: string | undefined): string | undefined {
   if (!left) return right;
   if (!right) return left;
   return `${left} ${right}`;
+}
+
+interface DependencyIntegrationEnsureResult {
+  blockReason?: string;
+  integrated: boolean;
+}
+
+async function ensureDependencyIntegrationsBeforeWorkspaceAllocation(
+  runtime: GoalControllerRuntimePort,
+  goalId: string,
+  options: GoalControllerTickOptions,
+  state: GoalOrchestrationState,
+  node: GoalDagNode,
+  tickStartedAt: string,
+): Promise<DependencyIntegrationEnsureResult> {
+  let integrated = false;
+  for (const dependencyId of node.dependencyNodeIds) {
+    const upstreamSubagent = latestSubagentForNode(state.subagents, dependencyId);
+    if (!upstreamSubagent) return { blockReason: `dependency ${dependencyId} has no subagent record`, integrated };
+    if (requiredSubagentIntegrationTerminalSuccess(upstreamSubagent)) continue;
+    if (!hasSubagentBranchOrWorkspaceEvidence(upstreamSubagent)) continue;
+    if (!options.integrator) return { blockReason: `dependency ${dependencyId} requires integration but no controller integrator is configured`, integrated };
+
+    const upstreamNode = state.nodes.find((candidate) => candidate.nodeId === dependencyId);
+    if (!upstreamNode) return { blockReason: `dependency ${dependencyId} has no node record`, integrated };
+
+    await recordControllerEvent(runtime, goalId, "integration.dependencyStarted", {
+      nodeId: upstreamNode.nodeId,
+      downstreamNodeId: node.nodeId,
+      subagentId: upstreamSubagent.subagentId,
+      branch: upstreamSubagent.branch,
+      head: upstreamSubagent.commitSha ?? upstreamSubagent.integrationSourceHead,
+    }, tickStartedAt);
+
+    let integration: GoalControllerIntegrationResult;
+    try {
+      integration = await options.integrator({
+        goalId,
+        node: upstreamNode,
+        subagent: upstreamSubagent,
+        state,
+        tickStartedAt,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await runtime.saveGoalSubagent(withSubagentPatch(upstreamSubagent, {
+        integrationState: "failed",
+        integrationStatus: `dependency integration threw: ${message}`,
+        integrationError: message,
+      }));
+      return { blockReason: `dependency ${dependencyId} integration threw: ${message}`, integrated };
+    }
+
+    const integrationSummary = integration.summary ?? integration.error ?? `integration ${integration.status}`;
+    const integrationPatch = buildIntegrationSubagentPatch(upstreamSubagent, integration, tickStartedAt);
+    if (integration.status === "complete" || integration.status === "notRequired") {
+      await runtime.saveGoalSubagent(withSubagentPatch(upstreamSubagent, {
+        ...integrationPatch,
+        integrationState: integration.status === "complete" ? "complete" : "not-required",
+      }));
+      await recordControllerEvent(runtime, goalId, "integration.dependencyPassed", {
+        nodeId: upstreamNode.nodeId,
+        downstreamNodeId: node.nodeId,
+        subagentId: upstreamSubagent.subagentId,
+        status: integration.status,
+        summary: integrationSummary,
+        sourceHead: integration.sourceHead,
+        integrationCommitSha: integration.integrationCommitSha,
+        signals: integration.validationSignals?.length ?? 0,
+      }, tickStartedAt);
+      integrated = true;
+      continue;
+    }
+
+    await runtime.saveGoalSubagent(withSubagentPatch(upstreamSubagent, {
+      ...integrationPatch,
+      integrationState: "failed",
+    }));
+    await recordControllerEvent(runtime, goalId, "integration.dependencyFailed", {
+      nodeId: upstreamNode.nodeId,
+      downstreamNodeId: node.nodeId,
+      subagentId: upstreamSubagent.subagentId,
+      status: integration.status,
+      summary: integrationSummary,
+      error: integration.error,
+      signals: integration.validationSignals?.length ?? 0,
+    }, tickStartedAt);
+    return { blockReason: `dependency ${dependencyId} integration failed: ${integrationSummary}`, integrated };
+  }
+
+  return { integrated };
 }
 
 async function startReadyNodes(
@@ -2585,7 +2688,7 @@ async function startReadyNodes(
   result: GoalControllerTickResult,
   tickStartedAt: string,
 ): Promise<void> {
-  const state = await runtime.getGoalOrchestrationState(goalId);
+  let state = await runtime.getGoalOrchestrationState(goalId);
   const queue = await runtime.getGoalDagReadyQueue(goalId, options.schedulingPolicy);
   result.ready = queue.ready;
   result.queueBlocked = queue.blocked;
@@ -2594,6 +2697,18 @@ async function startReadyNodes(
   for (const node of queue.ready) {
     if (started >= maxStarts) break;
     if (hasNonTerminalSubagentForNode(state.subagents, node.nodeId)) continue;
+    const upstreamIntegration = await ensureDependencyIntegrationsBeforeWorkspaceAllocation(runtime, goalId, options, state, node, tickStartedAt);
+    if (upstreamIntegration.integrated) state = await runtime.getGoalOrchestrationState(goalId);
+    if (upstreamIntegration.blockReason) {
+      const blockedNode = withNodePatch(node, { status: "blocked", lifecyclePhase: "terminal", lastValidationSummary: upstreamIntegration.blockReason });
+      await runtime.saveGoalDagNode(blockedNode);
+      await recordControllerEvent(runtime, goalId, "node.upstreamIntegrationBlocked", {
+        nodeId: node.nodeId,
+        summary: upstreamIntegration.blockReason,
+      }, tickStartedAt);
+      result.blocked.push(blockedNode);
+      continue;
+    }
     let lifecycleNode = withGoalDagNodeLifecyclePhase(node, "acceptanceDefined", { status: "ready", now: tickStartedAt });
     await runtime.saveGoalDagNode(lifecycleNode);
     lifecycleNode = withGoalDagNodeLifecyclePhase(lifecycleNode, "resourcesCreating", { status: "running", now: tickStartedAt });
@@ -2696,6 +2811,15 @@ function latestSubagentPerNode(subagents: GoalSubagentRecord[]): GoalSubagentRec
     if (!current || subagent.updatedAt > current.updatedAt) latest.set(subagent.nodeId, subagent);
   }
   return [...latest.values()];
+}
+
+function latestSubagentForNode(subagents: GoalSubagentRecord[], nodeId: string): GoalSubagentRecord | undefined {
+  let latest: GoalSubagentRecord | undefined;
+  for (const subagent of subagents) {
+    if (subagent.nodeId !== nodeId) continue;
+    if (!latest || subagent.updatedAt > latest.updatedAt) latest = subagent;
+  }
+  return latest;
 }
 
 function hasNonTerminalSubagentForNode(subagents: GoalSubagentRecord[], nodeId: string): boolean {

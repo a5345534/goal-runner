@@ -93,7 +93,7 @@ function requiredIntegrationIssueReason(subagent: GoalSubagentRecord): string {
   return `required subagent integration is ${subagent.integrationState}`;
 }
 
-function hasSubagentBranchOrWorkspaceEvidence(subagent: GoalSubagentRecord): boolean {
+export function hasSubagentBranchOrWorkspaceEvidence(subagent: GoalSubagentRecord): boolean {
   return Boolean(subagent.workspacePath || subagent.branch || subagent.ref || subagent.commitSha || subagent.integrationSourceHead);
 }
 

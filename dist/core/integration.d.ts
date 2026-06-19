@@ -22,3 +22,4 @@ export declare function subagentIntegrationTerminalSuccess(subagent: GoalSubagen
 export declare function requiredSubagentIntegrationTerminalSuccess(subagent: GoalSubagentRecord): boolean;
 export declare function nodeRequiredIntegrationsSatisfied(node: GoalDagNode, subagents: GoalSubagentRecord[]): boolean;
 export declare function findRequiredSubagentIntegrationIssues(state: GoalOrchestrationState): RequiredSubagentIntegrationIssue[];
+export declare function hasSubagentBranchOrWorkspaceEvidence(subagent: GoalSubagentRecord): boolean;

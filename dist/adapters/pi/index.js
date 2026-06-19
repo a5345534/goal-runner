@@ -13,6 +13,7 @@ import { GoalMonitorController } from "./monitor-ui.js";
 import { PI_GOAL_SESSION_ENTRY_TYPE, PiSessionGoalMirrorStore } from "./session-store.js";
 import { archivePiBackgroundRunnerDirs, filterPiBackgroundRunnersForSubagent, PI_BACKGROUND_RUNNER_DIR_PREFIX, PI_LEGACY_BACKGROUND_RUNNER_DIR_PREFIX, readPiBackgroundRunnerInventory, signalPiBackgroundRunners, } from "./runner-ops.js";
 import { PiHarnessSubagentAdapter } from "./subagent-adapter.js";
+import { createAuditModel, controllerAuditOptions } from "./controller-audit-model.js";
 import { parseGoalWorkspaceFlags, resolveWorkspaceBinding, tokenize, validateExecutionWorkspace, } from "./workspace.js";
 const EXTENSION_MESSAGE_TYPE = "goal-runner";
 const LEGACY_EXTENSION_MESSAGE_TYPE = "agent-goal-runtime";
@@ -580,6 +581,8 @@ function buildPiGoalControllerLoopOptions(ctx, goal, binding, modelRouting = rea
             };
         },
         validator: createControllerValidationRunner(),
+        audit: controllerAuditOptions(),
+        auditModel: createAuditModel(),
         integrator: createNativeGitSubagentBranchIntegrator(workspaceManager, { controllerWorkspacePath: binding.workspace }),
         metadata: { controllerGoalId: goal.goalId },
     };

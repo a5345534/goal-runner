@@ -400,6 +400,173 @@ test("controller treats worktree-merged-pr as an explicit integration gate", asy
     assert.equal(saved?.integrationState, "failed");
     assert.match(saved?.integrationStatus ?? "", /no controller integrator is configured/);
 });
+test("controller integrates upstream nodes with downstream dependents before completing them", async () => {
+    const { runtime } = await runtimeWithPlan([
+        { nodeId: "build", objective: "Build feature" },
+        { nodeId: "docs", objective: "Document feature", dependencyNodeIds: ["build"] },
+    ]);
+    await runtime.saveGoalDagNode({ ...await runtime.getGoalDagNode("goal-1", "build"), status: "running", updatedAt: now });
+    await runtime.saveGoalSubagent(subagent({ workspacePath: "/repo/.worktrees/build", branch: "feat/build" }));
+    const adapter = new FakeSubagentAdapter();
+    adapter.states.set("subagent-1", { status: "selfReportedComplete", selfReportedResult: "done", lastActivityAt: "2026-06-02T00:01:00.000Z" });
+    const integratedNodes = [];
+    const tick = await runtime.runGoalControllerTick("goal-1", {
+        adapter,
+        validator: () => ({ status: "passed", summary: "controller tests passed" }),
+        integrator: (request) => {
+            integratedNodes.push(request.node.nodeId);
+            return {
+                status: "complete",
+                summary: "merged build into controller",
+                sourceBranch: request.subagent.branch,
+                sourceHead: "abc123",
+                integrationCommitSha: "merge123",
+                completedAt: now,
+            };
+        },
+    });
+    assert.deepEqual(integratedNodes, ["build"]);
+    assert.deepEqual(tick.completed.map((item) => item.nodeId), ["build"]);
+    assert.deepEqual(tick.started.map((item) => item.nodeId), ["docs"]);
+    const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
+    assert.equal(saved?.integrationState, "complete");
+    assert.equal(saved?.integrationSourceHead, "abc123");
+    assert.equal(saved?.integrationCommitSha, "merge123");
+    assert.equal(saved?.integrationCompletedAt, now);
+});
+test("controller safety net integrates legacy upstream before allocating downstream workspace", async () => {
+    const { runtime } = await runtimeWithPlan([
+        { nodeId: "build", objective: "Build feature" },
+        { nodeId: "docs", objective: "Document feature", dependencyNodeIds: ["build"] },
+    ]);
+    await runtime.saveGoalDagNode({ ...await runtime.getGoalDagNode("goal-1", "build"), status: "complete", updatedAt: now });
+    await runtime.saveGoalSubagent(subagent({
+        status: "complete",
+        workspacePath: "/repo/.worktrees/build",
+        branch: "feat/build",
+        integrationState: "not-required",
+        integrationStatus: "integration not required",
+    }));
+    const adapter = new FakeSubagentAdapter();
+    const order = [];
+    const tick = await runtime.runGoalControllerTick("goal-1", {
+        adapter,
+        integrator: (request) => {
+            order.push(`integrate:${request.node.nodeId}`);
+            return {
+                status: "complete",
+                summary: "merged legacy build",
+                sourceBranch: request.subagent.branch,
+                sourceHead: "abc123",
+                integrationCommitSha: "merge123",
+                completedAt: now,
+            };
+        },
+        workspaceAllocator: ({ node }) => {
+            order.push(`allocate:${node.nodeId}`);
+            return { subagentId: "subagent-docs", cwd: `/repo/.worktrees/${node.slug}`, branch: `feat/${node.slug}` };
+        },
+    });
+    assert.deepEqual(order, ["integrate:build", "allocate:docs"]);
+    assert.equal(tick.started.length, 1);
+    assert.equal(tick.started[0]?.nodeId, "docs");
+    const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
+    assert.equal(saved?.integrationState, "complete");
+    assert.equal(saved?.integrationCompletedAt, now);
+});
+test("controller safety net integrates shared upstream only once for fan-out dependents", async () => {
+    const { runtime } = await runtimeWithPlan([
+        { nodeId: "build", objective: "Build feature" },
+        { nodeId: "docs", objective: "Document feature", dependencyNodeIds: ["build"] },
+        { nodeId: "tests", objective: "Add tests", dependencyNodeIds: ["build"] },
+    ]);
+    await runtime.saveGoalDagNode({ ...await runtime.getGoalDagNode("goal-1", "build"), status: "complete", updatedAt: now });
+    await runtime.saveGoalSubagent(subagent({
+        status: "complete",
+        workspacePath: "/repo/.worktrees/build",
+        branch: "feat/build",
+        integrationState: "not-required",
+        integrationStatus: "integration not required",
+    }));
+    const adapter = new FakeSubagentAdapter();
+    const integratedNodes = [];
+    const tick = await runtime.runGoalControllerTick("goal-1", {
+        adapter,
+        integrator: (request) => {
+            integratedNodes.push(request.node.nodeId);
+            return {
+                status: "complete",
+                summary: "merged shared build",
+                sourceBranch: request.subagent.branch,
+                sourceHead: "abc123",
+                integrationCommitSha: "merge123",
+                completedAt: now,
+            };
+        },
+        workspaceAllocator: ({ node }) => ({ subagentId: `subagent-${node.nodeId}`, cwd: `/repo/.worktrees/${node.slug}`, branch: `feat/${node.slug}` }),
+    });
+    assert.deepEqual(integratedNodes, ["build"]);
+    assert.deepEqual(tick.started.map((item) => item.nodeId), ["docs", "tests"]);
+});
+test("controller safety net blocks downstream when upstream integration fails", async () => {
+    const { runtime } = await runtimeWithPlan([
+        { nodeId: "build", objective: "Build feature" },
+        { nodeId: "docs", objective: "Document feature", dependencyNodeIds: ["build"] },
+    ]);
+    await runtime.saveGoalDagNode({ ...await runtime.getGoalDagNode("goal-1", "build"), status: "complete", updatedAt: now });
+    await runtime.saveGoalSubagent(subagent({
+        status: "complete",
+        workspacePath: "/repo/.worktrees/build",
+        branch: "feat/build",
+        integrationState: "not-required",
+        integrationStatus: "integration not required",
+    }));
+    const adapter = new FakeSubagentAdapter();
+    let allocated = false;
+    const tick = await runtime.runGoalControllerTick("goal-1", {
+        adapter,
+        integrator: () => ({ status: "failed", summary: "merge conflict in src/core/git-workspace.ts", error: "conflict" }),
+        workspaceAllocator: () => {
+            allocated = true;
+            return { subagentId: "subagent-docs", cwd: "/repo/.worktrees/docs", branch: "feat/docs" };
+        },
+    });
+    assert.equal(allocated, false);
+    assert.equal(adapter.starts.length, 0);
+    assert.equal(tick.blocked.length, 1);
+    assert.equal(tick.blocked[0]?.nodeId, "docs");
+    const savedNode = await runtime.getGoalDagNode("goal-1", "docs");
+    assert.equal(savedNode?.status, "blocked");
+    assert.match(savedNode?.lastValidationSummary ?? "", /dependency build integration failed/);
+    assert.match(savedNode?.lastValidationSummary ?? "", /merge conflict/);
+    const savedSubagent = await runtime.getGoalSubagent("goal-1", "subagent-1");
+    assert.equal(savedSubagent?.integrationState, "failed");
+});
+test("controller safety net skips upstream dependencies already integrated into controller", async () => {
+    const { runtime } = await runtimeWithPlan([
+        { nodeId: "build", objective: "Build feature" },
+        { nodeId: "docs", objective: "Document feature", dependencyNodeIds: ["build"] },
+    ]);
+    await runtime.saveGoalDagNode({ ...await runtime.getGoalDagNode("goal-1", "build"), status: "complete", updatedAt: now });
+    await runtime.saveGoalSubagent(subagent({
+        status: "complete",
+        workspacePath: "/repo/.worktrees/build",
+        branch: "feat/build",
+        integrationState: "complete",
+        integrationCompletedAt: now,
+    }));
+    const adapter = new FakeSubagentAdapter();
+    const tick = await runtime.runGoalControllerTick("goal-1", {
+        adapter,
+        integrator: () => {
+            throw new Error("already-integrated dependency should not be integrated again");
+        },
+        workspaceAllocator: ({ node }) => ({ subagentId: "subagent-docs", cwd: `/repo/.worktrees/${node.slug}`, branch: `feat/${node.slug}` }),
+    });
+    assert.equal(tick.started.length, 1);
+    assert.equal(tick.started[0]?.nodeId, "docs");
+    assert.equal(adapter.starts.length, 1);
+});
 test("controller validator failure can send a follow-up prompt instead of completing the node", async () => {
     const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
     await runtime.saveGoalDagNode({ ...await runtime.getGoalDagNode("goal-1", "build"), status: "running", updatedAt: now });

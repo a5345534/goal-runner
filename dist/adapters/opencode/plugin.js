@@ -39,6 +39,7 @@ import { isOpencodeCompletionAuditEnabled, opencodeHeuristicCompletionAudit } fr
 import { buildOpencodeBlockedAuditEvidence } from "./blocked-audit.js";
 import { parseOpencodeGoalCommand, formatOpencodeGoalToolDescription, stripSlashPrefix, OPENCODE_GOAL_TOOL, OPENCODE_GOAL_SLASH } from "./slash-command.js";
 import { modelArgFromOpencodeContext, readOpencodeModelRoutingConfig, resolveOpencodeControllerModel, selectOpencodeSubagentModel } from "./model-routing.js";
+import { createAuditModel, controllerAuditOptions } from "../pi/controller-audit-model.js";
 import { readOpencodeGoalMonitorSnapshot } from "./monitor-ui.js";
 import { finalizeOpencodeGoalFromDagTerminalState, formatOpencodeCloseoutDiagnostics } from "./closeout.js";
 const MEANINGFUL_PROGRESS_TOOL_SET = new Set(["write", "edit", "bash", "read", "grep", "find", "ls"]);
@@ -518,6 +519,8 @@ async function startOpencodeOrchestratedGoal(ctx, input, sessionID, command, bin
             },
         }),
         validator: createControllerValidationRunner(),
+        audit: controllerAuditOptions(),
+        auditModel: createAuditModel(),
         integrator: createNativeGitSubagentBranchIntegrator(workspaceManager, { controllerWorkspacePath: binding.workspace }),
         metadata: {
             controllerGoalId: created.goal.goalId,
@@ -586,6 +589,8 @@ async function runOpencodeControllerPoll(ctx, input, goal, binding) {
             };
         },
         validator: createControllerValidationRunner(),
+        audit: controllerAuditOptions(),
+        auditModel: createAuditModel(),
         integrator: createNativeGitSubagentBranchIntegrator(workspaceManager, { controllerWorkspacePath: binding.workspace }),
         metadata: { controllerGoalId: goal.goalId },
     });

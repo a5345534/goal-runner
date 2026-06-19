@@ -73,7 +73,7 @@ function requiredIntegrationIssueReason(subagent) {
         return subagent.integrationError ?? subagent.integrationStatus ?? "required subagent integration failed";
     return `required subagent integration is ${subagent.integrationState}`;
 }
-function hasSubagentBranchOrWorkspaceEvidence(subagent) {
+export function hasSubagentBranchOrWorkspaceEvidence(subagent) {
     return Boolean(subagent.workspacePath || subagent.branch || subagent.ref || subagent.commitSha || subagent.integrationSourceHead);
 }
 function isIntegrationCandidateSubagent(subagent) {
