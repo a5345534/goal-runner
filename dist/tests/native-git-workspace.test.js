@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cleanupTerminalSubagentWorkspaces, createNativeGitSubagentBranchIntegrator, createNativeGitSubagentWorkspaceAllocator, findGitRepositoryRoot, GoalRuntime, MemoryGoalStore, NativeGitWorkspaceManager, slugForGoal, slugForGoalSubagent, } from "../core/index.js";
+import { cleanupSubagentWorkspace, cleanupTerminalSubagentWorkspaces, createNativeGitSubagentBranchIntegrator, createNativeGitSubagentWorkspaceAllocator, findGitRepositoryRoot, GoalRuntime, MemoryGoalStore, NativeGitWorkspaceManager, slugForGoal, slugForGoalSubagent, } from "../core/index.js";
 function git(cwd, args) {
     return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
@@ -303,6 +303,131 @@ test("native git cleanup policy removes completed subagent worktrees and preserv
         assert.throws(() => git(repo, ["show-ref", "--verify", `refs/heads/${complete.branch}`]));
         assert.equal(git(blocked.worktreePath, ["branch", "--show-current"]), blocked.branch);
         manager.cleanupWorkspace({ repoRoot: repo, worktreePath: blocked.worktreePath, branch: blocked.branch, force: true });
+    }
+    finally {
+        rmSync(repo, { recursive: true, force: true });
+    }
+});
+test("native git cleanup force-deletes only after integration and promotion pass", () => {
+    const repo = createRepo();
+    try {
+        const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+        const allocation = manager.allocateSubagentWorkspace({ invocationCwd: repo, goalId: "goal-cleanup", nodeId: "complete-node" });
+        writeFileSync(join(allocation.worktreePath, "scratch.txt"), "untracked scratch\n");
+        const sourceHead = git(allocation.worktreePath, ["rev-parse", "--verify", "HEAD"]);
+        const subagent = {
+            goalId: "goal-cleanup",
+            nodeId: "complete-node",
+            subagentId: allocation.subagentId,
+            harnessAdapterId: "fake",
+            workspacePath: allocation.worktreePath,
+            branch: allocation.branch,
+            status: "complete",
+            prompts: [],
+            integrationState: "complete",
+            integrationSourceHead: sourceHead,
+            createdAt: "2026-06-02T00:00:00.000Z",
+            updatedAt: "2026-06-02T00:00:00.000Z",
+        };
+        const result = cleanupSubagentWorkspace(manager, subagent, { force: true, promotionStatus: "complete", verifySourceReachable: true });
+        assert.equal(result.action, "removed");
+        assert.equal(result.forceAuthorized, true);
+        assert.equal(result.forceReason, "force-delete authorized");
+        assert.equal(result.reachabilityVerified, true);
+        assert.equal(existsSync(allocation.worktreePath), false);
+        assert.throws(() => git(repo, ["show-ref", "--verify", `refs/heads/${allocation.branch}`]));
+    }
+    finally {
+        rmSync(repo, { recursive: true, force: true });
+    }
+});
+test("native git cleanup refuses force delete without integrator-confirmed integration", () => {
+    const repo = createRepo();
+    try {
+        const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+        const allocation = manager.allocateSubagentWorkspace({ invocationCwd: repo, goalId: "goal-cleanup", nodeId: "legacy-not-required" });
+        const subagent = {
+            goalId: "goal-cleanup",
+            nodeId: "legacy-not-required",
+            subagentId: allocation.subagentId,
+            harnessAdapterId: "fake",
+            workspacePath: allocation.worktreePath,
+            branch: allocation.branch,
+            status: "complete",
+            prompts: [],
+            integrationState: "not-required",
+            integrationStatus: "integration not required",
+            createdAt: "2026-06-02T00:00:00.000Z",
+            updatedAt: "2026-06-02T00:00:00.000Z",
+        };
+        const result = cleanupSubagentWorkspace(manager, subagent, { force: true, promotionStatus: "complete" });
+        assert.equal(result.action, "removed");
+        assert.equal(result.forceAuthorized, false);
+        assert.match(result.forceReason ?? "", /without terminal integration state/);
+        assert.equal(existsSync(allocation.worktreePath), false);
+        assert.throws(() => git(repo, ["show-ref", "--verify", `refs/heads/${allocation.branch}`]));
+    }
+    finally {
+        rmSync(repo, { recursive: true, force: true });
+    }
+});
+test("native git cleanup preserves force delete safety when promotion is blocked", () => {
+    const repo = createRepo();
+    try {
+        const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+        const allocation = manager.allocateSubagentWorkspace({ invocationCwd: repo, goalId: "goal-cleanup", nodeId: "blocked-promotion" });
+        const sourceHead = git(allocation.worktreePath, ["rev-parse", "--verify", "HEAD"]);
+        const subagent = {
+            goalId: "goal-cleanup",
+            nodeId: "blocked-promotion",
+            subagentId: allocation.subagentId,
+            harnessAdapterId: "fake",
+            workspacePath: allocation.worktreePath,
+            branch: allocation.branch,
+            status: "complete",
+            prompts: [],
+            integrationState: "complete",
+            integrationSourceHead: sourceHead,
+            createdAt: "2026-06-02T00:00:00.000Z",
+            updatedAt: "2026-06-02T00:00:00.000Z",
+        };
+        const result = cleanupSubagentWorkspace(manager, subagent, { force: true, promotionStatus: "blocked" });
+        assert.equal(result.action, "removed");
+        assert.equal(result.forceAuthorized, false);
+        assert.match(result.forceReason ?? "", /promotion passed/);
+        assert.equal(existsSync(allocation.worktreePath), false);
+        assert.throws(() => git(repo, ["show-ref", "--verify", `refs/heads/${allocation.branch}`]));
+    }
+    finally {
+        rmSync(repo, { recursive: true, force: true });
+    }
+});
+test("native git cleanup blocks force delete when source SHA is unreachable", () => {
+    const repo = createRepo();
+    try {
+        const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+        const allocation = manager.allocateSubagentWorkspace({ invocationCwd: repo, goalId: "goal-cleanup", nodeId: "unreachable-source" });
+        const subagent = {
+            goalId: "goal-cleanup",
+            nodeId: "unreachable-source",
+            subagentId: allocation.subagentId,
+            harnessAdapterId: "fake",
+            workspacePath: allocation.worktreePath,
+            branch: allocation.branch,
+            status: "complete",
+            prompts: [],
+            integrationState: "complete",
+            integrationSourceHead: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            createdAt: "2026-06-02T00:00:00.000Z",
+            updatedAt: "2026-06-02T00:00:00.000Z",
+        };
+        const result = cleanupSubagentWorkspace(manager, subagent, { force: true, promotionStatus: "complete", verifySourceReachable: true });
+        assert.equal(result.action, "error");
+        assert.equal(result.forceAuthorized, true);
+        assert.match(result.error ?? "", /not reachable/);
+        assert.equal(existsSync(allocation.worktreePath), true);
+        assert.doesNotThrow(() => git(repo, ["show-ref", "--verify", `refs/heads/${allocation.branch}`]));
+        manager.cleanupWorkspace({ repoRoot: repo, worktreePath: allocation.worktreePath, branch: allocation.branch, force: true });
     }
     finally {
         rmSync(repo, { recursive: true, force: true });

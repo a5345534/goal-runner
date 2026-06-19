@@ -71,6 +71,13 @@ export interface NativeGitWorkspaceCleanupRequest {
     branch?: string;
     repoRoot?: string;
     force?: boolean;
+    /** Commit HEAD to verify before force-deleting the subagent branch/worktree. */
+    integrationSourceHead?: string;
+    /** Verify that integrationSourceHead is still referenced by a local branch before force-deleting. */
+    verifyReachable?: boolean;
+}
+interface NativeGitWorkspaceCleanupWorkspaceResult {
+    reachabilityVerified?: boolean;
 }
 export type NativeGitSubagentCleanupAction = "remove" | "preserve";
 export interface NativeGitSubagentCleanupPolicy {
@@ -82,6 +89,10 @@ export interface NativeGitSubagentCleanupPolicy {
     failed?: NativeGitSubagentCleanupAction;
     /** Force-remove worktrees and branches when cleanup action is remove. Defaults false. */
     force?: boolean;
+    /** Require promotion to a terminal-success status before force deletion. */
+    promotionStatus?: NativeGitControllerBranchPromotionStatus;
+    /** Verify that the subagent source commit is still reachable before force deletion. */
+    verifySourceReachable?: boolean;
 }
 export interface NativeGitSubagentBranchIntegrationRequest {
     controllerWorkspacePath: string;
@@ -140,6 +151,9 @@ export interface NativeGitSubagentCleanupResult {
     workspacePath?: string;
     branch?: string;
     error?: string;
+    forceAuthorized?: boolean;
+    forceReason?: string;
+    reachabilityVerified?: boolean;
 }
 export declare class NativeGitWorkspaceManager {
     private readonly options;
@@ -147,7 +161,7 @@ export declare class NativeGitWorkspaceManager {
     allocateControllerWorkspace(request: ControllerWorkspaceAllocationRequest): NativeGitControllerWorkspaceAllocation;
     allocateSubagentWorkspace(request: NativeGitSubagentWorkspaceAllocationRequest): NativeGitSubagentWorkspaceAllocation;
     private ensureBoundSubagentWorkspace;
-    cleanupWorkspace(request: NativeGitWorkspaceCleanupRequest): void;
+    cleanupWorkspace(request: NativeGitWorkspaceCleanupRequest): NativeGitWorkspaceCleanupWorkspaceResult;
     integrateSubagentBranch(request: NativeGitSubagentBranchIntegrationRequest): NativeGitSubagentBranchIntegrationResult;
     promoteControllerBranch(request: NativeGitControllerBranchPromotionRequest): NativeGitControllerBranchPromotionResult;
     resolveBaseRef(repoRoot: string, overrideBaseRef?: string): string;
@@ -161,3 +175,4 @@ export declare function cleanupSubagentWorkspace(manager: NativeGitWorkspaceMana
 export declare function findGitRepositoryRoot(startPath: string): string | undefined;
 export declare function slugForGoal(goalId: string, objective: string): string;
 export declare function slugForGoalSubagent(goalId: string, nodeSlugOrId: string, nodeObjective?: string): string;
+export {};

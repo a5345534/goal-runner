@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { requiredSubagentIntegrationTerminalSuccess } from "./integration.js";
 export class NativeGitWorkspaceManager {
     options;
     constructor(options = {}) {
@@ -141,13 +142,27 @@ export class NativeGitWorkspaceManager {
     }
     cleanupWorkspace(request) {
         const repoRoot = request.repoRoot ?? findGitCommonRepositoryRoot(request.worktreePath) ?? findGitRepositoryRoot(request.worktreePath) ?? process.cwd();
-        const forceFlag = request.force ? "--force" : undefined;
-        const removeArgs = ["worktree", "remove", ...(forceFlag ? [forceFlag] : []), request.worktreePath];
-        git(repoRoot, removeArgs);
-        if (request.branch) {
-            const deleteArgs = ["branch", request.force ? "-D" : "-d", request.branch];
-            git(repoRoot, deleteArgs);
+        let reachabilityVerified;
+        if (request.force && request.verifyReachable) {
+            if (!request.integrationSourceHead) {
+                throw new Error("cannot force-delete worktree because integrationSourceHead is required for reachability verification");
+            }
+            reachabilityVerified = branchContainsCommit(repoRoot, request.integrationSourceHead);
+            if (!reachabilityVerified) {
+                throw new Error(`cannot force-delete worktree for ${request.branch ?? "<unknown branch>"}: integration source ${shortSha(request.integrationSourceHead)} is not reachable from any local branch`);
+            }
         }
+        if (request.force) {
+            git(request.worktreePath, ["clean", "-fd"]);
+            git(repoRoot, ["worktree", "remove", "--force", request.worktreePath]);
+        }
+        else {
+            git(repoRoot, ["worktree", "remove", request.worktreePath]);
+        }
+        if (request.branch) {
+            git(repoRoot, ["branch", request.force ? "-D" : "-d", request.branch]);
+        }
+        return { reachabilityVerified };
     }
     integrateSubagentBranch(request) {
         const controllerWorkspacePath = resolve(request.controllerWorkspacePath);
@@ -434,26 +449,68 @@ export function cleanupSubagentWorkspace(manager, subagent, policy = {}) {
         return cleanupResult(subagent, "skipped", "subagent has no workspacePath");
     }
     const decision = cleanupDecision(subagent, policy);
-    if (decision === "preserve")
-        return cleanupResult(subagent, "preserved", `policy preserves ${subagent.status} workspaces`);
+    if (decision.action === "preserve") {
+        return cleanupResult(subagent, "preserved", `policy preserves ${subagent.status} workspaces`, undefined, decision.forceAuthorized, decision.forceReason);
+    }
     try {
-        manager.cleanupWorkspace({ worktreePath: subagent.workspacePath, branch: subagent.branch, force: policy.force });
-        return cleanupResult(subagent, "removed");
+        const result = manager.cleanupWorkspace({
+            worktreePath: subagent.workspacePath,
+            branch: subagent.branch,
+            force: decision.forceAuthorized,
+            integrationSourceHead: subagent.integrationSourceHead,
+            verifyReachable: decision.forceAuthorized && policy.verifySourceReachable,
+        });
+        return cleanupResult(subagent, "removed", undefined, undefined, decision.forceAuthorized, decision.forceReason, result.reachabilityVerified);
     }
     catch (error) {
-        return cleanupResult(subagent, "error", undefined, error instanceof Error ? error.message : String(error));
+        return cleanupResult(subagent, "error", undefined, error instanceof Error ? error.message : String(error), decision.forceAuthorized, decision.forceReason);
     }
 }
 function cleanupDecision(subagent, policy) {
+    let action;
     if (subagent.status === "complete")
-        return policy.completed ?? "remove";
-    if (subagent.status === "blocked")
-        return policy.blocked ?? "preserve";
-    if (subagent.status === "failed")
-        return policy.failed ?? "preserve";
-    return "preserve";
+        action = policy.completed ?? "remove";
+    else if (subagent.status === "blocked")
+        action = policy.blocked ?? "preserve";
+    else if (subagent.status === "failed")
+        action = policy.failed ?? "preserve";
+    else
+        action = "preserve";
+    if (action !== "remove") {
+        return {
+            action,
+            forceAuthorized: false,
+            forceReason: "force deletion disabled because cleanup action is preserved",
+        };
+    }
+    if (!policy.force) {
+        return {
+            action,
+            forceAuthorized: false,
+            forceReason: "force deletion disabled by policy",
+        };
+    }
+    if (!requiredSubagentIntegrationTerminalSuccess(subagent)) {
+        return {
+            action,
+            forceAuthorized: false,
+            forceReason: `cannot force-delete without terminal integration state (got ${subagent.integrationState ?? "undefined"})`,
+        };
+    }
+    if (policy.promotionStatus !== undefined && policy.promotionStatus !== "complete" && policy.promotionStatus !== "notRequired") {
+        return {
+            action,
+            forceAuthorized: false,
+            forceReason: `cannot force-delete unless promotion passed (got ${policy.promotionStatus})`,
+        };
+    }
+    return {
+        action,
+        forceAuthorized: true,
+        forceReason: "force-delete authorized",
+    };
 }
-function cleanupResult(subagent, action, reason, error) {
+function cleanupResult(subagent, action, reason, error, forceAuthorized, forceReason, reachabilityVerified) {
     return {
         subagentId: subagent.subagentId,
         nodeId: subagent.nodeId,
@@ -463,6 +520,9 @@ function cleanupResult(subagent, action, reason, error) {
         workspacePath: subagent.workspacePath,
         branch: subagent.branch,
         error,
+        forceAuthorized,
+        forceReason,
+        reachabilityVerified,
     };
 }
 function resolveSubagentIntegrationSource(controllerWorkspacePath, subagent) {
@@ -732,6 +792,14 @@ function gitIsAncestor(cwd, ancestor, descendant) {
     try {
         execFileSync("git", ["merge-base", "--is-ancestor", ancestor, descendant], { cwd, stdio: "ignore" });
         return true;
+    }
+    catch {
+        return false;
+    }
+}
+function branchContainsCommit(cwd, commit) {
+    try {
+        return git(cwd, ["branch", "--contains", commit]).trim().length > 0;
     }
     catch {
         return false;
