@@ -1,5 +1,14 @@
 node_modules/
 dist/
+!dist/
+dist/*
+!dist/adapters/
+dist/adapters/*
+!dist/adapters/pi/
+dist/adapters/pi/*
+!dist/adapters/pi/controller-audit-model.d.ts
+!dist/adapters/pi/controller-audit-model.js
+!dist/adapters/pi/controller-audit-model.js.map
 *.tgz
 *.log
 .DS_Store
