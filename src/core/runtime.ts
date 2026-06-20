@@ -57,6 +57,9 @@ import type {
   GoalTurnStopReason,
   HarnessState,
   HiddenGoalTurnResult,
+  QualityEvidenceEvaluation,
+  QualityGateOutcome,
+  QualityProfileState,
   TokenUsageSnapshot,
   TurnContext,
 } from "./types.js";
@@ -148,6 +151,198 @@ export class GoalRuntime {
 
   async pruneLedgerEvents(goalId: string, options: { maxEvents: number }): Promise<number> {
     return this.store.pruneLedgerEvents?.(goalId, options) ?? 0;
+  }
+
+  // --- Quality profile surface methods ---
+
+  /**
+   * Initialize or update a quality profile state on a DAG node.
+   * Persists the profile name from the node's validation contract.
+   */
+  async applyQualityProfile(goalId: string, nodeId: string, profile?: string, options: { at?: Date | string } = {}): Promise<GoalDagNode> {
+    const node = await this.store.getGoalDagNode(goalId, nodeId);
+    if (!node) throw new Error(`DAG node not found: ${goalId}/${nodeId}`);
+    const goal = await this.getGoalById(goalId);
+    const at = options.at === undefined ? this.nowIso() : typeof options.at === "string" ? options.at : options.at.toISOString();
+
+    const qp: QualityProfileState = node.qualityProfileState ?? {
+      evidenceEvaluations: [],
+      linkedAuditNodeIds: [],
+      gateOutcomes: [],
+    };
+    qp.profile = profile ?? node.validation?.profile;
+
+    const updated: GoalDagNode = {
+      ...node,
+      qualityProfileState: qp,
+      updatedAt: at,
+    };
+    await this.store.saveGoalDagNode(updated);
+
+    if (goal) {
+      await this.appendLedger("quality_profile_applied", goal.sessionKey, goalId, {
+        nodeId,
+        profile: qp.profile,
+      });
+    }
+    return updated;
+  }
+
+  /**
+   * Record a quality profile prompt injection event for a node.
+   */
+  async recordQualityPromptInjected(goalId: string, nodeId: string, summary: string, options: { at?: Date | string } = {}): Promise<GoalDagNode> {
+    const node = await this.store.getGoalDagNode(goalId, nodeId);
+    if (!node) throw new Error(`DAG node not found: ${goalId}/${nodeId}`);
+    const goal = await this.getGoalById(goalId);
+    const at = options.at === undefined ? this.nowIso() : typeof options.at === "string" ? options.at : options.at.toISOString();
+
+    const qp: QualityProfileState = node.qualityProfileState ?? {
+      evidenceEvaluations: [],
+      linkedAuditNodeIds: [],
+      gateOutcomes: [],
+    };
+    qp.promptInjectedAt = at;
+    qp.promptInjectionSummary = summary;
+
+    const updated: GoalDagNode = {
+      ...node,
+      qualityProfileState: qp,
+      updatedAt: at,
+    };
+    await this.store.saveGoalDagNode(updated);
+
+    if (goal) {
+      await this.appendLedger("quality_prompt_injected", goal.sessionKey, goalId, {
+        nodeId,
+        summary,
+      });
+    }
+    return updated;
+  }
+
+  /**
+   * Record an evidence evaluation outcome for a node's quality profile.
+   */
+  async recordQualityEvidenceEvaluated(
+    goalId: string,
+    nodeId: string,
+    evaluation: QualityEvidenceEvaluation,
+  ): Promise<GoalDagNode> {
+    const node = await this.store.getGoalDagNode(goalId, nodeId);
+    if (!node) throw new Error(`DAG node not found: ${goalId}/${nodeId}`);
+    const goal = await this.getGoalById(goalId);
+
+    const qp: QualityProfileState = node.qualityProfileState ?? {
+      evidenceEvaluations: [],
+      linkedAuditNodeIds: [],
+      gateOutcomes: [],
+    };
+    qp.evidenceEvaluations = [...qp.evidenceEvaluations, evaluation];
+
+    const updated: GoalDagNode = {
+      ...node,
+      qualityProfileState: qp,
+      updatedAt: evaluation.at,
+    };
+    await this.store.saveGoalDagNode(updated);
+
+    if (goal) {
+      await this.appendLedger("quality_evidence_evaluated", goal.sessionKey, goalId, {
+        nodeId,
+        requirement: evaluation.requirement,
+        passed: evaluation.passed,
+        summary: evaluation.summary,
+      });
+    }
+    return updated;
+  }
+
+  /**
+   * Record a gate pass/fail outcome for a node's quality profile.
+   */
+  async recordQualityGateOutcome(
+    goalId: string,
+    nodeId: string,
+    outcome: QualityGateOutcome,
+  ): Promise<GoalDagNode> {
+    const node = await this.store.getGoalDagNode(goalId, nodeId);
+    if (!node) throw new Error(`DAG node not found: ${goalId}/${nodeId}`);
+    const goal = await this.getGoalById(goalId);
+
+    const qp: QualityProfileState = node.qualityProfileState ?? {
+      evidenceEvaluations: [],
+      linkedAuditNodeIds: [],
+      gateOutcomes: [],
+    };
+    // Replace any existing outcome for the same gate.
+    const existingIdx = qp.gateOutcomes.findIndex((g) => g.gateName === outcome.gateName);
+    if (existingIdx >= 0) {
+      qp.gateOutcomes = [
+        ...qp.gateOutcomes.slice(0, existingIdx),
+        outcome,
+        ...qp.gateOutcomes.slice(existingIdx + 1),
+      ];
+    } else {
+      qp.gateOutcomes = [...qp.gateOutcomes, outcome];
+    }
+
+    const updated: GoalDagNode = {
+      ...node,
+      qualityProfileState: qp,
+      updatedAt: outcome.at,
+    };
+    await this.store.saveGoalDagNode(updated);
+
+    if (goal) {
+      const eventType = outcome.passed ? "quality_gate_passed" : "quality_gate_failed";
+      await this.appendLedger(eventType, goal.sessionKey, goalId, {
+        nodeId,
+        gateName: outcome.gateName,
+        passed: outcome.passed,
+        summary: outcome.summary,
+      });
+    }
+    return updated;
+  }
+
+  /**
+   * Link an audit node to a target node's quality profile.
+   */
+  async recordQualityAuditNodeLinked(
+    goalId: string,
+    targetNodeId: string,
+    auditNodeId: string,
+    options: { at?: Date | string } = {},
+  ): Promise<GoalDagNode> {
+    const node = await this.store.getGoalDagNode(goalId, targetNodeId);
+    if (!node) throw new Error(`DAG node not found: ${goalId}/${targetNodeId}`);
+    const goal = await this.getGoalById(goalId);
+    const at = options.at === undefined ? this.nowIso() : typeof options.at === "string" ? options.at : options.at.toISOString();
+
+    const qp: QualityProfileState = node.qualityProfileState ?? {
+      evidenceEvaluations: [],
+      linkedAuditNodeIds: [],
+      gateOutcomes: [],
+    };
+    if (!qp.linkedAuditNodeIds.includes(auditNodeId)) {
+      qp.linkedAuditNodeIds = [...qp.linkedAuditNodeIds, auditNodeId];
+    }
+
+    const updated: GoalDagNode = {
+      ...node,
+      qualityProfileState: qp,
+      updatedAt: at,
+    };
+    await this.store.saveGoalDagNode(updated);
+
+    if (goal) {
+      await this.appendLedger("quality_audit_node_linked", goal.sessionKey, goalId, {
+        nodeId: targetNodeId,
+        auditNodeId,
+      });
+    }
+    return updated;
   }
 
   // --- Controller audit port methods (GoalControllerRuntimePort) ---

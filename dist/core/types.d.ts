@@ -1,4 +1,41 @@
+import type { GoalQualityProfile } from "./quality-profiles.js";
+import type { GoalValidationEvidenceRequirement } from "./validation-evidence.js";
 import type { GoalControllerAuditLedgerEventType } from "./controller-audit.js";
+/** Quality profile ledger event types for durable recording of quality profile lifecycle. */
+export declare const QUALITY_PROFILE_LEDGER_EVENT_TYPES: readonly ["quality_profile_applied", "quality_prompt_injected", "quality_evidence_evaluated", "quality_gate_passed", "quality_gate_failed", "quality_audit_node_linked"];
+export type QualityProfileLedgerEventType = (typeof QUALITY_PROFILE_LEDGER_EVENT_TYPES)[number];
+/** Quality gate outcome associated with a completion gate on a DAG node. */
+export interface QualityGateOutcome {
+    gateName: string;
+    passed: boolean;
+    at: string;
+    evidence?: Record<string, unknown>;
+    summary?: string;
+}
+/** Quality profile runtime state attached to a DAG node. */
+export interface QualityProfileState {
+    /** Profile name from validation contract, e.g. "openspec", "strict". */
+    profile?: string;
+    /** Active quality profiles resolved from DAG defaults + node-level config. */
+    profiles?: GoalQualityProfile[];
+    /** Prompt injection recorded for this node. */
+    promptInjectedAt?: string;
+    promptInjectionSummary?: string;
+    /** Evidence evaluation summaries recorded for this node. */
+    evidenceEvaluations: QualityEvidenceEvaluation[];
+    /** Linked audit node IDs (nodes that audit this node's outputs). */
+    linkedAuditNodeIds: string[];
+    /** Gate pass/fail outcomes indexed by gate name. */
+    gateOutcomes: QualityGateOutcome[];
+}
+/** An evidence evaluation record for quality tracking. */
+export interface QualityEvidenceEvaluation {
+    at: string;
+    requirement: GoalValidationEvidenceRequirement;
+    passed: boolean;
+    summary?: string;
+    evidence?: Record<string, unknown>;
+}
 export declare const GOAL_STATUSES: readonly ["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"];
 export type GoalStatus = (typeof GOAL_STATUSES)[number];
 export type GoalStatusInput = GoalStatus | "usage_limited" | "budget_limited";
@@ -71,7 +108,7 @@ export interface GoalSteeringContextRequest {
     kind: "budget_limit" | "objective_updated";
     renderedPrompt: string;
 }
-export type GoalLedgerEventType = "goal_created" | "goal_replaced" | "goal_edited" | "goal_paused" | "goal_resumed" | "goal_cleared" | "turn_started" | "turn_finished" | "meaningful_progress" | "no_progress_continuation_suppressed" | "continuation_requested" | "continuation_started" | "continuation_already_started" | "continuation_skipped" | "continuation_retryable_failure" | "continuation_fatal_failure" | "completion_requested" | "completion_audit_result" | "controller_event" | "goal_completed" | "goal_blocked" | "goal_budget_limited" | "goal_usage_limited" | GoalControllerAuditLedgerEventType;
+export type GoalLedgerEventType = "goal_created" | "goal_replaced" | "goal_edited" | "goal_paused" | "goal_resumed" | "goal_cleared" | "turn_started" | "turn_finished" | "meaningful_progress" | "no_progress_continuation_suppressed" | "continuation_requested" | "continuation_started" | "continuation_already_started" | "continuation_skipped" | "continuation_retryable_failure" | "continuation_fatal_failure" | "completion_requested" | "completion_audit_result" | "controller_event" | "goal_completed" | "goal_blocked" | "goal_budget_limited" | "goal_usage_limited" | QualityProfileLedgerEventType | GoalControllerAuditLedgerEventType;
 export interface GoalLedgerEvent {
     eventId?: string;
     sessionKey: string;
@@ -193,6 +230,24 @@ export interface GoalSummary {
     controllerModelScenario?: string;
     controllerModelArg?: string;
     legacySessionBound?: boolean;
+    /** Summary of quality profile states across DAG nodes for status/monitor views. */
+    qualityProfileSummary?: QualityProfileSummary;
+}
+export interface QualityProfileSummary {
+    /** Total DAG nodes with a quality profile applied. */
+    nodesWithProfile: number;
+    /** Profile name → count of nodes using it. */
+    profileCounts: Record<string, number>;
+    /** Count of gates that have passed. */
+    gatesPassed: number;
+    /** Count of gates that have failed. */
+    gatesFailed: number;
+    /** Count of evidence evaluations that passed. */
+    evidencePassed: number;
+    /** Count of evidence evaluations that failed. */
+    evidenceFailed: number;
+    /** Whether any node has a quality profile at all. */
+    hasQualityProfile: boolean;
 }
 export type GoalDagNodeStatus = "planned" | "ready" | "running" | "selfReportedComplete" | "controllerValidating" | "needsFollowup" | "complete" | "blocked" | "failed" | "superseded";
 export type GoalDagNodeLifecyclePhase = "acceptanceDefined" | "resourcesCreating" | "resourcesReady" | "runnerStarting" | "runnerActive" | "controllerJudging" | "validating" | "integrating" | "terminal";
@@ -297,6 +352,10 @@ export interface GoalDagNode {
     /** Last controller recovery decision recorded for abnormal observations. */
     lastRecoveryDecision?: GoalRecoveryDecisionRecord;
     lastValidationSummary?: string;
+    /** Resolved quality profiles from DAG defaults and node-level config. */
+    qualityProfiles?: GoalQualityProfile[];
+    /** Quality profile runtime state attached to this DAG node. */
+    qualityProfileState?: QualityProfileState;
     createdAt: string;
     updatedAt: string;
 }

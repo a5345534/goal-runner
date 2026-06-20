@@ -13,6 +13,7 @@
 // from the same goal.
 
 import { promptIncludesExecutorGuardrails, renderExecutorGuardrailLines } from "../../core/executor-prompt.js";
+import { renderQualityProfileEnvelope } from "../../core/prompts.js";
 import type {
   GoalSubagentRecord,
   HarnessSubagentAbortRequest,
@@ -156,6 +157,7 @@ export function renderOpencodeSubagentInitialPrompt(request: HarnessSubagentStar
     request.node.expectedOutputs.length ? `Expected outputs: ${request.node.expectedOutputs.join(", ")}` : undefined,
     request.node.validators.length ? `Validators: ${request.node.validators.join(", ")}` : undefined,
     "",
+    ...renderQualityProfileEnvelope(request.node),
     ...(promptIncludesExecutorGuardrails(request.initialPrompt) ? [] : renderExecutorGuardrailLines(request.node)),
     "",
     request.initialPrompt,

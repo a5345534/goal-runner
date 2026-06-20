@@ -1,6 +1,6 @@
 import { createGoalDagNodes } from "./dag-scheduler.js";
 import { selectModelScenarioForNode } from "./model-routing.js";
-import { parseGoalDagFileContent, parseGoalDagFileDocument, } from "goal-contract";
+import { parseGoalDagFileContent, parseGoalDagFileDocument, resolveGoalQualityProfiles, } from "goal-contract";
 export { parseGoalDagFileContent, parseGoalDagFileDocument };
 const DEFAULT_MAX_NODES = 20;
 export function planGoalDagFromFileDocument(goalId, document, options = {}) {
@@ -14,6 +14,7 @@ export function planGoalDagFromFileDocument(goalId, document, options = {}) {
     const defaultConflicts = document.defaults?.conflicts;
     const defaultModelScenario = document.defaults?.modelScenario;
     const defaultThinkingLevel = document.defaults?.thinkingLevel;
+    const defaultQualityProfiles = document.defaults?.qualityProfiles;
     return {
         goalId,
         nodeInputs: document.nodes.map((node) => {
@@ -31,6 +32,7 @@ export function planGoalDagFromFileDocument(goalId, document, options = {}) {
                 modelScenario: node.modelScenario ?? defaultModelScenario,
             }, document.modelRouting);
             const modelScenario = node.modelScenario ?? defaultModelScenario ?? selection.scenario;
+            const qualityProfiles = resolveGoalQualityProfiles(defaultQualityProfiles ? { qualityProfiles: defaultQualityProfiles } : undefined, node.qualityProfiles ? { qualityProfiles: node.qualityProfiles } : undefined);
             return {
                 nodeId: node.id,
                 slug: node.id,
@@ -48,6 +50,7 @@ export function planGoalDagFromFileDocument(goalId, document, options = {}) {
                 modelArg: selection.model,
                 thinkingLevel: node.thinkingLevel ?? defaultThinkingLevel,
                 conflictHints,
+                qualityProfiles: qualityProfiles.length > 0 ? [...qualityProfiles] : undefined,
                 completionGates: [...(node.completionGates ?? defaultCompletionGates ?? ["controller-validation"])],
             };
         }),

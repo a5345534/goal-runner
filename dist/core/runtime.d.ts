@@ -4,7 +4,7 @@ import { type GoalDagFileDocument, type GoalDagFilePlanOptions } from "./dag-fil
 import { type GoalDagPlanNodeInput, type GoalDagPlanOptions, type GoalDagReadyQueue, type GoalDagSchedulingPolicy } from "./dag-scheduler.js";
 import { type GoalCommand } from "./parser.js";
 import { type HarnessSubagentAdapter, type StartGoalSubagentOptions } from "./subagent-adapter.js";
-import type { BlockedAuditEvidence, ContinuationReservation, GoalAdapterCallbacks, GoalDagNode, GoalLedgerEvent, GoalOrchestrationState, GoalRecord, GoalReferenceResolution, GoalRuntimeConfig, GoalSessionMetadata, GoalStatusInput, GoalStore, GoalSubagentRecord, GoalSummary, GoalToolResult, WorkspaceProfile, GoalTurnStop, HarnessState, HiddenGoalTurnResult, TurnContext } from "./types.js";
+import type { BlockedAuditEvidence, ContinuationReservation, GoalAdapterCallbacks, GoalDagNode, GoalLedgerEvent, GoalOrchestrationState, GoalRecord, GoalReferenceResolution, GoalRuntimeConfig, GoalSessionMetadata, GoalStatusInput, GoalStore, GoalSubagentRecord, GoalSummary, GoalToolResult, WorkspaceProfile, GoalTurnStop, HarnessState, HiddenGoalTurnResult, QualityEvidenceEvaluation, QualityGateOutcome, TurnContext } from "./types.js";
 export interface GoalDagTerminalFinalizationResult {
     goalId: string;
     terminal: boolean;
@@ -39,6 +39,33 @@ export declare class GoalRuntime {
     pruneLedgerEvents(goalId: string, options: {
         maxEvents: number;
     }): Promise<number>;
+    /**
+     * Initialize or update a quality profile state on a DAG node.
+     * Persists the profile name from the node's validation contract.
+     */
+    applyQualityProfile(goalId: string, nodeId: string, profile?: string, options?: {
+        at?: Date | string;
+    }): Promise<GoalDagNode>;
+    /**
+     * Record a quality profile prompt injection event for a node.
+     */
+    recordQualityPromptInjected(goalId: string, nodeId: string, summary: string, options?: {
+        at?: Date | string;
+    }): Promise<GoalDagNode>;
+    /**
+     * Record an evidence evaluation outcome for a node's quality profile.
+     */
+    recordQualityEvidenceEvaluated(goalId: string, nodeId: string, evaluation: QualityEvidenceEvaluation): Promise<GoalDagNode>;
+    /**
+     * Record a gate pass/fail outcome for a node's quality profile.
+     */
+    recordQualityGateOutcome(goalId: string, nodeId: string, outcome: QualityGateOutcome): Promise<GoalDagNode>;
+    /**
+     * Link an audit node to a target node's quality profile.
+     */
+    recordQualityAuditNodeLinked(goalId: string, targetNodeId: string, auditNodeId: string, options?: {
+        at?: Date | string;
+    }): Promise<GoalDagNode>;
     getGoalRecord(goalId: string): Promise<GoalRecord>;
     listGoalLedgerEvents(goalId: string): Promise<GoalLedgerEvent[]>;
     auditPauseGoal(goalId: string, reason: string): Promise<void>;

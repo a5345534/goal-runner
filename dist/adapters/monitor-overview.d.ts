@@ -32,7 +32,19 @@ export interface GoalMonitorOverview {
         displayState: MonitorNodeDisplayState;
         summary: string;
         duration: MonitorDurationSummary;
+        qualityProfile?: string;
+        gatesPassed: number;
+        gatesFailed: number;
     }>;
+    qualityProfileSummary?: {
+        nodesWithProfile: number;
+        totalGates: number;
+        gatesPassed: number;
+        gatesFailed: number;
+        totalEvidenceEvaluations: number;
+        evidencePassed: number;
+        evidenceFailed: number;
+    };
 }
 export declare const ACTION_DISPLAY_LABELS: Record<string, string>;
 export interface BuildGoalMonitorOverviewOptions {

@@ -1,5 +1,6 @@
 export * from "./types.js";
 export * from "./validation-evidence.js";
+export * from "./quality-profiles.js";
 export * from "./validation-runner.js";
 export * from "./parser.js";
 export * from "./status.js";

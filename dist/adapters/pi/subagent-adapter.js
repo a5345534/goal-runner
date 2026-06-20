@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { closeSync, existsSync, openSync, readSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { promptIncludesExecutorGuardrails, renderExecutorGuardrailLines } from "../../core/executor-prompt.js";
+import { renderQualityProfileEnvelope } from "../../core/prompts.js";
 import { launchPiRpcBackgroundGoalSession, } from "./background-session.js";
 import { normalizePiModelArg } from "./model-args.js";
 import { readPiBackgroundRunnerInventory } from "./runner-ops.js";
@@ -125,6 +126,7 @@ export function renderPiSubagentInitialPrompt(request) {
         request.node.expectedOutputs.length ? `Expected outputs: ${request.node.expectedOutputs.join(", ")}` : undefined,
         request.node.validators.length ? `Validators: ${request.node.validators.join(", ")}` : undefined,
         "",
+        ...renderQualityProfileEnvelope(request.node),
         ...(promptIncludesExecutorGuardrails(request.initialPrompt) ? [] : renderExecutorGuardrailLines(request.node)),
         "",
         request.initialPrompt,

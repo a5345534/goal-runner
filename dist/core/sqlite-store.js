@@ -151,8 +151,8 @@ export class SQLiteGoalStore {
           expected_outputs_json, validators_json, workspace_strategy, workspace_json, risk,
           model_scenario, model_arg, thinking_level, conflict_hints_json, completion_gates_json, status,
           lifecycle_phase, prepared_resources_json, last_adapter_observation_json, last_recovery_decision_json,
-          last_validation_summary, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          last_validation_summary, quality_profile_state_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(goal_id, node_id) DO UPDATE SET
           slug = excluded.slug,
           objective = excluded.objective,
@@ -176,8 +176,9 @@ export class SQLiteGoalStore {
           last_adapter_observation_json = excluded.last_adapter_observation_json,
           last_recovery_decision_json = excluded.last_recovery_decision_json,
           last_validation_summary = excluded.last_validation_summary,
+          quality_profile_state_json = excluded.quality_profile_state_json,
           updated_at = excluded.updated_at`)
-            .run(node.goalId, node.nodeId, node.slug, node.objective, node.scope ?? null, node.kind ?? null, node.validation === undefined ? null : JSON.stringify(node.validation), JSON.stringify(node.dependencyNodeIds), JSON.stringify(node.expectedOutputs), JSON.stringify(node.validators), node.workspaceStrategy ?? null, node.workspace === undefined ? null : JSON.stringify(node.workspace), node.risk ?? null, node.modelScenario ?? null, node.modelArg ?? null, node.thinkingLevel ?? null, node.conflictHints === undefined ? null : JSON.stringify(node.conflictHints), JSON.stringify(node.completionGates), node.status, node.lifecyclePhase ?? null, node.preparedResources === undefined ? null : JSON.stringify(node.preparedResources), node.lastAdapterObservation === undefined ? null : JSON.stringify(node.lastAdapterObservation), node.lastRecoveryDecision === undefined ? null : JSON.stringify(node.lastRecoveryDecision), node.lastValidationSummary ?? null, node.createdAt, node.updatedAt);
+            .run(node.goalId, node.nodeId, node.slug, node.objective, node.scope ?? null, node.kind ?? null, node.validation === undefined ? null : JSON.stringify(node.validation), JSON.stringify(node.dependencyNodeIds), JSON.stringify(node.expectedOutputs), JSON.stringify(node.validators), node.workspaceStrategy ?? null, node.workspace === undefined ? null : JSON.stringify(node.workspace), node.risk ?? null, node.modelScenario ?? null, node.modelArg ?? null, node.thinkingLevel ?? null, node.conflictHints === undefined ? null : JSON.stringify(node.conflictHints), JSON.stringify(node.completionGates), node.status, node.lifecyclePhase ?? null, node.preparedResources === undefined ? null : JSON.stringify(node.preparedResources), node.lastAdapterObservation === undefined ? null : JSON.stringify(node.lastAdapterObservation), node.lastRecoveryDecision === undefined ? null : JSON.stringify(node.lastRecoveryDecision), node.lastValidationSummary ?? null, node.qualityProfileState === undefined ? null : JSON.stringify(node.qualityProfileState), node.createdAt, node.updatedAt);
     }
     async getGoalDagNode(goalId, nodeId) {
         const row = this.db
@@ -412,6 +413,7 @@ export class SQLiteGoalStore {
         last_adapter_observation_json TEXT,
         last_recovery_decision_json TEXT,
         last_validation_summary TEXT,
+        quality_profile_state_json TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         PRIMARY KEY (goal_id, node_id)
@@ -484,6 +486,7 @@ export class SQLiteGoalStore {
         addColumnIfMissing(this.db, "goal_subagents", "recovery_loop_signature", "TEXT");
         addColumnIfMissing(this.db, "goal_subagents", "last_adapter_observation_json", "TEXT");
         addColumnIfMissing(this.db, "goal_subagents", "last_recovery_decision_json", "TEXT");
+        addColumnIfMissing(this.db, "goal_dag_nodes", "quality_profile_state_json", "TEXT");
     }
 }
 function addColumnIfMissing(db, table, column, definition) {
@@ -616,6 +619,7 @@ function rowToDagNode(row) {
         lastAdapterObservation: parseRecord(row.last_adapter_observation_json),
         lastRecoveryDecision: parseRecord(row.last_recovery_decision_json),
         lastValidationSummary: row.last_validation_summary ?? undefined,
+        qualityProfileState: parseQualityProfileState(row.quality_profile_state_json),
         createdAt: row.created_at,
         updatedAt: row.updated_at,
     };
@@ -716,6 +720,27 @@ function parseConflictHints(json) {
             files: Array.isArray(record.files) ? record.files.filter((value) => typeof value === "string") : undefined,
             modules: Array.isArray(record.modules) ? record.modules.filter((value) => typeof value === "string") : undefined,
             capabilities: Array.isArray(record.capabilities) ? record.capabilities.filter((value) => typeof value === "string") : undefined,
+        };
+    }
+    catch {
+        return undefined;
+    }
+}
+function parseQualityProfileState(json) {
+    if (!json)
+        return undefined;
+    try {
+        const parsed = JSON.parse(json);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+            return undefined;
+        const rec = parsed;
+        return {
+            profile: typeof rec.profile === "string" ? rec.profile : undefined,
+            promptInjectedAt: typeof rec.promptInjectedAt === "string" ? rec.promptInjectedAt : undefined,
+            promptInjectionSummary: typeof rec.promptInjectionSummary === "string" ? rec.promptInjectionSummary : undefined,
+            evidenceEvaluations: Array.isArray(rec.evidenceEvaluations) ? rec.evidenceEvaluations : [],
+            linkedAuditNodeIds: Array.isArray(rec.linkedAuditNodeIds) ? rec.linkedAuditNodeIds.filter((v) => typeof v === "string") : [],
+            gateOutcomes: Array.isArray(rec.gateOutcomes) ? rec.gateOutcomes : [],
         };
     }
     catch {

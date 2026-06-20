@@ -26,8 +26,12 @@ export function createGoalDagNodes(goalId, inputs, options = {}) {
             modelArg: input.modelArg,
             thinkingLevel: input.thinkingLevel,
             conflictHints: cloneConflictHints(input.conflictHints),
+            qualityProfiles: input.qualityProfiles ? [...input.qualityProfiles] : undefined,
             completionGates: [...(input.completionGates ?? options.defaultCompletionGates ?? ["controller-validation"])],
             status: input.status ?? "planned",
+            qualityProfileState: input.validation?.profile
+                ? { profile: input.validation.profile, evidenceEvaluations: [], linkedAuditNodeIds: [], gateOutcomes: [] }
+                : undefined,
             createdAt: timestamp,
             updatedAt: timestamp,
         };

@@ -82,7 +82,8 @@ export interface GoalMonitorOverview {
   selectedDetail: string;
   selectedNodeDetailLines?: string[];
   recentEvents: string[];
-  nodeDisplayStates: Array<{ nodeId: string; slug: string; displayState: MonitorNodeDisplayState; summary: string; duration: MonitorDurationSummary }>;
+  nodeDisplayStates: Array<{ nodeId: string; slug: string; displayState: MonitorNodeDisplayState; summary: string; duration: MonitorDurationSummary; qualityProfile?: string; gatesPassed: number; gatesFailed: number }>;
+  qualityProfileSummary?: { nodesWithProfile: number; totalGates: number; gatesPassed: number; gatesFailed: number; totalEvidenceEvaluations: number; evidencePassed: number; evidenceFailed: number };
 }
 
 // ── User-facing action labels ──
@@ -168,13 +169,22 @@ export function buildGoalMonitorOverview(
     : undefined;
   const recentEvents = formatRecentEvents(dag.ledgerEvents ?? [], options);
   const subagentsByNode = groupSubagentsByNode(dag.subagents);
-  const nodeDisplayStates = dag.nodes.map((node) => ({
-    nodeId: node.nodeId,
-    slug: node.slug || node.nodeId,
-    displayState: formatNodeDisplayState(node, subagentsByNode.get(node.nodeId) ?? []),
-    summary: formatNodeExecutionPlanSummary(node, subagentsByNode.get(node.nodeId) ?? [], dag.ledgerEvents ?? [], options.now ?? new Date()),
-    duration: buildNodeDurationSummary(node, subagentsByNode.get(node.nodeId) ?? [], dag.ledgerEvents ?? [], options.now ?? new Date()),
-  }));
+  // Build quality profile summary across all nodes
+  const qualityProfileSummary = buildQualityProfileSummary(dag.nodes);
+
+  const nodeDisplayStates = dag.nodes.map((node) => {
+    const qp = node.qualityProfileState;
+    return {
+      nodeId: node.nodeId,
+      slug: node.slug || node.nodeId,
+      displayState: formatNodeDisplayState(node, subagentsByNode.get(node.nodeId) ?? []),
+      summary: formatNodeExecutionPlanSummary(node, subagentsByNode.get(node.nodeId) ?? [], dag.ledgerEvents ?? [], options.now ?? new Date()),
+      duration: buildNodeDurationSummary(node, subagentsByNode.get(node.nodeId) ?? [], dag.ledgerEvents ?? [], options.now ?? new Date()),
+      qualityProfile: qp?.profile ?? undefined,
+      gatesPassed: qp?.gateOutcomes.filter((g) => g.passed).length ?? 0,
+      gatesFailed: qp?.gateOutcomes.filter((g) => !g.passed).length ?? 0,
+    };
+  });
 
   return {
     title: `Goal ${goal.shortGoalId}`,
@@ -189,6 +199,7 @@ export function buildGoalMonitorOverview(
     selectedNodeDetailLines,
     recentEvents,
     nodeDisplayStates,
+    qualityProfileSummary,
   };
 }
 
@@ -682,6 +693,7 @@ function buildNodeSelectedDetailLines(
     `Last: ${duration.lastLabel}`,
     `Worker: ${workers} subagent${workers === 1 ? "" : "s"}${runningWorkers > 0 ? ` (${runningWorkers} active)` : ""}`,
     `Model: ${model}`,
+    node.qualityProfileState?.profile ? `Quality: ${node.qualityProfileState.profile} (${node.qualityProfileState.gateOutcomes.filter((g) => g.passed).length}/${node.qualityProfileState.gateOutcomes.length} gates passed)` : undefined,
   ].filter((line): line is string => Boolean(line)).map((line) => `  ${line}`);
 }
 
@@ -1198,5 +1210,46 @@ export function buildRunnerDurationSummary(
     lastActivityLabel: `last activity ${formatAgo(lastActivityAt, now)}`,
     staleLevel,
     confidence: statusTransition ? statusTransition.confidence : createdConfidence,
+  };
+}
+
+// ── Quality profile summary builder ──
+
+function buildQualityProfileSummary(
+  nodes: GoalDagNode[],
+): GoalMonitorOverview["qualityProfileSummary"] {
+  const nodesWithProfile = nodes.filter((n) => n.qualityProfileState?.profile).length;
+  if (nodesWithProfile === 0) return undefined;
+
+  let totalGates = 0;
+  let gatesPassed = 0;
+  let gatesFailed = 0;
+  let totalEvidenceEvaluations = 0;
+  let evidencePassed = 0;
+  let evidenceFailed = 0;
+
+  for (const node of nodes) {
+    const qp = node.qualityProfileState;
+    if (!qp) continue;
+    for (const gate of qp.gateOutcomes) {
+      totalGates++;
+      if (gate.passed) gatesPassed++;
+      else gatesFailed++;
+    }
+    for (const ev of qp.evidenceEvaluations) {
+      totalEvidenceEvaluations++;
+      if (ev.passed) evidencePassed++;
+      else evidenceFailed++;
+    }
+  }
+
+  return {
+    nodesWithProfile,
+    totalGates,
+    gatesPassed,
+    gatesFailed,
+    totalEvidenceEvaluations,
+    evidencePassed,
+    evidenceFailed,
   };
 }

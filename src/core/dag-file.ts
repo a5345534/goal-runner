@@ -7,9 +7,11 @@ import type { GoalDagPlannedNodesResult, GoalDagPlannerResult } from "./dag-plan
 import {
   parseGoalDagFileContent,
   parseGoalDagFileDocument,
+  resolveGoalQualityProfiles,
   type GoalDagFileDefaults,
   type GoalDagFileDocument,
   type GoalDagFileNode,
+  type GoalQualityProfile,
 } from "goal-contract";
 
 export type { GoalDagFileDocument, GoalDagFileDefaults, GoalDagFileNode };
@@ -39,6 +41,7 @@ export function planGoalDagFromFileDocument(
   const defaultConflicts = document.defaults?.conflicts;
   const defaultModelScenario = document.defaults?.modelScenario;
   const defaultThinkingLevel = document.defaults?.thinkingLevel;
+  const defaultQualityProfiles = document.defaults?.qualityProfiles;
 
   return {
     goalId,
@@ -57,6 +60,10 @@ export function planGoalDagFromFileDocument(
         modelScenario: node.modelScenario ?? defaultModelScenario,
       }, document.modelRouting);
       const modelScenario = node.modelScenario ?? defaultModelScenario ?? selection.scenario;
+      const qualityProfiles = resolveGoalQualityProfiles(
+        defaultQualityProfiles ? { qualityProfiles: defaultQualityProfiles } : undefined,
+        node.qualityProfiles ? { qualityProfiles: node.qualityProfiles } : undefined,
+      );
       return {
         nodeId: node.id,
         slug: node.id,
@@ -74,6 +81,7 @@ export function planGoalDagFromFileDocument(
         modelArg: selection.model,
         thinkingLevel: node.thinkingLevel ?? defaultThinkingLevel,
         conflictHints,
+        qualityProfiles: qualityProfiles.length > 0 ? [...qualityProfiles] : undefined,
         completionGates: [...(node.completionGates ?? defaultCompletionGates ?? ["controller-validation"])],
       };
     }),

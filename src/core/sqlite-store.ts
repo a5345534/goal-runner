@@ -125,6 +125,7 @@ interface SqliteDagNodeRow {
   last_adapter_observation_json: string | null;
   last_recovery_decision_json: string | null;
   last_validation_summary: string | null;
+  quality_profile_state_json: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -386,8 +387,8 @@ export class SQLiteGoalStore implements GoalStore {
           expected_outputs_json, validators_json, workspace_strategy, workspace_json, risk,
           model_scenario, model_arg, thinking_level, conflict_hints_json, completion_gates_json, status,
           lifecycle_phase, prepared_resources_json, last_adapter_observation_json, last_recovery_decision_json,
-          last_validation_summary, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          last_validation_summary, quality_profile_state_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(goal_id, node_id) DO UPDATE SET
           slug = excluded.slug,
           objective = excluded.objective,
@@ -411,6 +412,7 @@ export class SQLiteGoalStore implements GoalStore {
           last_adapter_observation_json = excluded.last_adapter_observation_json,
           last_recovery_decision_json = excluded.last_recovery_decision_json,
           last_validation_summary = excluded.last_validation_summary,
+          quality_profile_state_json = excluded.quality_profile_state_json,
           updated_at = excluded.updated_at`,
       )
       .run(
@@ -438,6 +440,7 @@ export class SQLiteGoalStore implements GoalStore {
         node.lastAdapterObservation === undefined ? null : JSON.stringify(node.lastAdapterObservation),
         node.lastRecoveryDecision === undefined ? null : JSON.stringify(node.lastRecoveryDecision),
         node.lastValidationSummary ?? null,
+        node.qualityProfileState === undefined ? null : JSON.stringify(node.qualityProfileState),
         node.createdAt,
         node.updatedAt,
       );
@@ -730,6 +733,7 @@ export class SQLiteGoalStore implements GoalStore {
         last_adapter_observation_json TEXT,
         last_recovery_decision_json TEXT,
         last_validation_summary TEXT,
+        quality_profile_state_json TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         PRIMARY KEY (goal_id, node_id)
@@ -802,6 +806,7 @@ export class SQLiteGoalStore implements GoalStore {
     addColumnIfMissing(this.db, "goal_subagents", "recovery_loop_signature", "TEXT");
     addColumnIfMissing(this.db, "goal_subagents", "last_adapter_observation_json", "TEXT");
     addColumnIfMissing(this.db, "goal_subagents", "last_recovery_decision_json", "TEXT");
+    addColumnIfMissing(this.db, "goal_dag_nodes", "quality_profile_state_json", "TEXT");
   }
 }
 
@@ -941,6 +946,7 @@ function rowToDagNode(row: SqliteDagNodeRow): GoalDagNode {
     lastAdapterObservation: parseRecord(row.last_adapter_observation_json) as GoalDagNode["lastAdapterObservation"] | undefined,
     lastRecoveryDecision: parseRecord(row.last_recovery_decision_json) as GoalDagNode["lastRecoveryDecision"] | undefined,
     lastValidationSummary: row.last_validation_summary ?? undefined,
+    qualityProfileState: parseQualityProfileState(row.quality_profile_state_json),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1038,6 +1044,25 @@ function parseConflictHints(json: string | null): GoalDagNode["conflictHints"] |
       files: Array.isArray(record.files) ? record.files.filter((value): value is string => typeof value === "string") : undefined,
       modules: Array.isArray(record.modules) ? record.modules.filter((value): value is string => typeof value === "string") : undefined,
       capabilities: Array.isArray(record.capabilities) ? record.capabilities.filter((value): value is string => typeof value === "string") : undefined,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function parseQualityProfileState(json: string | null): GoalDagNode["qualityProfileState"] | undefined {
+  if (!json) return undefined;
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    const rec = parsed as Record<string, unknown>;
+    return {
+      profile: typeof rec.profile === "string" ? rec.profile : undefined,
+      promptInjectedAt: typeof rec.promptInjectedAt === "string" ? rec.promptInjectedAt : undefined,
+      promptInjectionSummary: typeof rec.promptInjectionSummary === "string" ? rec.promptInjectionSummary : undefined,
+      evidenceEvaluations: Array.isArray(rec.evidenceEvaluations) ? rec.evidenceEvaluations : [],
+      linkedAuditNodeIds: Array.isArray(rec.linkedAuditNodeIds) ? rec.linkedAuditNodeIds.filter((v): v is string => typeof v === "string") : [],
+      gateOutcomes: Array.isArray(rec.gateOutcomes) ? rec.gateOutcomes : [],
     };
   } catch {
     return undefined;

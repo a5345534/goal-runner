@@ -4,6 +4,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, isAbsolute, resolve } from "node:path";
 import type { GoalControllerValidationRequest, GoalControllerValidationResult, GoalControllerValidator } from "./controller-loop.js";
 import { isSupportedRequiredEvidence, SUPPORTED_REQUIRED_EVIDENCE, type GoalValidationEvidenceRequirement } from "./validation-evidence.js";
+import { qualityProfilesOf, type GoalQualityProfile } from "./quality-profiles.js";
 
 export interface ControllerValidationRunnerOptions {
   /** Execute node.validators as shell commands. Defaults true so declared validators are enforced. */
@@ -84,6 +85,10 @@ export function runControllerValidation(
   const evidence = evaluateRequiredEvidence(request, result);
   result.satisfiedEvidence = evidence.satisfied;
   result.missingEvidence = evidence.missing;
+
+  // Quality profile enforcement
+  const qualityProfileFailures = evaluateQualityProfileGates(request, result, request.state);
+  result.policyFailures.push(...qualityProfileFailures);
 
   const failedCommands = result.commandResults.filter((item) => !item.ok);
   const failedLocks = result.artifactLockResults.filter((item) => !item.ok);
@@ -263,6 +268,130 @@ function scopePolicyConfigured(request: GoalControllerValidationRequest): boolea
   return Boolean(request.node.validation?.allowedPaths?.length || request.node.validation?.forbiddenPaths?.length);
 }
 
+// ---------------------------------------------------------------------------
+// Quality profile gate enforcement
+// ---------------------------------------------------------------------------
+
+/** Profiles that require review/audit/preflight evidence via dependent nodes or audit reports. */
+const REVIEW_AUDIT_PROFILES = new Set<GoalQualityProfile>([
+  "code-review-required",
+  "api-boundary-review",
+  "frontend-runtime-review",
+  "security-sensitive-review",
+  "performance-sensitive-review",
+  "observability-required",
+  "ship-preflight",
+]);
+
+function evaluateQualityProfileGates(
+  request: GoalControllerValidationRequest,
+  result: ControllerValidationRunResult,
+  state: GoalControllerValidationRequest["state"],
+): string[] {
+  const profiles = request.node.qualityProfiles;
+  if (!profiles || profiles.length === 0) return [];
+
+  const failures: string[] = [];
+
+  for (const profile of profiles) {
+    const failure = evaluateSingleProfileGate(profile, request, result, state);
+    if (failure) failures.push(failure);
+  }
+
+  return failures;
+}
+
+function evaluateSingleProfileGate(
+  profile: GoalQualityProfile,
+  request: GoalControllerValidationRequest,
+  result: ControllerValidationRunResult,
+  state: GoalControllerValidationRequest["state"],
+): string | undefined {
+  switch (profile) {
+    case "incremental-implementation": {
+      // Implementation nodes must produce non-test diff evidence when repo changes are expected.
+      if (request.node.kind === "implementation") {
+        const hasImplementationDiff = changedPaths(request).some((path) => !isTestOrValidationArtifactPath(path, request));
+        // Only fail if the node has validators/outputs suggesting it should change files.
+        const expectsChanges = request.node.expectedOutputs.length > 0 ||
+          request.node.validators.length > 0 ||
+          (request.node.validation?.requiredEvidence?.length ?? 0) > 0;
+        if (expectsChanges && !hasImplementationDiff) {
+          return `quality profile "incremental-implementation" requires implementation diff evidence when repository changes are expected`;
+        }
+      }
+      return undefined;
+    }
+    case "test-driven-change": {
+      const hasValidators = request.node.validators.length > 0 &&
+        result.commandResults.length === request.node.validators.length &&
+        result.skippedValidators.length === 0;
+      const hasArtifactLocks = (request.node.validation?.artifactLocks?.length ?? 0) > 0 &&
+        result.artifactLockResults.every((lock) => lock.ok);
+      const hasAuditReport = auditReportPaths(request).some((path) => auditReportExistsAndAcceptsCompletion(path));
+      if (!hasValidators && !hasArtifactLocks && !hasAuditReport) {
+        return `quality profile "test-driven-change" requires validator, locked-artifact, or explicit audit/preflight evidence`;
+      }
+      return undefined;
+    }
+    case "code-review-required":
+    case "api-boundary-review":
+    case "frontend-runtime-review":
+    case "security-sensitive-review":
+    case "performance-sensitive-review":
+    case "observability-required":
+    case "ship-preflight": {
+      // Review/audit/preflight profiles require completed dependent nodes or audit report evidence.
+      const hasAuditReport = auditReportPaths(request).some((path) => auditReportExistsAndAcceptsCompletion(path));
+      if (hasAuditReport) return undefined;
+
+      // Check for completed dependent nodes (review, audit, validation kind).
+      const dependentComplete = checkDependentReviewNodesComplete(request, state);
+      if (!dependentComplete) {
+        return `quality profile "${profile}" requires completed dependent review/audit/preflight node or audit-report-present evidence`;
+      }
+      return undefined;
+    }
+    case "docs-adr-required": {
+      // Requires declared docs/ADR outputs or audit evidence.
+      const hasDocOutput = request.node.expectedOutputs.some((output) =>
+        /\.(?:md|adoc|rst|txt)$/i.test(output) ||
+        /docs?\//.test(output) ||
+        /adr\//.test(output) ||
+        /readme/i.test(output),
+      );
+      if (hasDocOutput) return undefined;
+      const hasAuditReport = auditReportPaths(request).some((path) => auditReportExistsAndAcceptsCompletion(path));
+      if (!hasAuditReport) {
+        return `quality profile "docs-adr-required" requires declared docs/ADR outputs or audit evidence`;
+      }
+      return undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Check whether any dependent nodes (with review/audit/validation kind) are
+ * completed and satisfy this node's review profile requirements.
+ */
+function checkDependentReviewNodesComplete(
+  request: GoalControllerValidationRequest,
+  state: GoalControllerValidationRequest["state"],
+): boolean {
+  // Find nodes that depend on this node being complete (reverse dependency).
+  // In practice, review/audit nodes should be listed "after" the implementation node.
+  const dependentNodes = state.nodes.filter((node) =>
+    node.dependencyNodeIds.includes(request.node.nodeId) &&
+    (node.kind === "review" || node.kind === "audit" || node.kind === "validation"),
+  );
+  if (dependentNodes.length === 0) return false;
+  return dependentNodes.some((node) =>
+    node.status === "complete" || node.status === "superseded",
+  );
+}
+
 function evaluateRequiredEvidence(
   request: GoalControllerValidationRequest,
   result: ControllerValidationRunResult,
@@ -400,8 +529,17 @@ function buildValidationSignals(request: GoalControllerValidationRequest, result
   for (const evidence of result.missingEvidence) signals.push(`missing evidence: ${evidence}`);
   for (const failure of result.policyFailures) signals.push(`policy failure: ${failure}`);
   if (result.policyFailures.length === 0 && scopePolicyConfigured(request)) signals.push("scope policy passed");
+  if (qualityProfilePolicyConfigured(request) && !hasQualityProfilePolicyFailure(result)) signals.push(`quality profile gates passed: ${qualityProfilesOf(request.node).join(", ")}`);
   if (signals.length === 0) signals.push("self-report accepted; no expected outputs, executable validators, artifact locks, required evidence, or scope policy configured");
   return signals;
+}
+
+function qualityProfilePolicyConfigured(request: GoalControllerValidationRequest): boolean {
+  return qualityProfilesOf(request.node).length > 0;
+}
+
+function hasQualityProfilePolicyFailure(result: ControllerValidationRunResult): boolean {
+  return result.policyFailures.some((failure) => /quality profile/.test(failure));
 }
 
 function scopePolicyFailed(result: ControllerValidationRunResult): boolean {

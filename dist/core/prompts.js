@@ -213,6 +213,74 @@ Example healthy-progress pattern:
   ]
 }`;
 }
+// ---------------------------------------------------------------------------
+// Quality profile execution discipline
+// ---------------------------------------------------------------------------
+/** Maps quality profiles to short execution discipline instructions. */
+const QUALITY_PROFILE_DISCIPLINE = {
+    "incremental-implementation": "Execution discipline for this node:\n" +
+        "- Implement the smallest independently verifiable slice.\n" +
+        "- Do not perform unrelated cleanup or cosmetic refactoring.\n" +
+        "- Run declared validators before reporting complete.\n" +
+        "- Commit intended repository changes on the assigned branch.\n" +
+        "- Report changed files, validator evidence, unresolved risks, and follow-up needs.\n" +
+        "- Self-certification is not completion evidence.",
+    "test-driven-change": "Verification requirement for this node:\n" +
+        "- Behavior-changing work must have deterministic verification.\n" +
+        "- Run declared validators and confirm they pass before reporting complete.\n" +
+        "- If validators are absent or cannot pass, produce explicit test/audit evidence explaining the accepted gap.",
+    "code-review-required": "Code review requirement: this node's implementation diff requires formal review before final acceptance.\n" +
+        "- A dependent review/audit node will validate your changes.\n" +
+        "- Do not self-certify review completeness.",
+    "api-boundary-review": "API boundary review required: this node touches public API, events, module boundaries, or compatibility surfaces.\n" +
+        "- A dependent review/audit node will validate API/contract changes.\n" +
+        "- Document any breaking or compatibility-sensitive changes.",
+    "frontend-runtime-review": "Frontend runtime review required: this node touches browser/runtime behavior.\n" +
+        "- A dependent validation or review node will audit frontend behavior.\n" +
+        "- Ensure runtime validation steps or visual evidence are captured.",
+    "security-sensitive-review": "Security review required: this node touches auth, secrets, user input, data access, or external integrations.\n" +
+        "- A dependent audit node will perform security review.\n" +
+        "- Do not store secrets, credentials, or tokens in code or logs.",
+    "performance-sensitive-review": "Performance review required: this node is performance/SLA-sensitive.\n" +
+        "- A dependent validator or audit node will check performance benchmarks.\n" +
+        "- Note any expected performance impact in your result summary.",
+    "observability-required": "Observability required: production-visible behavior must be observable and diagnosable.\n" +
+        "- Ensure logging, metrics, or health checks are present and tested.\n" +
+        "- A dependent preflight node may check observability readiness.",
+    "docs-adr-required": "Documentation/ADR required: architecture, API, or operational decisions require docs updates.\n" +
+        "- Declare docs/ADR outputs in expected outputs or produce audit evidence.\n" +
+        "- Report which documentation artifacts were created or updated.",
+    "ship-preflight": "Ship preflight required: release-sensitive work needs launch, rollback, and monitor readiness check.\n" +
+        "- A dependent preflight node will perform final readiness checks.\n" +
+        "- Ensure rollback/safety mechanisms are documented.",
+};
+/**
+ * Render execution discipline envelope for a node's resolved quality profiles.
+ * Returns an array of lines to be injected into the subagent prompt.
+ */
+export function renderQualityProfileEnvelope(node) {
+    const profiles = node.qualityProfiles;
+    if (!profiles || profiles.length === 0)
+        return [];
+    const lines = [];
+    for (const profile of profiles) {
+        const discipline = QUALITY_PROFILE_DISCIPLINE[profile];
+        if (discipline)
+            lines.push(discipline);
+    }
+    if (lines.length === 0)
+        return [];
+    return [
+        "",
+        "[QUALITY PROFILE EXECUTION DISCIPLINE]",
+        `This node carries the following quality profiles: ${profiles.join(", ")}.`,
+        "These profiles define required execution behavior, verification gates, and evidence requirements that you must follow.",
+        "",
+        ...lines,
+        "",
+        "SUBAGENT_RESULT and SUBAGENT_BLOCKED markers alone do not satisfy quality profile gates. Required evidence, review reports, or dependent node completions may be needed before this node can be accepted as complete.",
+    ];
+}
 function fenceFor(text) {
     let fence = "```";
     while (text.includes(fence))

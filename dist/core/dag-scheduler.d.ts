@@ -16,6 +16,7 @@ export interface GoalDagPlanNodeInput {
     modelArg?: string;
     thinkingLevel?: string;
     conflictHints?: GoalDagConflictHints;
+    qualityProfiles?: GoalDagNode["qualityProfiles"];
     completionGates?: string[];
     status?: GoalDagNodeStatus;
 }

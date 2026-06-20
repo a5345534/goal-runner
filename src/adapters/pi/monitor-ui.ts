@@ -1205,6 +1205,8 @@ function renderNodeListRow(
   const phaseLabel = summary.phaseLabel ?? `phase ${node.lifecyclePhase ?? node.status}`;
   const model = formatNodeMonitorModel(node);
   const lastText = formatDurationWithoutAgo(summary.lastLabel);
+  const qp = node.qualityProfileState;
+  const qpLabel = qp?.profile ? `qp=${qp.profile}${qp.gateOutcomes.length > 0 ? ` (${qp.gateOutcomes.filter((g) => g.passed).length}/${qp.gateOutcomes.length})` : ""}` : "";
   return renderAlignedColumns([
     `${index + 1}.`,
     shortenMiddle(node.slug || node.nodeId, 30),
@@ -1214,7 +1216,8 @@ function renderNodeListRow(
     `last ${lastText}`,
     `${workers} runner${workers === 1 ? "" : "s"}`,
     model ? `model=${model}` : "",
-  ], [3, 30, 9, 9, 16, 10, 9, 16]);
+    qpLabel,
+  ].filter(Boolean) as string[], [3, 30, 9, 9, 16, 10, 9, 16, 12]);
 }
 
 function renderRunnerListRow(
@@ -1493,6 +1496,11 @@ function renderOverviewHeader(
     : `${overview.title} · ${overview.statusLabel}`;
   lines.push(truncateToWidth(theme.fg("accent", titleLine), width));
 
+  const qpSummary = overview.qualityProfileSummary;
+  const qualityLine = qpSummary
+    ? `Quality: ${qpSummary.nodesWithProfile} profiles · ${qpSummary.gatesPassed}/${qpSummary.totalGates} gates passed · ${qpSummary.evidencePassed}/${qpSummary.totalEvidenceEvaluations} evidence`
+    : undefined;
+
   if (isNarrow) {
     // Narrow layout: stack key fields vertically.
     lines.push(truncateToWidth(theme.fg(healthColor, `Health: ${healthLabel}`), width));
@@ -1502,6 +1510,7 @@ function renderOverviewHeader(
     lines.push(truncateToWidth(theme.fg("dim", `Progress: ${overview.progressLabel}`), width));
     lines.push(truncateToWidth(theme.fg("dim", `Runtime: ${overview.runtimeLabel}`), width));
     lines.push(truncateToWidth(theme.fg("dim", `Workers: ${overview.workersLabel ?? "none"}`), width));
+    if (qualityLine) lines.push(truncateToWidth(theme.fg("dim", qualityLine), width));
     lines.push(truncateToWidth(theme.fg("dim", `Next: ${overview.nextActionLabel}`), width));
   } else {
     // Wide layout: Health + Problem on one line, Progress on next, Runtime on next, Next on last.
@@ -1515,6 +1524,7 @@ function renderOverviewHeader(
     lines.push(truncateToWidth(theme.fg("dim", `Progress: ${overview.progressLabel}`), width));
     lines.push(truncateToWidth(theme.fg("dim", `Runtime: ${overview.runtimeLabel}`), width));
     lines.push(truncateToWidth(theme.fg("dim", `Workers: ${overview.workersLabel ?? "none"}`), width));
+    if (qualityLine) lines.push(truncateToWidth(theme.fg("dim", qualityLine), width));
     lines.push(truncateToWidth(theme.fg("dim", `Next: ${overview.nextActionLabel}`), width));
   }
 
@@ -1551,18 +1561,23 @@ function renderExecutionPlanSection(
       nds.displayState === "complete" ? "success" : "dim";
 
     if (isNarrow) {
-      lines.push(truncateToWidth(theme.fg(nodeColor, `${stateChar} ${nds.slug}`), width));
+      const qpSlot = nds.qualityProfile ? ` · qp:${nds.qualityProfile}` : "";
+      lines.push(truncateToWidth(theme.fg(nodeColor, `${stateChar} ${nds.slug}${qpSlot}`), width));
       continue;
     }
 
     const parts = parseExecutionPlanSummary(nds.summary);
+    const qpSlot = nds.qualityProfile
+      ? `qp:${nds.qualityProfile}${nds.gatesPassed + nds.gatesFailed > 0 ? ` (${nds.gatesPassed}/${nds.gatesPassed + nds.gatesFailed})` : ""}`
+      : "";
     const row = renderAlignedColumns([
       `${stateChar}`,
       shortenMiddle(nds.slug, 30),
       parts.runtime,
       parts.phase,
       parts.last,
-    ], [2, 30, 14, 28, 14]);
+      qpSlot,
+    ].filter(Boolean) as string[], [2, 30, 14, 28, 14, 16]);
     lines.push(truncateToWidth(theme.fg(nodeColor, row), width));
   }
 
