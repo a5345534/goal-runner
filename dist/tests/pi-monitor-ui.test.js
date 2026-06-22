@@ -954,6 +954,50 @@ test("Pi: complete with warnings shows node-centric Problem line", () => {
     const health = deriveExtendedMonitorHealth(rt, summary("complete"), subagents, nodes);
     assert.equal(health, "Complete with warnings");
 });
+// 4.4 Pi: older complete subagent does not mask newer failed subagent
+// Regression: isUnresolvedResidualIssue must compare timestamps, not just
+// check for existence of any running/complete subagent on the same node.
+test("Pi: older complete subagent does not mask newer failed subagent", () => {
+    const node = dagNode({ nodeId: "n1", status: "complete" });
+    const oldComplete = subagent({
+        nodeId: "n1",
+        subagentId: "sa-old",
+        status: "complete",
+        updatedAt: "2026-06-22T10:00:00.000Z",
+    });
+    const newFailed = subagent({
+        nodeId: "n1",
+        subagentId: "sa-new",
+        status: "failed",
+        updatedAt: "2026-06-22T10:30:00.000Z",
+    });
+    const rt = buildGoalMonitorRuntimeSummary(summary("complete"), [oldComplete, newFailed]);
+    const health = deriveExtendedMonitorHealth(rt, summary("complete"), [oldComplete, newFailed], [node]);
+    // The newer failed subagent is unresolved (no newer replacement);
+    // health should reflect the residual warning.
+    assert.equal(health, "Complete with warnings");
+});
+// 4.5 Pi: newer complete subagent resolves older failed subagent
+test("Pi: newer complete subagent resolves older failed subagent", () => {
+    const node = dagNode({ nodeId: "n1", status: "complete" });
+    const oldFailed = subagent({
+        nodeId: "n1",
+        subagentId: "sa-old",
+        status: "failed",
+        updatedAt: "2026-06-22T10:00:00.000Z",
+    });
+    const newComplete = subagent({
+        nodeId: "n1",
+        subagentId: "sa-new",
+        status: "complete",
+        updatedAt: "2026-06-22T10:30:00.000Z",
+    });
+    const rt = buildGoalMonitorRuntimeSummary(summary("complete"), [oldFailed, newComplete]);
+    const health = deriveExtendedMonitorHealth(rt, summary("complete"), [oldFailed, newComplete], [node]);
+    // The newer complete subagent replaces the old failed one;
+    // health should be clean.
+    assert.equal(health, "Complete");
+});
 // 4.4 Pi: active healthy renders Running
 test("Pi: active healthy renders Running", () => {
     const harnessState = {
