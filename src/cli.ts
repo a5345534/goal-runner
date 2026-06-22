@@ -26,6 +26,13 @@ if (args[0] === "--help" || args[0] === "-h") {
   process.exit(0);
 }
 
+// Guard against accidental CLI invocation with a /goal prefix
+if (args[0] === "/goal" || args[0]?.startsWith("/goal")) {
+  console.error(`Rejected: first argument starts with '/goal'. Did you mean to type a bare objective or subcommand?`);
+  console.error(`Usage: goal-runner [--session KEY] [--state-root DIR] <objective>`);
+  process.exit(2);
+}
+
 const store = new SQLiteGoalStore({ stateRoot });
 const runtime = new GoalRuntime({ store });
 

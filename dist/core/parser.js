@@ -4,6 +4,9 @@ export function validateGoalObjective(input) {
     if (!objective) {
         throw new Error("goal objective must not be empty");
     }
+    if (/^\u002fgoal\b/i.test(objective)) {
+        throw new Error("goal objective must not start with '/goal'; did you type '/goal /goal ...'? Remove the leading '/goal' and try again, or use '/goal --help' for usage.");
+    }
     const length = Array.from(objective).length;
     if (length > MAX_GOAL_OBJECTIVE_CHARS) {
         throw new Error(`goal objective must be at most ${MAX_GOAL_OBJECTIVE_CHARS} characters`);
