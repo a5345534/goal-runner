@@ -1,5 +1,6 @@
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   evaluateGoalModelBindingCompliance,
   parseGoalModelBindingCatalogJson,
@@ -12,6 +13,8 @@ import {
 
 const require = createRequire(import.meta.url);
 
+const MODEL_CLASS_CATALOG_SPECIFIER = "goal-contract/catalogs/model-classes.json";
+
 export interface GoalModelResolutionRequest {
   harness: string;
   role?: string;
@@ -20,6 +23,7 @@ export interface GoalModelResolutionRequest {
   bindingSource?: string;
   classCatalog?: GoalModelClassCatalog;
   bindingCatalog?: GoalModelBindingCatalog;
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface GoalModelResolutionResult {
@@ -27,12 +31,32 @@ export interface GoalModelResolutionResult {
   evidence: GoalModelResolution;
 }
 
+interface LoadedModelClassCatalog {
+  catalog: GoalModelClassCatalog;
+  source: string;
+}
+
+interface LoadedModelBindingCatalog {
+  catalog: GoalModelBindingCatalog;
+  source: string;
+}
+
 const classCatalogCache = new Map<string, GoalModelClassCatalog>();
 const bindingCatalogCache = new Map<string, GoalModelBindingCatalog>();
 
 export function resolveGoalModelForHarness(request: GoalModelResolutionRequest): GoalModelResolutionResult {
-  const classCatalog = request.classCatalog ?? readBundledModelClassCatalog();
-  const bindingCatalog = request.bindingCatalog ?? readBundledModelBindingCatalog(request.harness);
+  const classCatalog = request.classCatalog ?? loadModelClassCatalogFromEnvOrBundled(request.env).catalog;
+  const bindingLoad = request.bindingCatalog
+    ? { catalog: request.bindingCatalog, source: request.bindingSource ?? "provided binding catalog" }
+    : loadModelBindingCatalogFromEnvOrBundled(request.harness, request.env);
+  const bindingCatalog = bindingLoad.catalog;
+  const expectedHarness = normalizeHarness(request.harness);
+  if (bindingCatalog.harness !== expectedHarness) {
+    throw new Error(
+      `Model resolution blocked: binding catalog harness ${JSON.stringify(bindingCatalog.harness)} does not match requested harness ${JSON.stringify(expectedHarness)}`,
+    );
+  }
+
   const modelClass = classCatalog.modelClasses[request.modelClass];
   if (!modelClass) {
     throw new Error(`Model resolution blocked: unknown modelClass ${JSON.stringify(request.modelClass)}`);
@@ -53,7 +77,7 @@ export function resolveGoalModelForHarness(request: GoalModelResolutionRequest):
     },
     resolved: {
       model: binding.model,
-      bindingSource: request.bindingSource ?? `goal-contract/catalogs/bindings/${bindingCatalog.harness}.json`,
+      bindingSource: request.bindingSource ?? bindingLoad.source,
     },
     compliance: {
       satisfiesMinimum: compliance.satisfiesMinimum,
@@ -99,23 +123,107 @@ export function buildBlockedGoalModelResolutionEvidence(input: {
   };
 }
 
+export function readModelClassCatalogFromEnvOrBundled(env: NodeJS.ProcessEnv = process.env): GoalModelClassCatalog {
+  return loadModelClassCatalogFromEnvOrBundled(env).catalog;
+}
+
+export function readModelBindingCatalogFromEnvOrBundled(
+  harness: string,
+  env: NodeJS.ProcessEnv = process.env,
+): GoalModelBindingCatalog {
+  return loadModelBindingCatalogFromEnvOrBundled(harness, env).catalog;
+}
+
 export function readBundledModelClassCatalog(): GoalModelClassCatalog {
-  const specifier = "goal-contract/catalogs/model-classes.json";
-  const cached = classCatalogCache.get(specifier);
+  const cached = classCatalogCache.get(MODEL_CLASS_CATALOG_SPECIFIER);
   if (cached) return cached;
-  const resolved = require.resolve(specifier);
-  const catalog = parseGoalModelClassCatalogJson(readFileSync(resolved, "utf8"), specifier);
-  classCatalogCache.set(specifier, catalog);
+  const resolved = require.resolve(MODEL_CLASS_CATALOG_SPECIFIER);
+  const catalog = parseGoalModelClassCatalogJson(readFileSync(resolved, "utf8"), MODEL_CLASS_CATALOG_SPECIFIER);
+  classCatalogCache.set(MODEL_CLASS_CATALOG_SPECIFIER, catalog);
   return catalog;
 }
 
 export function readBundledModelBindingCatalog(harness: string): GoalModelBindingCatalog {
-  const normalizedHarness = harness.trim() || "pi";
+  const normalizedHarness = normalizeHarness(harness);
   const specifier = `goal-contract/catalogs/bindings/${normalizedHarness}.json`;
   const cached = bindingCatalogCache.get(specifier);
   if (cached) return cached;
-  const resolved = require.resolve(specifier);
+  let resolved: string;
+  try {
+    resolved = require.resolve(specifier);
+  } catch (error) {
+    throw new Error(
+      `Model resolution blocked: no bundled binding catalog for harness ${JSON.stringify(normalizedHarness)} (${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
   const catalog = parseGoalModelBindingCatalogJson(readFileSync(resolved, "utf8"), specifier);
   bindingCatalogCache.set(specifier, catalog);
   return catalog;
+}
+
+function loadModelClassCatalogFromEnvOrBundled(env: NodeJS.ProcessEnv | undefined): LoadedModelClassCatalog {
+  const catalogFile = env?.AGENT_GOAL_MODEL_CLASS_CATALOG_FILE;
+  if (catalogFile?.trim()) {
+    const resolved = resolve(process.cwd(), catalogFile.trim());
+    if (!existsSync(resolved)) {
+      throw new Error(`Model resolution blocked: AGENT_GOAL_MODEL_CLASS_CATALOG_FILE not found: ${resolved}`);
+    }
+    const source = `AGENT_GOAL_MODEL_CLASS_CATALOG_FILE:${resolved}`;
+    return { catalog: parseGoalModelClassCatalogJson(readFileSync(resolved, "utf8"), source), source };
+  }
+
+  const catalogJson = env?.AGENT_GOAL_MODEL_CLASS_CATALOG_JSON;
+  if (catalogJson?.trim()) {
+    const source = "AGENT_GOAL_MODEL_CLASS_CATALOG_JSON";
+    return { catalog: parseGoalModelClassCatalogJson(catalogJson, source), source };
+  }
+
+  return { catalog: readBundledModelClassCatalog(), source: MODEL_CLASS_CATALOG_SPECIFIER };
+}
+
+function loadModelBindingCatalogFromEnvOrBundled(
+  harness: string,
+  env: NodeJS.ProcessEnv | undefined,
+): LoadedModelBindingCatalog {
+  const normalizedHarness = normalizeHarness(harness);
+  const bindingFile = env?.AGENT_GOAL_MODEL_BINDING_FILE;
+  if (bindingFile?.trim()) {
+    const resolved = resolve(process.cwd(), bindingFile.trim());
+    if (!existsSync(resolved)) {
+      throw new Error(`Model resolution blocked: AGENT_GOAL_MODEL_BINDING_FILE not found: ${resolved}`);
+    }
+    const source = `AGENT_GOAL_MODEL_BINDING_FILE:${resolved}`;
+    const catalog = parseGoalModelBindingCatalogJson(readFileSync(resolved, "utf8"), source);
+    return { catalog: assertBindingCatalogHarness(catalog, normalizedHarness, source), source };
+  }
+
+  const bindingJson = env?.AGENT_GOAL_MODEL_BINDING_JSON;
+  if (bindingJson?.trim()) {
+    const source = "AGENT_GOAL_MODEL_BINDING_JSON";
+    const catalog = parseGoalModelBindingCatalogJson(bindingJson, source);
+    return { catalog: assertBindingCatalogHarness(catalog, normalizedHarness, source), source };
+  }
+
+  const source = `goal-contract/catalogs/bindings/${normalizedHarness}.json`;
+  return {
+    catalog: assertBindingCatalogHarness(readBundledModelBindingCatalog(normalizedHarness), normalizedHarness, source),
+    source,
+  };
+}
+
+function assertBindingCatalogHarness(
+  catalog: GoalModelBindingCatalog,
+  expectedHarness: string,
+  source: string,
+): GoalModelBindingCatalog {
+  if (catalog.harness !== expectedHarness) {
+    throw new Error(
+      `Model resolution blocked: binding catalog ${source} harness ${JSON.stringify(catalog.harness)} does not match requested harness ${JSON.stringify(expectedHarness)}`,
+    );
+  }
+  return catalog;
+}
+
+function normalizeHarness(harness: string): string {
+  return harness.trim() || "pi";
 }

@@ -38,6 +38,14 @@ test("readOpencodeModelRoutingConfig reads from file path", () => {
         rmSync(dir, { recursive: true, force: true });
     }
 });
+test("readOpencodeModelRoutingConfig fails closed for missing explicit file paths", () => {
+    const missing = join(tmpdir(), "missing-opencode-model-routing.json");
+    assert.throws(() => readOpencodeModelRoutingConfig({ filePath: missing }), /Model routing file not found/);
+});
+test("readOpencodeModelRoutingConfig fails closed for missing env file paths", () => {
+    const missing = join(tmpdir(), "missing-opencode-env-model-routing.json");
+    assert.throws(() => readOpencodeModelRoutingConfig({ env: { AGENT_GOAL_MODEL_ROUTING_FILE: missing } }), /Model routing file not found/);
+});
 test("readOpencodeModelRoutingConfig reads from env JSON", () => {
     const previous = process.env.AGENT_GOAL_MODEL_ROUTING_JSON;
     process.env.AGENT_GOAL_MODEL_ROUTING_JSON = JSON.stringify({ defaultSubagentScenario: "implementation", scenarios: { implementation: { modelClass: "implementation" } } });

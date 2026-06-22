@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createGoalDagNodesFromFileContent, parseGoalModelRoutingConfig, resolveGoalModelForHarness, selectModelScenarioForNode, GoalRuntime, SQLiteGoalStore, } from "../core/index.js";
+import { createGoalDagNodesFromFileContent, parseGoalModelRoutingConfig, readModelBindingCatalogFromEnvOrBundled, readModelClassCatalogFromEnvOrBundled, resolveGoalModelForHarness, selectModelScenarioForNode, GoalRuntime, SQLiteGoalStore, } from "../core/index.js";
 const modelRouting = {
     scenarios: {
         controller: { modelClass: "controller" },
@@ -71,6 +71,91 @@ test("harness binding resolution returns concrete model evidence", () => {
     assert.equal(resolution.modelArg, "openai-codex/gpt-5.5");
     assert.equal(resolution.evidence.status, "resolved");
     assert.equal(resolution.evidence.requested.modelClass, "strict-reviewer");
+});
+test("model class env JSON overrides bundled catalog", () => {
+    const classCatalog = {
+        version: 1,
+        modelClasses: {
+            implementation: {
+                minimumRequirements: {
+                    reasoning: "very_high",
+                    contextWindowTokens: 128000,
+                    toolUse: "required",
+                    structuredOutput: "strict",
+                    formatFollowing: "very_high",
+                    sourceCitation: "required",
+                    privacy: "cloud-ok",
+                },
+                fallbackPolicy: { allowDowngrade: false, onUnavailable: "block" },
+            },
+        },
+    };
+    const parsed = readModelClassCatalogFromEnvOrBundled({
+        AGENT_GOAL_MODEL_CLASS_CATALOG_JSON: JSON.stringify(classCatalog),
+    });
+    assert.equal(parsed.modelClasses.implementation?.minimumRequirements.reasoning, "very_high");
+    assert.throws(() => resolveGoalModelForHarness({
+        harness: "pi",
+        modelClass: "implementation",
+        env: { AGENT_GOAL_MODEL_CLASS_CATALOG_JSON: JSON.stringify(classCatalog) },
+    }), /Model resolution blocked for implementation: binding does not satisfy minimum capabilities/);
+});
+test("model binding env file overrides bundled binding catalog", () => {
+    const dir = mkdtempSync(join(tmpdir(), "goal-binding-env-"));
+    const file = join(dir, "pi-binding.json");
+    try {
+        writeFileSync(file, JSON.stringify({
+            version: 1,
+            harness: "pi",
+            bindings: {
+                implementation: {
+                    model: "local/custom-implementation",
+                    declaredCapabilities: {
+                        reasoning: "high",
+                        contextWindowTokens: 256000,
+                        toolUse: "required",
+                        structuredOutput: "preferred",
+                        formatFollowing: "high",
+                        sourceCitation: "preferred",
+                        privacy: "cloud-ok",
+                    },
+                },
+            },
+        }));
+        const parsed = readModelBindingCatalogFromEnvOrBundled("pi", { AGENT_GOAL_MODEL_BINDING_FILE: file });
+        assert.equal(parsed.bindings.implementation?.model, "local/custom-implementation");
+        const resolution = resolveGoalModelForHarness({
+            harness: "pi",
+            modelClass: "implementation",
+            env: { AGENT_GOAL_MODEL_BINDING_FILE: file },
+        });
+        assert.equal(resolution.modelArg, "local/custom-implementation");
+        assert.equal(resolution.evidence.resolved?.bindingSource, `AGENT_GOAL_MODEL_BINDING_FILE:${file}`);
+    }
+    finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+test("model resolver fails closed for explicit missing or invalid env catalogs", () => {
+    const missing = join(tmpdir(), "missing-goal-model-catalog.json");
+    assert.throws(() => readModelClassCatalogFromEnvOrBundled({ AGENT_GOAL_MODEL_CLASS_CATALOG_FILE: missing }), /AGENT_GOAL_MODEL_CLASS_CATALOG_FILE not found/);
+    assert.throws(() => readModelBindingCatalogFromEnvOrBundled("pi", { AGENT_GOAL_MODEL_BINDING_FILE: missing }), /AGENT_GOAL_MODEL_BINDING_FILE not found/);
+    assert.throws(() => readModelBindingCatalogFromEnvOrBundled("pi", { AGENT_GOAL_MODEL_BINDING_JSON: "{not json" }), /Invalid goal model binding catalog JSON/);
+    assert.throws(() => readModelBindingCatalogFromEnvOrBundled("pi", {
+        AGENT_GOAL_MODEL_BINDING_JSON: JSON.stringify({
+            version: 1,
+            harness: "opencode",
+            bindings: {
+                implementation: {
+                    model: "provider/model",
+                    declaredCapabilities: { reasoning: "high" },
+                },
+            },
+        }),
+    }), /does not match requested harness/);
+});
+test("model resolver blocks unknown harness without an explicit binding catalog", () => {
+    assert.throws(() => resolveGoalModelForHarness({ harness: "unknown-harness", modelClass: "implementation", env: {} }), /no bundled binding catalog for harness/);
 });
 test("SQLite store persists DAG node model class, arg, and resolution evidence", async () => {
     const dir = mkdtempSync(join(tmpdir(), "goal-model-routing-"));

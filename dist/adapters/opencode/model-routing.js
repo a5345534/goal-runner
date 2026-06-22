@@ -10,14 +10,18 @@ export function readOpencodeModelRoutingConfig(input) {
     const env = input.env ?? process.env;
     if (input.filePath?.trim()) {
         const resolved = resolve(input.cwd ?? process.cwd(), input.filePath.trim());
+        if (!existsSync(resolved))
+            throw new Error(`Model routing file not found: ${resolved}`);
         return parseGoalModelRoutingConfigJson(readFileSync(resolved, "utf8"), `AGENT_GOAL_MODEL_ROUTING_FILE:${resolved}`);
     }
     if (input.inlineJson?.trim()) {
         return parseGoalModelRoutingConfigJson(input.inlineJson, "AGENT_GOAL_MODEL_ROUTING_INLINE");
     }
     const envFile = env.AGENT_GOAL_MODEL_ROUTING_FILE;
-    if (envFile?.trim() && existsSync(resolve(input.cwd ?? process.cwd(), envFile.trim()))) {
+    if (envFile?.trim()) {
         const resolved = resolve(input.cwd ?? process.cwd(), envFile.trim());
+        if (!existsSync(resolved))
+            throw new Error(`Model routing file not found: ${resolved}`);
         return parseGoalModelRoutingConfigJson(readFileSync(resolved, "utf8"), `AGENT_GOAL_MODEL_ROUTING_FILE:${resolved}`);
     }
     const envJson = env.AGENT_GOAL_MODEL_ROUTING_JSON;

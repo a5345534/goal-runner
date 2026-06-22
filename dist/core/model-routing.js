@@ -10,8 +10,6 @@ export function resolveControllerModelClass(config) {
     }
     return { scenario: undefined, modelClass: "controller", reason: "implicit controller modelClass" };
 }
-/** @deprecated Use resolveControllerModelClass plus harness binding resolution. */
-export const resolveControllerModelArg = resolveControllerModelClass;
 export function selectModelScenarioForNode(node, config) {
     if (!config)
         return { scenario: undefined, modelClass: "implementation", reason: "implicit implementation modelClass" };

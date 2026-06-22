@@ -357,7 +357,7 @@ A node-level field overrides the corresponding default. For example, if `default
 }
 ```
 
-Scenario ids must match `^[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$`. `modelClass` is an abstract class id. Harness adapters resolve it through binding catalogs and record resolution evidence; concrete provider/model ids are not valid in DAG JSON.
+Scenario ids must match `^[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$`. `modelClass` is an abstract class id. Harness adapters resolve it through model-class and binding catalogs and record resolution evidence; concrete provider/model ids are not valid in DAG JSON.
 
 Selection order for subagents:
 
@@ -365,7 +365,7 @@ Selection order for subagents:
 2. `defaults.modelScenario`
 3. first matching `modelRouting.rules[]`
 4. `modelRouting.defaultSubagentScenario`
-5. no scenario resolves: execution blocks until routing is made explicit
+5. no scenario resolves: implicit `implementation` modelClass
 
 Rule `when` supports:
 
@@ -379,7 +379,7 @@ Rule `when` supports:
 - `hasValidators`
 - `hasOutputs`
 
-The selected scenario and model are persisted on the durable DAG node so later scheduling/recovery can keep using the same model choice.
+The selected scenario, `modelClass`, concrete harness model argument, and resolution evidence are persisted on durable controller/node records so later scheduling/recovery can keep using the same resolved binding.
 
 Pi also accepts a reusable model-routing config outside the DAG file:
 
@@ -389,7 +389,7 @@ AGENT_GOAL_MODEL_ROUTING_FILE=.goal/models.json
 AGENT_GOAL_MODEL_ROUTING_JSON='{ "scenarios": { "implementation": { "modelClass": "implementation" } }, "defaultSubagentScenario": "implementation" }'
 ```
 
-A DAG file's `modelRouting` takes precedence over environment-provided routing.
+A DAG file's `modelRouting` takes precedence over environment-provided routing. Runtime model-class and binding catalogs default to `goal-contract/catalogs/model-classes.json` and `goal-contract/catalogs/bindings/<harness>.json`; operators can override them with `AGENT_GOAL_MODEL_CLASS_CATALOG_FILE`, `AGENT_GOAL_MODEL_CLASS_CATALOG_JSON`, `AGENT_GOAL_MODEL_BINDING_FILE`, or `AGENT_GOAL_MODEL_BINDING_JSON`. Explicit file overrides fail closed if missing, invalid, for the wrong harness, or under-capable for the requested class.
 
 ## Conflict hints
 

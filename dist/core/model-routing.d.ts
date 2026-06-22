@@ -8,8 +8,6 @@ export interface GoalModelScenarioSelection {
     reason: string;
 }
 export declare function resolveControllerModelClass(config: GoalModelRoutingConfig | undefined): GoalModelScenarioSelection;
-/** @deprecated Use resolveControllerModelClass plus harness binding resolution. */
-export declare const resolveControllerModelArg: typeof resolveControllerModelClass;
 export declare function selectModelScenarioForNode(node: {
     nodeId: string;
     objective: string;

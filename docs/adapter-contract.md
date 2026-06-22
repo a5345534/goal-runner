@@ -139,9 +139,14 @@ The `goal-runner/opencode` export is an `@opencode-ai/plugin`
   from `--model-routing`, `--model-routing-file`,
   `AGENT_GOAL_MODEL_ROUTING_FILE`, `AGENT_GOAL_MODEL_ROUTING_JSON`, or the
   DAG file's `modelRouting`. Concrete model ids are resolved only through
-  the opencode harness binding catalog and recorded as resolution evidence
-  before being forwarded to the opencode `session.prompt` body as
-  `model: { providerID, modelID }`.
+  model-class and harness binding catalogs, optionally overridden by
+  `AGENT_GOAL_MODEL_CLASS_CATALOG_FILE`,
+  `AGENT_GOAL_MODEL_CLASS_CATALOG_JSON`, `AGENT_GOAL_MODEL_BINDING_FILE`,
+  or `AGENT_GOAL_MODEL_BINDING_JSON`. Missing explicit files, invalid JSON,
+  wrong-harness catalogs, missing bindings, and under-capable bindings fail
+  closed unless the class fallback policy allows warning. Resolution evidence
+  is recorded before the concrete model is forwarded to the opencode
+  `session.prompt` body as `model: { providerID, modelID }`.
 - controller poll loop running `finalizeGoalFromDagTerminalState` +
   `cleanupTerminalSubagentWorkspaces` when the DAG reaches a terminal
   state, mirroring the Pi adapter's closeout path

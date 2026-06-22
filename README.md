@@ -345,7 +345,13 @@ allowed roots to restrict eligible execution workspaces.
 Model routing uses abstract classes only: `--model-routing`,
 `--model-routing-file`, `AGENT_GOAL_MODEL_ROUTING_FILE`,
 `AGENT_GOAL_MODEL_ROUTING_JSON`, and DAG file `modelRouting` all contain
-`modelClass` values. The opencode adapter resolves those classes through its
-harness binding catalog, persists resolution evidence, and then translates the
-resolved model into a `model: { providerID, modelID }` body on
-`session.prompt`.
+`modelClass` values. Harness adapters resolve those classes through model-class
+and binding catalogs, persist resolution evidence, and then translate the
+resolved model into the harness-specific concrete model argument. By default the
+catalogs come from `goal-contract/catalogs/model-classes.json` and
+`goal-contract/catalogs/bindings/<harness>.json`; operators can override them
+with `AGENT_GOAL_MODEL_CLASS_CATALOG_FILE`,
+`AGENT_GOAL_MODEL_CLASS_CATALOG_JSON`, `AGENT_GOAL_MODEL_BINDING_FILE`, or
+`AGENT_GOAL_MODEL_BINDING_JSON`. Explicit file overrides fail closed when the
+file is missing, invalid, for the wrong harness, or under-capable for the
+requested class.
