@@ -195,6 +195,25 @@ export function buildGoalMonitorOverview(
 // ── Updated deriveMonitorHealth with new taxonomy priority ──
 
 /**
+ * Returns true when `other` is a newer running/complete replacement for
+ * the same node as `failed`. Compares updatedAt (falling back to createdAt)
+ * to ensure an older complete subagent does not mask a newer failed one.
+ */
+function isNewerReplacement(
+  failed: GoalSubagentRecord,
+  other: GoalSubagentRecord,
+): boolean {
+  if (other.nodeId !== failed.nodeId) return false;
+  if (other.subagentId === failed.subagentId) return false;
+  if (!["running", "complete"].includes(other.status)) return false;
+
+  const failedTime = Date.parse(failed.updatedAt ?? failed.createdAt);
+  const otherTime = Date.parse(other.updatedAt ?? other.createdAt);
+  if (!Number.isFinite(failedTime) || !Number.isFinite(otherTime)) return false;
+  return otherTime >= failedTime;
+}
+
+/**
  * Shared classifier: a subagent is an unresolved residual issue only when
  * its status is blocked/failed/needsFollowup AND no newer running/complete
  * replacement exists for the same node.
@@ -205,10 +224,7 @@ function isUnresolvedResidualIssue(
 ): boolean {
   if (!["blocked", "failed", "needsFollowup"].includes(subagent.status)) return false;
   return !allSubagents.some(
-    (other) =>
-      other.nodeId === subagent.nodeId &&
-      other.subagentId !== subagent.subagentId &&
-      ["running", "complete"].includes(other.status),
+    (other) => isNewerReplacement(subagent, other),
   );
 }
 
