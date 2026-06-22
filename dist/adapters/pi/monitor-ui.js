@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { formatAuditSummary, } from "../../core/index.js";
-import { buildGoalMonitorOverview, EXTENDED_MONITOR_HEALTH_LABELS, MONITOR_NODE_DISPLAY_STATE_CHARS, ACTION_DISPLAY_LABELS, buildNodeDurationSummary, buildRunnerDurationSummary, formatAgo, } from "../monitor-overview.js";
+import { buildGoalMonitorOverview, EXTENDED_MONITOR_HEALTH_LABELS, MONITOR_NODE_DISPLAY_STATE_CHARS, ACTION_DISPLAY_LABELS, buildNodeDurationSummary, buildRunnerDurationSummary, deriveMonitorHealth as deriveExtendedMonitorHealth, formatAgo, } from "../monitor-overview.js";
 import { filterPiBackgroundRunnersForSubagent } from "./runner-ops.js";
 // Canonical state labels shared across Pi TUI and OpenCode monitors.
 export const SESSION_STATE_LABELS = {
@@ -215,47 +215,50 @@ function deriveRunnerCounts(subagents, runners) {
 /**
  * Derive a monitor health status from the runtime summary and DAG state.
  * Returns { health, nextAction } where nextAction is a one-line recommendation.
+ *
+ * @deprecated This is a compatibility wrapper. New code should use
+ * deriveMonitorHealth from monitor-overview.ts (ExtendedMonitorHealth).
  */
 export function deriveMonitorHealth(summary, goal, subagents, nodes) {
-    // DAG node status has priority over subagent status for health.
-    const blockedNode = nodes?.find((n) => ["blocked", "failed"].includes(n.status));
-    const hasBlockedOrFailedSubagent = subagents.some((s) => ["blocked", "failed", "needsFollowup"].includes(s.status));
-    const hasRunning = subagents.some((s) => s.status === "running");
-    const hasComplete = subagents.some((s) => s.status === "complete");
-    if (blockedNode) {
-        if (summary.session.state === "active-turn" || summary.runners.running > 0) {
-            return { health: "Needs attention", nextAction: `inspect blocked node ${blockedNode.nodeId}` };
-        }
-        return { health: "Blocked", nextAction: `inspect blocked node ${blockedNode.nodeId} or pause/clear goal` };
+    const extended = deriveExtendedMonitorHealth(summary, goal, subagents, nodes);
+    // Map ExtendedMonitorHealth → MonitorHealth + nextAction
+    const label = EXTENDED_MONITOR_HEALTH_LABELS[extended] ?? extended;
+    let monitorHealth;
+    let nextAction;
+    if (extended === "Complete" || extended === "Complete with warnings") {
+        monitorHealth = "OK";
+        nextAction = extended === "Complete"
+            ? "goal complete — archive or inspect"
+            : "goal complete with residual warnings — inspect execution plan";
     }
-    if (hasBlockedOrFailedSubagent) {
-        if (summary.session.state === "active-turn" || summary.runners.running > 0) {
-            return { health: "Needs attention", nextAction: "inspect blocked/failed nodes via nodeList → runnerList" };
-        }
-        return { health: "Blocked", nextAction: "inspect blocked nodes or pause/clear goal" };
+    else if (extended === "Running") {
+        monitorHealth = "OK";
+        nextAction = "monitor progress";
     }
-    if (goal.status === "blocked") {
-        return { health: "Blocked", nextAction: "inspect goal status or take manual action" };
+    else if (extended === "Blocked") {
+        monitorHealth = "Blocked";
+        const blockedNode = nodes?.find((n) => ["blocked", "failed", "blockedTerminal"].includes(n.status));
+        nextAction = blockedNode
+            ? `inspect blocked node ${blockedNode.nodeId} — may require external intervention`
+            : "inspect blocked nodes or pause/clear goal";
     }
-    if (goal.status === "paused") {
-        return { health: "Waiting", nextAction: "resume goal to continue" };
+    else if (extended === "Needs attention") {
+        monitorHealth = "Needs attention";
+        nextAction = "inspect blocked/failed nodes via nodeList → runnerList";
     }
-    if (goal.status === "budgetLimited" || goal.status === "usageLimited") {
-        return { health: "Waiting", nextAction: "goal waiting on budget/usage limit reset" };
+    else if (extended === "Waiting") {
+        monitorHealth = "Waiting";
+        nextAction = goal.status === "paused" ? "resume goal to continue" : "goal waiting on budget/usage limit reset";
     }
-    if (goal.status === "complete") {
-        return { health: "OK", nextAction: "goal complete — archive or inspect" };
+    else if (extended === "Stalled") {
+        monitorHealth = "Stalled";
+        nextAction = "no running subagents — check controller poll and hidden continuation";
     }
-    if (hasRunning && summary.controllerPoll.state === "active") {
-        return { health: "OK", nextAction: "monitor progress" };
+    else {
+        monitorHealth = "OK";
+        nextAction = "monitor progress";
     }
-    if (summary.runners.running > 0 && summary.controllerPoll.state === "unknown") {
-        return { health: "OK", nextAction: "monitor progress" };
-    }
-    if (!hasRunning && !hasComplete) {
-        return { health: "Stalled", nextAction: "no running subagents — check controller poll and hidden continuation" };
-    }
-    return { health: "OK", nextAction: "monitor progress" };
+    return { health: monitorHealth, nextAction };
 }
 const DEFAULT_VISIBLE_LIVE_LINES = 18;
 const DEFAULT_VISIBLE_LIST_LINES = 14;

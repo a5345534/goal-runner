@@ -4,6 +4,8 @@ import { hasSubagentBranchOrWorkspaceEvidence, nodeRequiresSubagentIntegration, 
 import { attachPreparedResourcesToNode, recordAdapterObservationOnNode, recordRecoveryDecisionOnNode, supersedePreparedResourcesOnNode, withGoalDagNodeLifecyclePhase } from "./lifecycle.js";
 import { applyAuditActions, buildControllerAuditSnapshot, formatAuditSummary, isAuditDue, recordAuditActionDecisions, validateControllerAuditDecision, } from "./controller-audit.js";
 const SYNCABLE_SUBAGENT_STATUSES = new Set(["sessionStarted", "running", "idle", "blocked"]);
+// blockedTerminal is intentionally excluded: the subagent session has ended
+// and no further transcript updates are expected.
 const NON_TERMINAL_SUBAGENT_STATUSES = new Set([
     "planned",
     "workspaceCreated",
@@ -122,7 +124,7 @@ function controllerEventCategory(event) {
     return "diagnostic";
 }
 function shouldSuppressControllerEvent(goalId, event, details, at) {
-    if (event !== "recovery.blocked")
+    if (event !== "recovery.blocked" && event !== "staleState.blocked")
         return false;
     const key = [goalId, event, details.nodeId, details.subagentId, details.reason].map((item) => String(item ?? "")).join("\u0000");
     const nowMs = at ? Date.parse(typeof at === "string" ? at : at.toISOString()) : Date.now();
@@ -577,6 +579,15 @@ export async function runGoalControllerLoop(runtime, goalId, options) {
         ticks.push(tick);
         if (stopWhenIdle && !tick.changed && tick.ready.length === 0)
             break;
+        // Additional fast-path: exit when all nodes are terminal (complete/failed/blockedTerminal)
+        // even if ready queue has stale references.
+        if (stopWhenIdle && !tick.changed) {
+            const state = await runtime.getGoalOrchestrationState(goalId);
+            const TERMINAL_STATUSES = new Set(["complete", "failed", "blockedTerminal"]);
+            const allTerminal = state.nodes.length > 0 && state.nodes.every((n) => TERMINAL_STATUSES.has(n.status));
+            if (allTerminal)
+                break;
+        }
         if (index < maxTicks - 1)
             await sleep(intervalMs, options.signal);
     }
@@ -1053,6 +1064,27 @@ async function reconcileStaleControllerStates(runtime, goalId, options, result, 
         }, tickStartedAt);
         result.followups.push(needsFollowupSubagent);
         result.synced.push(needsFollowupSubagent);
+    }
+    // ── Stale blocked detection (blocked / blockedTerminal) ──
+    for (const subagent of latestSubagents) {
+        const node = state.nodes.find((candidate) => candidate.nodeId === subagent.nodeId);
+        if (!node)
+            continue;
+        const blockedStatuses = ["blocked", "blockedTerminal"];
+        if (!blockedStatuses.includes(subagent.status))
+            continue;
+        const ageMs = ageSince(subagent.updatedAt, tickStartedAt);
+        if (ageMs < thresholdMs)
+            continue;
+        await recordControllerEvent(runtime, node.goalId, "staleState.blocked", {
+            nodeId: node.nodeId,
+            subagentId: subagent.subagentId,
+            nodeStatus: node.status,
+            subagentStatus: subagent.status,
+            ageMs,
+            thresholdMs,
+        }, tickStartedAt);
+        // Diagnostic only — do not change node/subagent status.
     }
 }
 function controllerStateAgeMs(node, subagent, nowIso) {
@@ -1604,8 +1636,32 @@ async function tryRecoverBlockedSubagent(runtime, options, state, node, subagent
     }
     const maxRetries = options.maxAutoRetries ?? MAX_AUTO_RETRIES_DEFAULT;
     const retryCount = subagent.retryCount ?? 0;
-    if (retryCount >= maxRetries)
-        return false;
+    if (retryCount >= maxRetries) {
+        const summary = `blockedTerminal: recovery retries exhausted (${retryCount}/${maxRetries}). ${blockedReason}`;
+        const terminalSubagent = withSubagentPatch(subagent, {
+            status: "blockedTerminal",
+            integrationStatus: summary,
+            retryCount,
+            updatedAt: tickStartedAt,
+        });
+        const terminalNode = withNodePatch(node, {
+            status: "blockedTerminal",
+            lastValidationSummary: summary,
+            updatedAt: tickStartedAt,
+        });
+        await runtime.saveGoalSubagent(terminalSubagent);
+        await runtime.saveGoalDagNode(terminalNode);
+        await recordControllerEvent(runtime, subagent.goalId, "recovery.blockedTerminal", {
+            nodeId: node.nodeId,
+            subagentId: subagent.subagentId,
+            retry: retryCount,
+            maxRetries,
+            reason: blockedReason,
+        }, tickStartedAt);
+        result.blocked.push(terminalNode);
+        result.synced.push(terminalSubagent);
+        return true;
+    }
     try {
         const prompt = buildBlockedNodeRecoveryPrompt(node, blockedReason, retryCount, maxRetries);
         const followed = await sendGoalSubagentPromptWithTimeout(runtime, options, options.adapter, subagent, prompt, tickStartedAt);

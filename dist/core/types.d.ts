@@ -200,7 +200,7 @@ export interface GoalSummary {
     controllerModelResolution?: GoalModelResolution;
     legacySessionBound?: boolean;
 }
-export type GoalDagNodeStatus = "planned" | "ready" | "running" | "selfReportedComplete" | "controllerValidating" | "needsFollowup" | "complete" | "blocked" | "failed" | "superseded";
+export type GoalDagNodeStatus = "planned" | "ready" | "running" | "selfReportedComplete" | "controllerValidating" | "needsFollowup" | "complete" | "blocked" | "blockedTerminal" | "failed" | "superseded";
 export type GoalDagNodeLifecyclePhase = "acceptanceDefined" | "resourcesCreating" | "resourcesReady" | "runnerStarting" | "runnerActive" | "controllerJudging" | "validating" | "integrating" | "terminal";
 export type GoalSubagentObservationKind = "runnerStarting" | "running" | "idle" | "selfReportedComplete" | "selfReportedBlocked" | "protocolViolation" | "runnerError" | "runnerLost" | "stopped";
 export interface GoalNodePreparedResources {
@@ -312,7 +312,7 @@ export interface GoalDagNode {
     createdAt: string;
     updatedAt: string;
 }
-export type GoalSubagentStatus = "planned" | "workspaceCreated" | "sessionStarted" | "running" | "idle" | "selfReportedComplete" | "controllerValidating" | "needsFollowup" | "complete" | "blocked" | "failed";
+export type GoalSubagentStatus = "planned" | "workspaceCreated" | "sessionStarted" | "running" | "idle" | "selfReportedComplete" | "controllerValidating" | "needsFollowup" | "complete" | "blocked" | "blockedTerminal" | "failed";
 export type GoalSubagentIntegrationState = "pending" | "integrating" | "complete" | "failed" | "not-required";
 export interface GoalSubagentRecord {
     goalId: string;

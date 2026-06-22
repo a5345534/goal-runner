@@ -78,6 +78,9 @@ export declare function buildGoalMonitorRuntimeSummary(goal: GoalSummary, subage
 /**
  * Derive a monitor health status from the runtime summary and DAG state.
  * Returns { health, nextAction } where nextAction is a one-line recommendation.
+ *
+ * @deprecated This is a compatibility wrapper. New code should use
+ * deriveMonitorHealth from monitor-overview.ts (ExtendedMonitorHealth).
  */
 export declare function deriveMonitorHealth(summary: GoalMonitorRuntimeSummary, goal: GoalSummary, subagents: GoalSubagentRecord[], nodes?: GoalDagNode[]): {
     health: MonitorHealth;

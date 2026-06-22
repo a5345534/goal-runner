@@ -195,6 +195,24 @@ export function buildGoalMonitorOverview(
 // ── Updated deriveMonitorHealth with new taxonomy priority ──
 
 /**
+ * Shared classifier: a subagent is an unresolved residual issue only when
+ * its status is blocked/failed/needsFollowup AND no newer running/complete
+ * replacement exists for the same node.
+ */
+function isUnresolvedResidualIssue(
+  subagent: GoalSubagentRecord,
+  allSubagents: GoalSubagentRecord[],
+): boolean {
+  if (!["blocked", "failed", "needsFollowup"].includes(subagent.status)) return false;
+  return !allSubagents.some(
+    (other) =>
+      other.nodeId === subagent.nodeId &&
+      other.subagentId !== subagent.subagentId &&
+      ["running", "complete"].includes(other.status),
+  );
+}
+
+/**
  * Derive a monitor health status from the runtime summary, goal, subagents
  * and DAG state.  The new taxonomy gives priority to goal terminal states
  * first, then node/subagent status, then runtime activity.
@@ -209,12 +227,12 @@ export function deriveMonitorHealth(
 
   if (goal.status === "complete") {
     // A completed goal is never "Blocked".
-    // Check for residual warnings (blocked/failed subagents or nodes).
-    const hasWarnings = subagents.some(
-      (s) => ["blocked", "failed", "needsFollowup"].includes(s.status),
-    ) || (nodes?.some(
-      (n) => ["blocked", "failed"].includes(n.status),
-    ) ?? false);
+    // Check for unresolved residual issues (historical failures without replacement).
+    // blockedTerminal is terminal; exclude from warning scan.
+    const hasWarnings = subagents.some((s) => isUnresolvedResidualIssue(s, subagents))
+      || (nodes?.some(
+        (n) => ["blocked", "failed"].includes(n.status),
+      ) ?? false);
 
     return hasWarnings ? "Complete with warnings" : "Complete";
   }
@@ -233,24 +251,14 @@ export function deriveMonitorHealth(
 
   // ── 2. Active goals: current effective state, not historical failures ──
 
-  const blockedNode = nodes?.find((n) => ["blocked", "failed"].includes(n.status));
+  const blockedNode = nodes?.find((n) => ["blocked", "failed", "blockedTerminal"].includes(n.status));
   const hasRunning = subagents.some((s) => s.status === "running");
   const hasComplete = subagents.some((s) => s.status === "complete");
 
-  // Only count failed/blocked subagents that don't have a newer replacement
-  // (running or complete) for the same node.
+  // Only count failed/blocked subagents that don't have a newer replacement.
   const failedSubagentsWithNoReplacement = subagents.filter(
-    (s) => ["blocked", "failed", "needsFollowup"].includes(s.status),
-  ).filter((failed) => {
-    // If any subagent for the same node is running or complete, this failure is historical.
-    const hasReplacement = subagents.some(
-      (other) =>
-        other.nodeId === failed.nodeId &&
-        other.subagentId !== failed.subagentId &&
-        ["running", "complete"].includes(other.status),
-    );
-    return !hasReplacement;
-  });
+    (s) => isUnresolvedResidualIssue(s, subagents),
+  );
 
   if (blockedNode) {
     if (summary.session.state === "active-turn" || summary.runners.running > 0) {
@@ -302,14 +310,14 @@ export function summarizeMonitorProblem(
     }
 
     const hasWarnings = subagents.some(
-      (s) => ["blocked", "failed", "needsFollowup"].includes(s.status),
+      (s) => isUnresolvedResidualIssue(s, subagents),
     ) || nodes.some((n) => ["blocked", "failed"].includes(n.status));
 
     return hasWarnings ? "some node · residual issues after completion" : "none";
   }
 
-  // Blocked nodes first.
-  const blockedNode = nodes.find((n) => ["blocked", "failed"].includes(n.status));
+  // Blocked nodes first (includes blockedTerminal for active goals).
+  const blockedNode = nodes.find((n) => ["blocked", "failed", "blockedTerminal"].includes(n.status));
   if (blockedNode) {
     const reason = blockedNode.lastValidationSummary
       ?? findLatestSubagent(nodes, subagents, blockedNode.nodeId)?.selfReportedResult
@@ -322,8 +330,8 @@ export function summarizeMonitorProblem(
   // Blocked/failed subagents (not associated with blocked node).
   // Only count subagents that don't have a newer replacement.
   const failedWithoutReplacement = subagents.filter(
-    (s) => ["blocked", "failed", "needsFollowup"].includes(s.status),
-  ).filter((failed) => !hasReplacementSubagent(failed, subagents));
+    (s) => isUnresolvedResidualIssue(s, subagents),
+  );
 
   const blockedSub = failedWithoutReplacement[0];
   if (blockedSub) {
@@ -398,12 +406,13 @@ export function formatNodeDisplayState(
 
   // Terminal states first.
   if (["blocked", "failed"].includes(node.status)) return "blocked";
-  if (node.status === "superseded") return "blocked";
+  if (node.status === "blockedTerminal") return "complete";
+  if (node.status === "superseded") return "ok";
 
   // Node is complete but subagents may have residual issues.
   if (node.status === "complete") {
     const hasResidualIssues = nodeSubs.some(
-      (s) => ["blocked", "failed", "needsFollowup"].includes(s.status),
+      (s) => isUnresolvedResidualIssue(s, subagents),
     );
     return hasResidualIssues ? "warning" : "complete";
   }
@@ -463,6 +472,8 @@ const MEANINGFUL_EVENT_PREFIXES = [
   "promotion.blocked",
   "dag.terminal",
   "controller_audit_finished",
+  "recovery.blockedTerminal",
+  "staleState.blocked",
 ];
 
 /**
@@ -473,7 +484,7 @@ export function formatRecentEvents(
   ledgerEvents: GoalLedgerEvent[],
   options: { maxRecentEvents?: number; minRecentEvents?: number } = {},
 ): string[] {
-  const maxEvents = options.maxRecentEvents ?? 5;
+  const maxEvents = options.maxRecentEvents ?? 8;
   const minEvents = options.minRecentEvents ?? 3;
 
   const meaningful = ledgerEvents
@@ -635,7 +646,7 @@ function findResidualWarningNode(
   nodes: GoalDagNode[],
   subagents: GoalSubagentRecord[],
 ): GoalDagNode | undefined {
-  const blockedNode = nodes.find((n) => ["blocked", "failed", "superseded"].includes(n.status));
+  const blockedNode = nodes.find((n) => ["blocked", "failed"].includes(n.status));
   if (blockedNode) return blockedNode;
 
   const failedSubagents = subagents

@@ -55,7 +55,7 @@ export interface GoalDagReadyQueue {
 
 const RUNNING_NODE_STATUSES = new Set<GoalDagNodeStatus>(["running", "selfReportedComplete", "controllerValidating"]);
 const TERMINAL_SUCCESS_STATUSES = new Set<GoalDagNodeStatus>(["complete"]);
-const TERMINAL_BLOCKED_STATUSES = new Set<GoalDagNodeStatus>(["blocked", "failed", "superseded"]);
+const TERMINAL_BLOCKED_STATUSES = new Set<GoalDagNodeStatus>(["blocked", "blockedTerminal", "failed", "superseded"]);
 const SCHEDULABLE_NODE_STATUSES = new Set<GoalDagNodeStatus>(["planned", "ready", "needsFollowup"]);
 
 export function createGoalDagNodes(goalId: string, inputs: GoalDagPlanNodeInput[], options: GoalDagPlanOptions = {}): GoalDagNode[] {

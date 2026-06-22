@@ -23,6 +23,7 @@ import {
   formatRecentEvents,
   buildNodeDurationSummary,
   buildRunnerDurationSummary,
+  deriveMonitorHealth as deriveExtendedMonitorHealth,
   formatAgo,
   type RunnerDurationSummary,
   type MonitorDurationSummary,
@@ -375,6 +376,9 @@ function deriveRunnerCounts(
 /**
  * Derive a monitor health status from the runtime summary and DAG state.
  * Returns { health, nextAction } where nextAction is a one-line recommendation.
+ *
+ * @deprecated This is a compatibility wrapper. New code should use
+ * deriveMonitorHealth from monitor-overview.ts (ExtendedMonitorHealth).
  */
 export function deriveMonitorHealth(
   summary: GoalMonitorRuntimeSummary,
@@ -382,53 +386,43 @@ export function deriveMonitorHealth(
   subagents: GoalSubagentRecord[],
   nodes?: GoalDagNode[],
 ): { health: MonitorHealth; nextAction: string } {
-  // DAG node status has priority over subagent status for health.
-  const blockedNode = nodes?.find((n) => ["blocked", "failed"].includes(n.status));
-  const hasBlockedOrFailedSubagent = subagents.some((s) => ["blocked", "failed", "needsFollowup"].includes(s.status));
-  const hasRunning = subagents.some((s) => s.status === "running");
-  const hasComplete = subagents.some((s) => s.status === "complete");
+  const extended = deriveExtendedMonitorHealth(summary, goal, subagents, nodes);
 
-  if (blockedNode) {
-    if (summary.session.state === "active-turn" || summary.runners.running > 0) {
-      return { health: "Needs attention", nextAction: `inspect blocked node ${blockedNode.nodeId}` };
-    }
-    return { health: "Blocked", nextAction: `inspect blocked node ${blockedNode.nodeId} or pause/clear goal` };
-  }
+  // Map ExtendedMonitorHealth → MonitorHealth + nextAction
+  const label = EXTENDED_MONITOR_HEALTH_LABELS[extended] ?? extended;
 
-  if (hasBlockedOrFailedSubagent) {
-    if (summary.session.state === "active-turn" || summary.runners.running > 0) {
-      return { health: "Needs attention", nextAction: "inspect blocked/failed nodes via nodeList → runnerList" };
-    }
-    return { health: "Blocked", nextAction: "inspect blocked nodes or pause/clear goal" };
-  }
+  let monitorHealth: MonitorHealth;
+  let nextAction: string;
 
-  if (goal.status === "blocked") {
-    return { health: "Blocked", nextAction: "inspect goal status or take manual action" };
-  }
-  if (goal.status === "paused") {
-    return { health: "Waiting", nextAction: "resume goal to continue" };
-  }
-  if (goal.status === "budgetLimited" || goal.status === "usageLimited") {
-    return { health: "Waiting", nextAction: "goal waiting on budget/usage limit reset" };
-  }
-
-  if (goal.status === "complete") {
-    return { health: "OK", nextAction: "goal complete — archive or inspect" };
-  }
-
-  if (hasRunning && summary.controllerPoll.state === "active") {
-    return { health: "OK", nextAction: "monitor progress" };
+  if (extended === "Complete" || extended === "Complete with warnings") {
+    monitorHealth = "OK";
+    nextAction = extended === "Complete"
+      ? "goal complete — archive or inspect"
+      : "goal complete with residual warnings — inspect execution plan";
+  } else if (extended === "Running") {
+    monitorHealth = "OK";
+    nextAction = "monitor progress";
+  } else if (extended === "Blocked") {
+    monitorHealth = "Blocked";
+    const blockedNode = nodes?.find((n) => ["blocked", "failed", "blockedTerminal"].includes(n.status));
+    nextAction = blockedNode
+      ? `inspect blocked node ${blockedNode.nodeId} — may require external intervention`
+      : "inspect blocked nodes or pause/clear goal";
+  } else if (extended === "Needs attention") {
+    monitorHealth = "Needs attention";
+    nextAction = "inspect blocked/failed nodes via nodeList → runnerList";
+  } else if (extended === "Waiting") {
+    monitorHealth = "Waiting";
+    nextAction = goal.status === "paused" ? "resume goal to continue" : "goal waiting on budget/usage limit reset";
+  } else if (extended === "Stalled") {
+    monitorHealth = "Stalled";
+    nextAction = "no running subagents — check controller poll and hidden continuation";
+  } else {
+    monitorHealth = "OK";
+    nextAction = "monitor progress";
   }
 
-  if (summary.runners.running > 0 && summary.controllerPoll.state === "unknown") {
-    return { health: "OK", nextAction: "monitor progress" };
-  }
-
-  if (!hasRunning && !hasComplete) {
-    return { health: "Stalled", nextAction: "no running subagents — check controller poll and hidden continuation" };
-  }
-
-  return { health: "OK", nextAction: "monitor progress" };
+  return { health: monitorHealth, nextAction };
 }
 
 const DEFAULT_VISIBLE_LIVE_LINES = 18;

@@ -261,6 +261,7 @@ export type GoalDagNodeStatus =
   | "needsFollowup"
   | "complete"
   | "blocked"
+  | "blockedTerminal"
   | "failed"
   | "superseded";
 
@@ -465,6 +466,7 @@ export type GoalSubagentStatus =
   | "needsFollowup"
   | "complete"
   | "blocked"
+  | "blockedTerminal"
   | "failed";
 
 export type GoalSubagentIntegrationState = "pending" | "integrating" | "complete" | "failed" | "not-required";

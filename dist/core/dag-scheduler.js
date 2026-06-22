@@ -1,7 +1,7 @@
 import { nodeRequiredIntegrationsSatisfied } from "./integration.js";
 const RUNNING_NODE_STATUSES = new Set(["running", "selfReportedComplete", "controllerValidating"]);
 const TERMINAL_SUCCESS_STATUSES = new Set(["complete"]);
-const TERMINAL_BLOCKED_STATUSES = new Set(["blocked", "failed", "superseded"]);
+const TERMINAL_BLOCKED_STATUSES = new Set(["blocked", "blockedTerminal", "failed", "superseded"]);
 const SCHEDULABLE_NODE_STATUSES = new Set(["planned", "ready", "needsFollowup"]);
 export function createGoalDagNodes(goalId, inputs, options = {}) {
     const timestamp = toIso(options.now ?? new Date());
