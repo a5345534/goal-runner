@@ -135,11 +135,12 @@ The `goal-runner/opencode` export is an `@opencode-ai/plugin`
 - file-based multi-node DAG loading through `/goal --dag <path>` and
   `parseGoalDagFileContent` (see [`goal-dag-format.md`](goal-dag-format.md))
 - model routing by scenario (controller + per-DAG-node subagent
-  selection) with the same precedence chain as the Pi bridge:
-  `--model-routing` > `--model-routing-file` >
-  `AGENT_GOAL_MODEL_ROUTING_FILE` > `AGENT_GOAL_MODEL_ROUTING_JSON` >
-  DAG file's `modelRouting` > opencode session model. The resolved
-  model is forwarded to the opencode `session.prompt` body as
+  selection) using abstract `modelClass` values. Routing config can come
+  from `--model-routing`, `--model-routing-file`,
+  `AGENT_GOAL_MODEL_ROUTING_FILE`, `AGENT_GOAL_MODEL_ROUTING_JSON`, or the
+  DAG file's `modelRouting`. Concrete model ids are resolved only through
+  the opencode harness binding catalog and recorded as resolution evidence
+  before being forwarded to the opencode `session.prompt` body as
   `model: { providerID, modelID }`.
 - controller poll loop running `finalizeGoalFromDagTerminalState` +
   `cleanupTerminalSubagentWorkspaces` when the DAG reaches a terminal

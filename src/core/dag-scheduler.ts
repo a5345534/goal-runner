@@ -15,7 +15,9 @@ export interface GoalDagPlanNodeInput {
   workspace?: GoalDagNode["workspace"];
   risk?: GoalDagNode["risk"];
   modelScenario?: string;
+  modelClass?: string;
   modelArg?: string;
+  modelResolution?: GoalDagNode["modelResolution"];
   thinkingLevel?: string;
   conflictHints?: GoalDagConflictHints;
   completionGates?: string[];
@@ -76,7 +78,9 @@ export function createGoalDagNodes(goalId: string, inputs: GoalDagPlanNodeInput[
       workspace: cloneWorkspaceBinding(input.workspace),
       risk: input.risk,
       modelScenario: input.modelScenario,
+      modelClass: input.modelClass,
       modelArg: input.modelArg,
+      modelResolution: input.modelResolution,
       thinkingLevel: input.thinkingLevel,
       conflictHints: cloneConflictHints(input.conflictHints),
       completionGates: [...(input.completionGates ?? options.defaultCompletionGates ?? ["controller-validation"])],

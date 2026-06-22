@@ -141,7 +141,7 @@ test("goal DAG file parser rejects invalid validation locks and unknown model sc
     () => parseGoalDagFileContent(JSON.stringify({
       version: 1,
       objective: "x",
-      modelRouting: { scenarios: { docs: { model: "openai/gpt" } } },
+      modelRouting: { scenarios: { docs: { modelClass: "implementation" } } },
       nodes: [{ id: "a", objective: "x", modelScenario: "missing" }],
     })),
     /unknown model scenario "missing"/,

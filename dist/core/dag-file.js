@@ -45,7 +45,7 @@ export function planGoalDagFromFileDocument(goalId, document, options = {}) {
                 workspace: cloneWorkspaceBinding(node.workspace),
                 risk: node.risk,
                 modelScenario,
-                modelArg: selection.model,
+                modelClass: selection.modelClass,
                 thinkingLevel: node.thinkingLevel ?? defaultThinkingLevel,
                 conflictHints,
                 completionGates: [...(node.completionGates ?? defaultCompletionGates ?? ["controller-validation"])],

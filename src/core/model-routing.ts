@@ -17,23 +17,25 @@ export { parseGoalModelRoutingConfig, parseGoalModelRoutingConfigJson };
 
 export interface GoalModelScenarioSelection {
   scenario?: string;
-  model?: string;
+  modelClass?: string;
   reason: string;
 }
 
-export function resolveControllerModelArg(
+export function resolveControllerModelClass(
   config: GoalModelRoutingConfig | undefined,
-  fallbackModelArg?: string,
 ): GoalModelScenarioSelection {
   if (config?.controllerScenario && config.scenarios[config.controllerScenario]) {
     return {
       scenario: config.controllerScenario,
-      model: config.scenarios[config.controllerScenario].model,
+      modelClass: config.scenarios[config.controllerScenario].modelClass,
       reason: `controller scenario ${config.controllerScenario}`,
     };
   }
-  return { scenario: undefined, model: fallbackModelArg, reason: "fallback controller model" };
+  return { scenario: undefined, modelClass: "controller", reason: "implicit controller modelClass" };
 }
+
+/** @deprecated Use resolveControllerModelClass plus harness binding resolution. */
+export const resolveControllerModelArg = resolveControllerModelClass;
 
 export function selectModelScenarioForNode(
   node: {
@@ -47,28 +49,33 @@ export function selectModelScenarioForNode(
     modelScenario?: string;
   },
   config?: GoalModelRoutingConfig,
-  fallbackModelArg?: string,
 ): GoalModelScenarioSelection {
-  if (!config) return { model: fallbackModelArg, reason: "fallback subagent model" };
+  if (!config) return { scenario: undefined, modelClass: "implementation", reason: "implicit implementation modelClass" };
 
   if (node.modelScenario && config.scenarios[node.modelScenario]) {
-    return { scenario: node.modelScenario, model: config.scenarios[node.modelScenario].model, reason: `explicit node modelScenario ${node.modelScenario}` };
+    return {
+      scenario: node.modelScenario,
+      modelClass: config.scenarios[node.modelScenario].modelClass,
+      reason: `explicit node modelScenario ${node.modelScenario}`,
+    };
   }
   if (config.rules) {
     for (const rule of config.rules) {
       if (matchesRule(node, rule.when)) {
-        return { scenario: rule.scenario, model: config.scenarios[rule.scenario]?.model ?? fallbackModelArg, reason: `routing rule ${rule.scenario}` };
+        const scenario = config.scenarios[rule.scenario];
+        if (!scenario) throw new Error(`Model resolution blocked for node ${node.nodeId}: routing rule references unknown scenario ${rule.scenario}`);
+        return { scenario: rule.scenario, modelClass: scenario.modelClass, reason: `routing rule ${rule.scenario}` };
       }
     }
   }
   if (config.defaultSubagentScenario && config.scenarios[config.defaultSubagentScenario]) {
     return {
       scenario: config.defaultSubagentScenario,
-      model: config.scenarios[config.defaultSubagentScenario].model,
+      modelClass: config.scenarios[config.defaultSubagentScenario].modelClass,
       reason: `default subagent scenario ${config.defaultSubagentScenario}`,
     };
   }
-  return { scenario: undefined, model: fallbackModelArg, reason: "no routing config match" };
+  return { scenario: undefined, modelClass: "implementation", reason: "implicit implementation modelClass" };
 }
 
 export function assertKnownModelScenario(

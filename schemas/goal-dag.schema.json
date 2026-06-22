@@ -202,11 +202,11 @@
             "type": "object",
             "additionalProperties": false,
             "required": [
-              "model"
+              "modelClass"
             ],
             "properties": {
-              "model": {
-                "$ref": "#/$defs/model"
+              "modelClass": {
+                "$ref": "#/$defs/scenarioId"
               },
               "description": {
                 "type": "string",
@@ -380,10 +380,6 @@
           "description": "Pi thinking level for this node; overrides defaults.thinkingLevel."
         }
       }
-    },
-    "model": {
-      "type": "string",
-      "pattern": "^[a-z][a-z0-9]*(?:[-_.][a-z][a-z0-9]*)*\\/[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$"
     }
   }
 }

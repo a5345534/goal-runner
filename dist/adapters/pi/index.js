@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { GoalRuntime, NativeGitWorkspaceManager, SQLiteGoalStore, cleanupTerminalSubagentWorkspaces, createControllerValidationRunner, createNativeGitSubagentBranchIntegrator, createNativeGitSubagentWorkspaceAllocator, findRequiredSubagentIntegrationIssues, parseGoalCommand, parseGoalDagFileContent, parseGoalModelRoutingConfigJson, parseTokenBudget, renderActiveGoalReminderPrompt, resolveControllerModelArg, resolveDefaultStateRoot, selectModelScenarioForNode, } from "../../core/index.js";
+import { GoalRuntime, NativeGitWorkspaceManager, SQLiteGoalStore, cleanupTerminalSubagentWorkspaces, createControllerValidationRunner, createNativeGitSubagentBranchIntegrator, createNativeGitSubagentWorkspaceAllocator, findRequiredSubagentIntegrationIssues, parseGoalCommand, parseGoalDagFileContent, parseGoalModelRoutingConfigJson, parseTokenBudget, renderActiveGoalReminderPrompt, resolveControllerModelClass, resolveDefaultStateRoot, resolveGoalModelForHarness, selectModelScenarioForNode, } from "../../core/index.js";
 import { launchPiRpcBackgroundGoalSession, } from "./background-session.js";
 import { GoalListController } from "./goal-list-ui.js";
 import { normalizePiModelArg } from "./model-args.js";
@@ -451,8 +451,16 @@ async function startGoalOwnedPiSession(runtime, ctx, command, binding, validatio
     const originSessionKey = resolveSessionKey(ctx);
     const labelObjective = command.objective.length <= 64 ? command.objective : `${command.objective.slice(0, 61)}...`;
     const provisionalSessionName = `goal: ${labelObjective}`;
-    const controllerModel = resolveControllerModelArg(options.modelRouting, modelArgFromContext(ctx));
-    const controllerModelArg = normalizePiModelArg(controllerModel.model);
+    const controllerModel = resolveControllerModelClass(options.modelRouting);
+    if (!controllerModel.modelClass)
+        throw new Error("Model resolution blocked: controller modelClass was not selected");
+    const controllerResolution = resolveGoalModelForHarness({
+        harness: "pi",
+        role: "controller",
+        modelScenario: controllerModel.scenario,
+        modelClass: controllerModel.modelClass,
+    });
+    const controllerModelArg = normalizePiModelArg(controllerResolution.modelArg);
     const background = await backgroundGoalSessionLauncher({
         cwd: binding.workspace,
         sessionId: `goal-${randomUUID().replace(/-/g, "").slice(0, 24)}`,
@@ -481,7 +489,9 @@ async function startGoalOwnedPiSession(runtime, ctx, command, binding, validatio
             sessionFile: background.sessionFile,
             sessionName,
             controllerModelScenario: controllerModel.scenario,
+            controllerModelClass: controllerModel.modelClass,
             controllerModelArg,
+            controllerModelResolution: controllerResolution.evidence,
             legacySessionBound: false,
             createdAt: created.goal.createdAt,
             updatedAt: new Date().toISOString(),
@@ -551,9 +561,8 @@ function cleanupAllBackgroundGoalSessions() {
 }
 function buildPiGoalControllerLoopOptions(ctx, goal, binding, modelRouting = readPiGoalModelRoutingConfig(), controllerDefaults = {}) {
     const workspaceManager = new NativeGitWorkspaceManager({ defaultBaseRef: binding.branch ?? binding.ref, fetch: false });
-    const fallbackModelArg = normalizePiModelArg(modelArgFromContext(ctx));
     const fallbackThinkingLevel = controllerDefaults.thinkingLevel;
-    const adapter = getOrCreatePiGoalControllerAdapter(goal.goalId, fallbackModelArg);
+    const adapter = getOrCreatePiGoalControllerAdapter(goal.goalId, undefined);
     const allocator = createNativeGitSubagentWorkspaceAllocator(workspaceManager, {
         controllerWorkspacePath: binding.workspace,
         baseRef: binding.branch ?? binding.ref,
@@ -567,14 +576,24 @@ function buildPiGoalControllerLoopOptions(ctx, goal, binding, modelRouting = rea
         maxAutoRetries: readPiGoalMaxAutoRetries(),
         workspaceAllocator: async (request) => {
             const allocation = (await allocator(request)) ?? {};
-            const selection = selectPiSubagentModel(request.node, modelRouting, fallbackModelArg);
+            const selection = selectPiSubagentModel(request.node, modelRouting);
+            const resolution = selection.modelArg && request.node.modelResolution
+                ? { modelArg: selection.modelArg, evidence: request.node.modelResolution }
+                : resolveGoalModelForHarness({
+                    harness: "pi",
+                    role: "subagent",
+                    modelScenario: selection.scenario,
+                    modelClass: selection.modelClass,
+                });
             return {
                 ...allocation,
                 metadata: {
                     ...(allocation?.metadata ?? {}),
                     controllerGoalId: goal.goalId,
-                    modelArg: normalizePiModelArg(selection.model),
+                    modelArg: normalizePiModelArg(resolution.modelArg),
                     modelScenario: selection.scenario,
+                    modelClass: selection.modelClass,
+                    modelResolution: resolution.evidence,
                     modelScenarioReason: selection.reason,
                     thinkingLevel: request.node.thinkingLevel ?? fallbackThinkingLevel,
                 },
@@ -587,15 +606,19 @@ function buildPiGoalControllerLoopOptions(ctx, goal, binding, modelRouting = rea
         metadata: { controllerGoalId: goal.goalId },
     };
 }
-function selectPiSubagentModel(node, modelRouting, fallbackModelArg) {
-    if (node.modelArg) {
+function selectPiSubagentModel(node, modelRouting) {
+    if (node.modelArg && node.modelClass) {
         return {
             scenario: node.modelScenario,
-            model: node.modelArg,
-            reason: node.modelScenario ? `persisted node modelScenario:${node.modelScenario}` : "persisted node modelArg",
+            modelClass: node.modelClass,
+            modelArg: node.modelArg,
+            reason: node.modelScenario ? `persisted node modelScenario:${node.modelScenario}` : "persisted node model resolution",
         };
     }
-    return selectModelScenarioForNode(node, modelRouting, fallbackModelArg);
+    const selection = selectModelScenarioForNode(node, modelRouting);
+    if (!selection.modelClass)
+        throw new Error(`Model resolution blocked for node ${node.nodeId}: modelClass was not selected`);
+    return { scenario: selection.scenario, modelClass: selection.modelClass, reason: selection.reason };
 }
 function readPiGoalModelRoutingConfig() {
     const file = process.env.AGENT_GOAL_MODEL_ROUTING_FILE;
@@ -1098,12 +1121,6 @@ function readPiGoalMaxAutoRetries() {
         return 2;
     const parsed = Number.parseInt(raw, 10);
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : 2;
-}
-function modelArgFromContext(ctx) {
-    const model = ctx.model;
-    const provider = typeof model?.provider === "string" ? model.provider : undefined;
-    const modelId = typeof model?.id === "string" ? model.id : typeof model?.modelId === "string" ? model.modelId : undefined;
-    return provider && modelId ? `${provider}/${modelId}` : undefined;
 }
 const GOAL_CONFIG_KEYS = ["maxSubagents", "maxAutoRetries", "controllerPollMs"];
 async function handleGoalConfigCommand(ctx, args) {
@@ -1714,7 +1731,7 @@ async function resumeTargetGoal(runtime, ctx, goal, controllerDefaults = {}) {
                 cwd: goal.executionWorkspace,
                 sessionFile: goal.sessionFile,
                 sessionName,
-                modelArg: normalizePiModelArg(goal.controllerModelArg ?? modelArgFromContext(ctx)),
+                modelArg: normalizePiModelArg(goal.controllerModelArg ?? resolveGoalModelForHarness({ harness: "pi", role: "controller", modelScenario: goal.controllerModelScenario, modelClass: goal.controllerModelClass ?? "controller" }).modelArg),
                 thinkingLevel: controllerDefaults.thinkingLevel,
             });
             backgroundGoalSessions.set(resumed.goalId, background);

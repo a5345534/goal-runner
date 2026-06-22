@@ -1,17 +1,14 @@
-// Model routing helpers for the opencode adapter.
+// Model-class routing helpers for the opencode adapter.
 //
-// The opencode adapter picks a model for both the controller loop and the
-// subagent per-DAG-node based on the same `GoalModelRoutingConfig` the Pi
-// adapter consumes. The routing config can be supplied inline through
-// `/goal --model-routing <json>`, through `/goal --model-routing-file
-// <path>`, or through the `AGENT_GOAL_MODEL_ROUTING_FILE` /
-// `AGENT_GOAL_MODEL_ROUTING_JSON` env vars. The fallback model comes from
-// the opencode session's current model (when the runtime provides it).
+// Shared routing config contains abstract `modelClass` values only. Concrete
+// opencode model args are resolved from goal-runner harness binding catalogs.
 
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   parseGoalModelRoutingConfigJson,
+  resolveControllerModelClass,
+  resolveGoalModelForHarness,
   selectModelScenarioForNode,
   type GoalModelRoutingConfig,
 } from "../../core/index.js";
@@ -19,8 +16,10 @@ import type { GoalDagNode } from "../../core/index.js";
 
 export interface OpencodeModelSelection {
   scenario?: string;
+  modelClass: string;
   model?: string;
   reason: string;
+  evidence?: GoalDagNode["modelResolution"];
 }
 
 /** Read the model routing config from the supplied inline JSON/file/env precedence chain. */
@@ -48,44 +47,57 @@ export function readOpencodeModelRoutingConfig(input: {
   return undefined;
 }
 
-/**
- * Pick a subagent model for an opencode DAG node. The opencode adapter
- * does not have a host-level model registry, so the "current model" is
- * provided by the caller (typically the opencode session model passed in
- * through `ctx`).
- */
 export function selectOpencodeSubagentModel(
-  node: Pick<GoalDagNode, "nodeId" | "scope" | "risk" | "objective" | "validators" | "expectedOutputs" | "conflictHints" | "modelScenario" | "modelArg">,
+  node: Pick<GoalDagNode, "nodeId" | "scope" | "risk" | "objective" | "validators" | "expectedOutputs" | "conflictHints" | "modelScenario" | "modelClass" | "modelArg" | "modelResolution">,
   modelRouting: GoalModelRoutingConfig | undefined,
-  fallbackModelArg: string | undefined,
 ): OpencodeModelSelection {
-  if (node.modelArg) {
+  if (node.modelArg && node.modelClass) {
     return {
       scenario: node.modelScenario,
+      modelClass: node.modelClass,
       model: node.modelArg,
-      reason: node.modelScenario ? `persisted node modelScenario:${node.modelScenario}` : "persisted node modelArg",
+      reason: node.modelScenario ? `persisted node modelScenario:${node.modelScenario}` : "persisted node model resolution",
+      evidence: node.modelResolution,
     };
   }
-  return selectModelScenarioForNode(node, modelRouting, fallbackModelArg);
+  const selection = selectModelScenarioForNode(node, modelRouting);
+  if (!selection.modelClass) throw new Error(`Model resolution blocked for node ${node.nodeId}: modelClass was not selected`);
+  const resolution = resolveGoalModelForHarness({
+    harness: "opencode",
+    role: "subagent",
+    modelScenario: selection.scenario,
+    modelClass: selection.modelClass,
+  });
+  return {
+    scenario: selection.scenario,
+    modelClass: selection.modelClass,
+    model: resolution.modelArg,
+    reason: selection.reason,
+    evidence: resolution.evidence,
+  };
 }
 
-/**
- * Resolve the controller model. The controller can use a model-routing
- * scenario (when `controllerScenario` is set) or fall back to the opencode
- * session's current model.
- */
 export function resolveOpencodeControllerModel(
   modelRouting: GoalModelRoutingConfig | undefined,
-  fallbackModelArg: string | undefined,
 ): OpencodeModelSelection {
-  const scenario = modelRouting?.controllerScenario;
-  if (scenario && modelRouting?.scenarios?.[scenario]) {
-    return { scenario, model: modelRouting.scenarios[scenario].model, reason: `controller scenario:${scenario}` };
-  }
-  return { model: fallbackModelArg, reason: fallbackModelArg ? "opencode session model" : "no controller model configured" };
+  const selection = resolveControllerModelClass(modelRouting);
+  if (!selection.modelClass) throw new Error("Model resolution blocked: controller modelClass was not selected");
+  const resolution = resolveGoalModelForHarness({
+    harness: "opencode",
+    role: "controller",
+    modelScenario: selection.scenario,
+    modelClass: selection.modelClass,
+  });
+  return {
+    scenario: selection.scenario,
+    modelClass: selection.modelClass,
+    model: resolution.modelArg,
+    reason: selection.reason,
+    evidence: resolution.evidence,
+  };
 }
 
-/** Resolve the opencode session's current model from the opencode plugin context. */
+/** Resolve the opencode session's current model from the opencode plugin context. Kept only for display/back-compat diagnostics. */
 export function modelArgFromOpencodeContext(ctx: { model?: unknown; [key: string]: unknown }): string | undefined {
   const m: any = ctx.model;
   if (typeof m === "string") return m;

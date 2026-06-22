@@ -575,71 +575,87 @@ async function startOpencodeOrchestratedGoal(
   const objective = options.dagDocument ? options.dagDocument.objective : command.objective;
   const created = await ctx.runtime.createOrReplaceGoal(executionSessionKey, objective, { tokenBudget: command.tokenBudget });
   if (!created.goal) return created.message;
+  const goal = created.goal;
+  const modelRouting = options.modelRouting ?? (options.dagDocument?.modelRouting as ReturnType<typeof readOpencodeModelRoutingConfig> | undefined) ?? readOpencodeModelRoutingConfig({});
+  const controllerModel = resolveOpencodeControllerModel(modelRouting);
+  const adapter = new OpencodeHarnessSubagentAdapter({ modelArg: controllerModel.model });
   await ctx.runtime.saveGoalSessionMetadata({
     sessionKey: executionSessionKey,
-    goalId: created.goal.goalId,
+    goalId: goal.goalId,
     originSessionKey,
     executionWorkspace: binding.workspace,
     workspaceStatus: validation.workspaceStatus,
     branch: binding.branch,
     ref: binding.ref,
     branchVerificationStatus: validation.branchVerificationStatus,
-    createdAt: created.goal.createdAt,
+    controllerModelScenario: controllerModel.scenario,
+    controllerModelClass: controllerModel.modelClass,
+    controllerModelArg: controllerModel.model,
+    controllerModelResolution: controllerModel.evidence,
+    createdAt: goal.createdAt,
     updatedAt: new Date().toISOString(),
   });
 
-  const existingNodes = await ctx.runtime.listGoalDagNodes(created.goal.goalId);
+  const existingNodes = await ctx.runtime.listGoalDagNodes(goal.goalId);
   const planned = options.dagDocument
-    ? { nodes: await ctx.runtime.planGoalDagFromFileDocument(created.goal.goalId, options.dagDocument, {
+    ? { nodes: await ctx.runtime.planGoalDagFromFileDocument(goal.goalId, options.dagDocument, {
         defaultWorkspaceStrategy: "native-git-worktree",
         defaultCompletionGates: ["controller-validation"],
       }).then((result) => result.nodes) }
     : existingNodes.length > 0
       ? { nodes: existingNodes }
-      : await ctx.runtime.planGoalDagFromObjective(created.goal.goalId, created.goal.objective, {
+      : await ctx.runtime.planGoalDagFromObjective(goal.goalId, goal.objective, {
           defaultWorkspaceStrategy: "native-git-worktree",
           defaultCompletionGates: ["controller-validation"],
         });
 
   const workspaceManager = new NativeGitWorkspaceManager({ defaultBaseRef: binding.branch ?? binding.ref, fetch: false });
-  const fallbackModelArg = modelArgFromOpencodeContext(input);
-  const modelRouting = options.modelRouting ?? (options.dagDocument?.modelRouting as ReturnType<typeof readOpencodeModelRoutingConfig> | undefined) ?? readOpencodeModelRoutingConfig({});
-  const controllerModel = resolveOpencodeControllerModel(modelRouting, fallbackModelArg);
-  const adapter = controllerModel.model ? new OpencodeHarnessSubagentAdapter({ modelArg: controllerModel.model }) : ctx.subagentAdapter;
 
-  await ctx.runtime.runGoalControllerLoop(created.goal.goalId, {
+  await ctx.runtime.runGoalControllerLoop(goal.goalId, {
     adapter,
     maxTicks: 1,
     intervalMs: 0,
     schedulingPolicy: { maxConcurrentSubagents: readOpencodeMaxSubagents() },
-    workspaceAllocator: createNativeGitSubagentWorkspaceAllocator(workspaceManager, {
-      controllerWorkspacePath: binding.workspace,
-      baseRef: binding.branch ?? binding.ref,
-      metadata: {
-        controllerGoalId: created.goal.goalId,
-        controllerModel: controllerModel.model,
-        controllerModelScenario: controllerModel.scenario,
-        controllerModelReason: controllerModel.reason,
-      },
-    }),
+    workspaceAllocator: async (request) => {
+      const allocation = (await createNativeGitSubagentWorkspaceAllocator(workspaceManager, {
+        controllerWorkspacePath: binding.workspace,
+        baseRef: binding.branch ?? binding.ref,
+        metadata: { controllerGoalId: goal.goalId },
+      })(request)) ?? {};
+      const selection = selectOpencodeSubagentModel(request.node, modelRouting);
+      return {
+        ...allocation,
+        metadata: {
+          ...(allocation?.metadata ?? {}),
+          controllerGoalId: goal.goalId,
+          modelArg: selection.model,
+          modelScenario: selection.scenario,
+          modelClass: selection.modelClass,
+          modelResolution: selection.evidence,
+          modelScenarioReason: selection.reason,
+        },
+      };
+    },
     validator: createControllerValidationRunner(),
     audit: controllerAuditOptions(),
     auditModel: createAuditModel(),
     integrator: createNativeGitSubagentBranchIntegrator(workspaceManager, { controllerWorkspacePath: binding.workspace }),
     metadata: {
-      controllerGoalId: created.goal.goalId,
+      controllerGoalId: goal.goalId,
       controllerModel: controllerModel.model,
       controllerModelScenario: controllerModel.scenario,
+      controllerModelClass: controllerModel.modelClass,
+      controllerModelResolution: controllerModel.evidence,
     },
   });
-  startOpencodeControllerPolling(ctx, input, created.goal, binding);
+  startOpencodeControllerPolling(ctx, input, goal, binding);
   const dagNote = options.dagSourceFile ? ` DAG: ${options.dagSourceFile}.` : "";
   return [
-    `Goal ${created.goal.goalId.slice(0, 8)} started.`,
+    `Goal ${goal.goalId.slice(0, 8)} started.`,
     `Workspace: ${binding.workspace}${validation.currentBranch ? ` (branch=${validation.currentBranch})` : ""}.${dagNote}`,
     `Planned ${planned.nodes.length} DAG node(s); controller loop is supervising detached opencode subagent sessions.`,
-    `Controller model: ${controllerModel.model ?? "(opencode session model fallback)"} (${controllerModel.reason}).`,
-    `Use /goal status ${created.goal.goalId.slice(0, 8)} or /goal monitor to inspect it.`,
+    `Controller model: ${controllerModel.model} via ${controllerModel.modelClass} (${controllerModel.reason}).`,
+    `Use /goal status ${goal.goalId.slice(0, 8)} or /goal monitor to inspect it.`,
   ].join("\n");
 }
 
@@ -684,7 +700,6 @@ async function runOpencodeControllerPoll(
   }
   const workspaceManager = new NativeGitWorkspaceManager({ defaultBaseRef: binding.branch ?? binding.ref, fetch: false });
   const modelRouting = readOpencodeModelRoutingConfig({});
-  const fallbackModelArg = modelArgFromOpencodeContext(input);
   await ctx.runtime.runGoalControllerLoop(goal.goalId, {
     adapter: ctx.subagentAdapter,
     maxTicks: 1,
@@ -696,7 +711,7 @@ async function runOpencodeControllerPoll(
         baseRef: binding.branch ?? binding.ref,
         metadata: { controllerGoalId: goal.goalId },
       })(request)) ?? {};
-      const selection = selectOpencodeSubagentModel(request.node, modelRouting, fallbackModelArg);
+      const selection = selectOpencodeSubagentModel(request.node, modelRouting);
       return {
         ...allocation,
         metadata: {
@@ -704,6 +719,8 @@ async function runOpencodeControllerPoll(
           controllerGoalId: goal.goalId,
           modelArg: selection.model,
           modelScenario: selection.scenario,
+          modelClass: selection.modelClass,
+          modelResolution: selection.evidence,
           modelScenarioReason: selection.reason,
         },
       };

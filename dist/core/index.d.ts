@@ -15,6 +15,7 @@ export * from "./dag-planner.js";
 export * from "./dag-file.js";
 export * from "./dag-scheduler.js";
 export * from "./model-routing.js";
+export * from "./model-resolution.js";
 export * from "./integration.js";
 export * from "./lifecycle.js";
 export * from "./exception-handler.js";

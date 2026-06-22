@@ -327,8 +327,8 @@ test("opencode adapter /goal --dag loads the file and plans from it", async () =
             controllerScenario: "controller",
             defaultSubagentScenario: "implementation",
             scenarios: {
-                controller: { model: "openai-codex/gpt-5.5" },
-                implementation: { model: "openai-codex/gpt-5.5" },
+                controller: { modelClass: "controller" },
+                implementation: { modelClass: "implementation" },
             },
         },
         nodes: [
@@ -382,7 +382,7 @@ test("opencode adapter /goal --dag loads the file and plans from it", async () =
         rmSync(workspace, { recursive: true, force: true });
     }
 });
-test("opencode adapter /goal --model and --model-routing reach the controller start", async () => {
+test("opencode adapter /goal --model-routing resolves controller through bindings", async () => {
     const dir = mkdtempSync(join(tmpdir(), "goal-opencode-model-"));
     const previousStateHome = process.env.AGENT_GOAL_STATE_HOME;
     process.env.AGENT_GOAL_STATE_HOME = dir;
@@ -402,9 +402,9 @@ test("opencode adapter /goal --model and --model-routing reach the controller st
         const goalTool = hooks.tool?.goal_command;
         assert.ok(goalTool, "expected goal_command tool to be registered");
         const text = await goalTool.execute({
-            command: `--workspace ${workspace} --branch main --model "openai-codex/gpt-5.5" --model-routing '{"controllerScenario":"controller","scenarios":{"controller":{"model":"openai-codex/gpt-5.5"}}}' implement feature`,
+            command: `--workspace ${workspace} --branch main --model-routing '{"controllerScenario":"controller","scenarios":{"controller":{"modelClass":"controller"}}}' implement feature`,
         }, { sessionID: "ses_mr" });
-        assert.match(text, /Controller model: openai-codex\/gpt-5\.5/);
+        assert.match(text, /Controller model: openai-codex\/gpt-5\.5 via controller/);
         const store = new SQLiteGoalStore({ stateRoot: dir });
         const goalList = await store.listGoalSummaries();
         const goal = goalList.find((entry) => entry.objective.includes("implement feature"));

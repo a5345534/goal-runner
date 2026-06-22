@@ -29,7 +29,7 @@ function node(overrides: Partial<GoalDagNode> = {}): GoalDagNode {
 }
 
 test("readOpencodeModelRoutingConfig reads inline JSON and rejects malformed input", () => {
-  const ok = readOpencodeModelRoutingConfig({ inlineJson: JSON.stringify({ controllerScenario: "controller", scenarios: { controller: { model: "openai-codex/gpt-5.5" } } }) });
+  const ok = readOpencodeModelRoutingConfig({ inlineJson: JSON.stringify({ controllerScenario: "controller", scenarios: { controller: { modelClass: "controller" } } }) });
   assert.ok(ok);
   assert.equal(ok?.controllerScenario, "controller");
 
@@ -39,10 +39,10 @@ test("readOpencodeModelRoutingConfig reads inline JSON and rejects malformed inp
 test("readOpencodeModelRoutingConfig reads from file path", () => {
   const dir = mkdtempSync(join(tmpdir(), "oc-mrf-"));
   const file = join(dir, "model-routing.json");
-  writeFileSync(file, JSON.stringify({ controllerScenario: "controller", scenarios: { controller: { model: "openai-codex/gpt-5.5" } } }));
+  writeFileSync(file, JSON.stringify({ controllerScenario: "controller", scenarios: { controller: { modelClass: "controller" } } }));
   try {
     const config = readOpencodeModelRoutingConfig({ filePath: file });
-    assert.equal(config?.scenarios?.controller?.model, "openai-codex/gpt-5.5");
+    assert.equal(config?.scenarios?.controller?.modelClass, "controller");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -50,7 +50,7 @@ test("readOpencodeModelRoutingConfig reads from file path", () => {
 
 test("readOpencodeModelRoutingConfig reads from env JSON", () => {
   const previous = process.env.AGENT_GOAL_MODEL_ROUTING_JSON;
-  process.env.AGENT_GOAL_MODEL_ROUTING_JSON = JSON.stringify({ defaultSubagentScenario: "implementation", scenarios: { implementation: { model: "openai-codex/gpt-5.5" } } });
+  process.env.AGENT_GOAL_MODEL_ROUTING_JSON = JSON.stringify({ defaultSubagentScenario: "implementation", scenarios: { implementation: { modelClass: "implementation" } } });
   try {
     const config = readOpencodeModelRoutingConfig({});
     assert.equal(config?.defaultSubagentScenario, "implementation");
@@ -60,41 +60,52 @@ test("readOpencodeModelRoutingConfig reads from env JSON", () => {
   }
 });
 
-test("resolveOpencodeControllerModel picks controller scenario model", () => {
-  const config = readOpencodeModelRoutingConfig({ inlineJson: JSON.stringify({ controllerScenario: "controller", scenarios: { controller: { model: "openai-codex/gpt-5.5" } } }) });
-  const selection = resolveOpencodeControllerModel(config, "openai/gpt-5-mini");
+test("readOpencodeModelRoutingConfig rejects legacy concrete model", () => {
+  assert.throws(
+    () => readOpencodeModelRoutingConfig({ inlineJson: JSON.stringify({ controllerScenario: "controller", scenarios: { controller: { model: "provider/model" } } }) }),
+    /model is unsupported; use modelClass/,
+  );
+});
+
+test("resolveOpencodeControllerModel picks controller scenario model class and binding", () => {
+  const config = readOpencodeModelRoutingConfig({ inlineJson: JSON.stringify({ controllerScenario: "controller", scenarios: { controller: { modelClass: "controller" } } }) });
+  const selection = resolveOpencodeControllerModel(config);
   assert.equal(selection.scenario, "controller");
+  assert.equal(selection.modelClass, "controller");
   assert.equal(selection.model, "openai-codex/gpt-5.5");
+  assert.equal(selection.evidence?.requested.modelClass, "controller");
   assert.match(selection.reason, /controller scenario/);
 });
 
-test("resolveOpencodeControllerModel falls back to session model when no scenario set", () => {
-  const selection = resolveOpencodeControllerModel(undefined, "anthropic/claude-opus");
-  assert.equal(selection.model, "anthropic/claude-opus");
-  assert.match(selection.reason, /opencode session model/);
+test("resolveOpencodeControllerModel uses implicit controller class when no scenario set", () => {
+  const selection = resolveOpencodeControllerModel(undefined);
+  assert.equal(selection.modelClass, "controller");
+  assert.equal(selection.model, "openai-codex/gpt-5.5");
+  assert.match(selection.reason, /implicit controller/);
 });
 
-test("selectOpencodeSubagentModel respects persisted modelArg", () => {
+test("selectOpencodeSubagentModel respects persisted model resolution", () => {
   const result = selectOpencodeSubagentModel(
-    node({ modelArg: "openai/gpt-5-mini", modelScenario: "docs" }),
+    node({ modelArg: "openai/gpt-5-mini", modelClass: "implementation", modelScenario: "docs" }),
     undefined,
-    "anthropic/claude-opus",
   );
   assert.equal(result.model, "openai/gpt-5-mini");
+  assert.equal(result.modelClass, "implementation");
   assert.equal(result.scenario, "docs");
 });
 
-test("selectOpencodeSubagentModel falls back to routing rule match", () => {
+test("selectOpencodeSubagentModel resolves routing rule modelClass through binding", () => {
   const config = readOpencodeModelRoutingConfig({
     inlineJson: JSON.stringify({
       defaultSubagentScenario: "implementation",
-      scenarios: { implementation: { model: "openai-codex/gpt-5.5" }, docs: { model: "openai/gpt-5-mini" } },
+      scenarios: { implementation: { modelClass: "implementation" }, docs: { modelClass: "implementation" } },
       rules: [{ scenario: "docs", when: { scopes: ["docs"] } }],
     }),
   });
-  const result = selectOpencodeSubagentModel(node({ scope: "docs" }), config, undefined);
+  const result = selectOpencodeSubagentModel(node({ scope: "docs" }), config);
   assert.equal(result.scenario, "docs");
-  assert.equal(result.model, "openai/gpt-5-mini");
+  assert.equal(result.modelClass, "implementation");
+  assert.equal(result.model, "deepseek/deepseek-v4-pro");
 });
 
 test("modelArgFromOpencodeContext extracts provider/model from object form", () => {

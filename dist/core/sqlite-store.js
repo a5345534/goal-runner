@@ -95,8 +95,9 @@ export class SQLiteGoalStore {
             .prepare(`INSERT INTO goal_session_metadata (
           session_key, goal_id, origin_session_key, execution_workspace, workspace_status,
           branch, ref, promotion_target_ref, branch_verification_status, session_file, session_name,
-          controller_model_scenario, controller_model_arg, legacy_session_bound, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          controller_model_scenario, controller_model_class, controller_model_arg, controller_model_resolution_json,
+          legacy_session_bound, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(session_key) DO UPDATE SET
           goal_id = excluded.goal_id,
           origin_session_key = excluded.origin_session_key,
@@ -109,11 +110,13 @@ export class SQLiteGoalStore {
           session_file = excluded.session_file,
           session_name = excluded.session_name,
           controller_model_scenario = excluded.controller_model_scenario,
+          controller_model_class = excluded.controller_model_class,
           controller_model_arg = excluded.controller_model_arg,
+          controller_model_resolution_json = excluded.controller_model_resolution_json,
           legacy_session_bound = excluded.legacy_session_bound,
           created_at = excluded.created_at,
           updated_at = excluded.updated_at`)
-            .run(metadata.sessionKey, metadata.goalId, metadata.originSessionKey ?? null, metadata.executionWorkspace ?? null, metadata.workspaceStatus ?? null, metadata.branch ?? null, metadata.ref ?? null, metadata.promotionTargetRef ?? null, metadata.branchVerificationStatus ?? null, metadata.sessionFile ?? null, metadata.sessionName ?? null, metadata.controllerModelScenario ?? null, metadata.controllerModelArg ?? null, metadata.legacySessionBound ? 1 : 0, metadata.createdAt, metadata.updatedAt);
+            .run(metadata.sessionKey, metadata.goalId, metadata.originSessionKey ?? null, metadata.executionWorkspace ?? null, metadata.workspaceStatus ?? null, metadata.branch ?? null, metadata.ref ?? null, metadata.promotionTargetRef ?? null, metadata.branchVerificationStatus ?? null, metadata.sessionFile ?? null, metadata.sessionName ?? null, metadata.controllerModelScenario ?? null, metadata.controllerModelClass ?? null, metadata.controllerModelArg ?? null, metadata.controllerModelResolution === undefined ? null : JSON.stringify(metadata.controllerModelResolution), metadata.legacySessionBound ? 1 : 0, metadata.createdAt, metadata.updatedAt);
     }
     async getGoalSessionMetadata(sessionKey) {
         const row = this.db.prepare("SELECT * FROM goal_session_metadata WHERE session_key = ?").get(sessionKey);
@@ -132,7 +135,9 @@ export class SQLiteGoalStore {
           m.session_file,
           m.session_name,
           m.controller_model_scenario,
+          m.controller_model_class,
           m.controller_model_arg,
+          m.controller_model_resolution_json,
           m.legacy_session_bound,
           m.updated_at AS metadata_updated_at,
           COALESCE(MAX(l.at), g.updated_at) AS last_activity_at
@@ -149,10 +154,10 @@ export class SQLiteGoalStore {
             .prepare(`INSERT INTO goal_dag_nodes (
           goal_id, node_id, slug, objective, scope, kind, validation_json, dependency_node_ids_json,
           expected_outputs_json, validators_json, workspace_strategy, workspace_json, risk,
-          model_scenario, model_arg, thinking_level, conflict_hints_json, completion_gates_json, status,
+          model_scenario, model_class, model_arg, model_resolution_json, thinking_level, conflict_hints_json, completion_gates_json, status,
           lifecycle_phase, prepared_resources_json, last_adapter_observation_json, last_recovery_decision_json,
           last_validation_summary, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(goal_id, node_id) DO UPDATE SET
           slug = excluded.slug,
           objective = excluded.objective,
@@ -166,7 +171,9 @@ export class SQLiteGoalStore {
           workspace_json = excluded.workspace_json,
           risk = excluded.risk,
           model_scenario = excluded.model_scenario,
+          model_class = excluded.model_class,
           model_arg = excluded.model_arg,
+          model_resolution_json = excluded.model_resolution_json,
           thinking_level = excluded.thinking_level,
           conflict_hints_json = excluded.conflict_hints_json,
           completion_gates_json = excluded.completion_gates_json,
@@ -177,7 +184,7 @@ export class SQLiteGoalStore {
           last_recovery_decision_json = excluded.last_recovery_decision_json,
           last_validation_summary = excluded.last_validation_summary,
           updated_at = excluded.updated_at`)
-            .run(node.goalId, node.nodeId, node.slug, node.objective, node.scope ?? null, node.kind ?? null, node.validation === undefined ? null : JSON.stringify(node.validation), JSON.stringify(node.dependencyNodeIds), JSON.stringify(node.expectedOutputs), JSON.stringify(node.validators), node.workspaceStrategy ?? null, node.workspace === undefined ? null : JSON.stringify(node.workspace), node.risk ?? null, node.modelScenario ?? null, node.modelArg ?? null, node.thinkingLevel ?? null, node.conflictHints === undefined ? null : JSON.stringify(node.conflictHints), JSON.stringify(node.completionGates), node.status, node.lifecyclePhase ?? null, node.preparedResources === undefined ? null : JSON.stringify(node.preparedResources), node.lastAdapterObservation === undefined ? null : JSON.stringify(node.lastAdapterObservation), node.lastRecoveryDecision === undefined ? null : JSON.stringify(node.lastRecoveryDecision), node.lastValidationSummary ?? null, node.createdAt, node.updatedAt);
+            .run(node.goalId, node.nodeId, node.slug, node.objective, node.scope ?? null, node.kind ?? null, node.validation === undefined ? null : JSON.stringify(node.validation), JSON.stringify(node.dependencyNodeIds), JSON.stringify(node.expectedOutputs), JSON.stringify(node.validators), node.workspaceStrategy ?? null, node.workspace === undefined ? null : JSON.stringify(node.workspace), node.risk ?? null, node.modelScenario ?? null, node.modelClass ?? null, node.modelArg ?? null, node.modelResolution === undefined ? null : JSON.stringify(node.modelResolution), node.thinkingLevel ?? null, node.conflictHints === undefined ? null : JSON.stringify(node.conflictHints), JSON.stringify(node.completionGates), node.status, node.lifecyclePhase ?? null, node.preparedResources === undefined ? null : JSON.stringify(node.preparedResources), node.lastAdapterObservation === undefined ? null : JSON.stringify(node.lastAdapterObservation), node.lastRecoveryDecision === undefined ? null : JSON.stringify(node.lastRecoveryDecision), node.lastValidationSummary ?? null, node.createdAt, node.updatedAt);
     }
     async getGoalDagNode(goalId, nodeId) {
         const row = this.db
@@ -372,7 +379,9 @@ export class SQLiteGoalStore {
         session_file TEXT,
         session_name TEXT,
         controller_model_scenario TEXT,
+        controller_model_class TEXT,
         controller_model_arg TEXT,
+        controller_model_resolution_json TEXT,
         legacy_session_bound INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -402,7 +411,9 @@ export class SQLiteGoalStore {
         workspace_json TEXT,
         risk TEXT,
         model_scenario TEXT,
+        model_class TEXT,
         model_arg TEXT,
+        model_resolution_json TEXT,
         thinking_level TEXT,
         conflict_hints_json TEXT,
         completion_gates_json TEXT NOT NULL,
@@ -457,7 +468,9 @@ export class SQLiteGoalStore {
       CREATE INDEX IF NOT EXISTS idx_goal_subagents_goal_status ON goal_subagents(goal_id, status, updated_at);
     `);
         addColumnIfMissing(this.db, "goal_dag_nodes", "model_scenario", "TEXT");
+        addColumnIfMissing(this.db, "goal_dag_nodes", "model_class", "TEXT");
         addColumnIfMissing(this.db, "goal_dag_nodes", "model_arg", "TEXT");
+        addColumnIfMissing(this.db, "goal_dag_nodes", "model_resolution_json", "TEXT");
         addColumnIfMissing(this.db, "goal_dag_nodes", "thinking_level", "TEXT");
         addColumnIfMissing(this.db, "goal_dag_nodes", "workspace_json", "TEXT");
         addColumnIfMissing(this.db, "goal_dag_nodes", "kind", "TEXT");
@@ -468,7 +481,9 @@ export class SQLiteGoalStore {
         addColumnIfMissing(this.db, "goal_dag_nodes", "last_recovery_decision_json", "TEXT");
         addColumnIfMissing(this.db, "goal_session_metadata", "promotion_target_ref", "TEXT");
         addColumnIfMissing(this.db, "goal_session_metadata", "controller_model_scenario", "TEXT");
+        addColumnIfMissing(this.db, "goal_session_metadata", "controller_model_class", "TEXT");
         addColumnIfMissing(this.db, "goal_session_metadata", "controller_model_arg", "TEXT");
+        addColumnIfMissing(this.db, "goal_session_metadata", "controller_model_resolution_json", "TEXT");
         addColumnIfMissing(this.db, "goal_subagents", "retry_count", "INTEGER");
         addColumnIfMissing(this.db, "goal_subagents", "integration_state", "TEXT");
         addColumnIfMissing(this.db, "goal_subagents", "integration_source_branch", "TEXT");
@@ -544,7 +559,9 @@ function rowToMetadata(row) {
         sessionFile: row.session_file ?? undefined,
         sessionName: row.session_name ?? undefined,
         controllerModelScenario: row.controller_model_scenario ?? undefined,
+        controllerModelClass: row.controller_model_class ?? undefined,
         controllerModelArg: row.controller_model_arg ?? undefined,
+        controllerModelResolution: parseRecord(row.controller_model_resolution_json),
         legacySessionBound: row.legacy_session_bound === 1,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
@@ -575,7 +592,9 @@ function rowToGoalSummary(row) {
         sessionFile: row.session_file ?? undefined,
         sessionName: row.session_name ?? undefined,
         controllerModelScenario: row.controller_model_scenario ?? undefined,
+        controllerModelClass: row.controller_model_class ?? undefined,
         controllerModelArg: row.controller_model_arg ?? undefined,
+        controllerModelResolution: parseRecord(row.controller_model_resolution_json),
         legacySessionBound: row.legacy_session_bound === null ? true : row.legacy_session_bound === 1,
     };
 }
@@ -606,7 +625,9 @@ function rowToDagNode(row) {
         workspace: parseWorkspaceBinding(row.workspace_json),
         risk: row.risk ?? undefined,
         modelScenario: row.model_scenario ?? undefined,
+        modelClass: row.model_class ?? undefined,
         modelArg: row.model_arg ?? undefined,
+        modelResolution: parseRecord(row.model_resolution_json),
         thinkingLevel: row.thinking_level ?? undefined,
         conflictHints: parseConflictHints(row.conflict_hints_json),
         completionGates: parseStringArray(row.completion_gates_json),

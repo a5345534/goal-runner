@@ -67,7 +67,9 @@ interface SqliteMetadataRow {
   session_file: string | null;
   session_name: string | null;
   controller_model_scenario: string | null;
+  controller_model_class: string | null;
   controller_model_arg: string | null;
+  controller_model_resolution_json: string | null;
   legacy_session_bound: number;
   created_at: string;
   updated_at: string;
@@ -84,7 +86,9 @@ interface SqliteGoalSummaryRow extends SqliteGoalRow {
   session_file: string | null;
   session_name: string | null;
   controller_model_scenario: string | null;
+  controller_model_class: string | null;
   controller_model_arg: string | null;
+  controller_model_resolution_json: string | null;
   legacy_session_bound: number | null;
   metadata_updated_at: string | null;
   last_activity_at: string | null;
@@ -115,7 +119,9 @@ interface SqliteDagNodeRow {
   workspace_json: string | null;
   risk: GoalDagNode["risk"] | null;
   model_scenario: string | null;
+  model_class: string | null;
   model_arg: string | null;
+  model_resolution_json: string | null;
   thinking_level: string | null;
   conflict_hints_json: string | null;
   completion_gates_json: string;
@@ -306,8 +312,9 @@ export class SQLiteGoalStore implements GoalStore {
         `INSERT INTO goal_session_metadata (
           session_key, goal_id, origin_session_key, execution_workspace, workspace_status,
           branch, ref, promotion_target_ref, branch_verification_status, session_file, session_name,
-          controller_model_scenario, controller_model_arg, legacy_session_bound, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          controller_model_scenario, controller_model_class, controller_model_arg, controller_model_resolution_json,
+          legacy_session_bound, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(session_key) DO UPDATE SET
           goal_id = excluded.goal_id,
           origin_session_key = excluded.origin_session_key,
@@ -320,7 +327,9 @@ export class SQLiteGoalStore implements GoalStore {
           session_file = excluded.session_file,
           session_name = excluded.session_name,
           controller_model_scenario = excluded.controller_model_scenario,
+          controller_model_class = excluded.controller_model_class,
           controller_model_arg = excluded.controller_model_arg,
+          controller_model_resolution_json = excluded.controller_model_resolution_json,
           legacy_session_bound = excluded.legacy_session_bound,
           created_at = excluded.created_at,
           updated_at = excluded.updated_at`,
@@ -338,7 +347,9 @@ export class SQLiteGoalStore implements GoalStore {
         metadata.sessionFile ?? null,
         metadata.sessionName ?? null,
         metadata.controllerModelScenario ?? null,
+        metadata.controllerModelClass ?? null,
         metadata.controllerModelArg ?? null,
+        metadata.controllerModelResolution === undefined ? null : JSON.stringify(metadata.controllerModelResolution),
         metadata.legacySessionBound ? 1 : 0,
         metadata.createdAt,
         metadata.updatedAt,
@@ -364,7 +375,9 @@ export class SQLiteGoalStore implements GoalStore {
           m.session_file,
           m.session_name,
           m.controller_model_scenario,
+          m.controller_model_class,
           m.controller_model_arg,
+          m.controller_model_resolution_json,
           m.legacy_session_bound,
           m.updated_at AS metadata_updated_at,
           COALESCE(MAX(l.at), g.updated_at) AS last_activity_at
@@ -384,10 +397,10 @@ export class SQLiteGoalStore implements GoalStore {
         `INSERT INTO goal_dag_nodes (
           goal_id, node_id, slug, objective, scope, kind, validation_json, dependency_node_ids_json,
           expected_outputs_json, validators_json, workspace_strategy, workspace_json, risk,
-          model_scenario, model_arg, thinking_level, conflict_hints_json, completion_gates_json, status,
+          model_scenario, model_class, model_arg, model_resolution_json, thinking_level, conflict_hints_json, completion_gates_json, status,
           lifecycle_phase, prepared_resources_json, last_adapter_observation_json, last_recovery_decision_json,
           last_validation_summary, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(goal_id, node_id) DO UPDATE SET
           slug = excluded.slug,
           objective = excluded.objective,
@@ -401,7 +414,9 @@ export class SQLiteGoalStore implements GoalStore {
           workspace_json = excluded.workspace_json,
           risk = excluded.risk,
           model_scenario = excluded.model_scenario,
+          model_class = excluded.model_class,
           model_arg = excluded.model_arg,
+          model_resolution_json = excluded.model_resolution_json,
           thinking_level = excluded.thinking_level,
           conflict_hints_json = excluded.conflict_hints_json,
           completion_gates_json = excluded.completion_gates_json,
@@ -428,7 +443,9 @@ export class SQLiteGoalStore implements GoalStore {
         node.workspace === undefined ? null : JSON.stringify(node.workspace),
         node.risk ?? null,
         node.modelScenario ?? null,
+        node.modelClass ?? null,
         node.modelArg ?? null,
+        node.modelResolution === undefined ? null : JSON.stringify(node.modelResolution),
         node.thinkingLevel ?? null,
         node.conflictHints === undefined ? null : JSON.stringify(node.conflictHints),
         JSON.stringify(node.completionGates),
@@ -690,7 +707,9 @@ export class SQLiteGoalStore implements GoalStore {
         session_file TEXT,
         session_name TEXT,
         controller_model_scenario TEXT,
+        controller_model_class TEXT,
         controller_model_arg TEXT,
+        controller_model_resolution_json TEXT,
         legacy_session_bound INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -720,7 +739,9 @@ export class SQLiteGoalStore implements GoalStore {
         workspace_json TEXT,
         risk TEXT,
         model_scenario TEXT,
+        model_class TEXT,
         model_arg TEXT,
+        model_resolution_json TEXT,
         thinking_level TEXT,
         conflict_hints_json TEXT,
         completion_gates_json TEXT NOT NULL,
@@ -775,7 +796,9 @@ export class SQLiteGoalStore implements GoalStore {
       CREATE INDEX IF NOT EXISTS idx_goal_subagents_goal_status ON goal_subagents(goal_id, status, updated_at);
     `);
     addColumnIfMissing(this.db, "goal_dag_nodes", "model_scenario", "TEXT");
+    addColumnIfMissing(this.db, "goal_dag_nodes", "model_class", "TEXT");
     addColumnIfMissing(this.db, "goal_dag_nodes", "model_arg", "TEXT");
+    addColumnIfMissing(this.db, "goal_dag_nodes", "model_resolution_json", "TEXT");
     addColumnIfMissing(this.db, "goal_dag_nodes", "thinking_level", "TEXT");
     addColumnIfMissing(this.db, "goal_dag_nodes", "workspace_json", "TEXT");
     addColumnIfMissing(this.db, "goal_dag_nodes", "kind", "TEXT");
@@ -786,7 +809,9 @@ export class SQLiteGoalStore implements GoalStore {
     addColumnIfMissing(this.db, "goal_dag_nodes", "last_recovery_decision_json", "TEXT");
     addColumnIfMissing(this.db, "goal_session_metadata", "promotion_target_ref", "TEXT");
     addColumnIfMissing(this.db, "goal_session_metadata", "controller_model_scenario", "TEXT");
+    addColumnIfMissing(this.db, "goal_session_metadata", "controller_model_class", "TEXT");
     addColumnIfMissing(this.db, "goal_session_metadata", "controller_model_arg", "TEXT");
+    addColumnIfMissing(this.db, "goal_session_metadata", "controller_model_resolution_json", "TEXT");
     addColumnIfMissing(this.db, "goal_subagents", "retry_count", "INTEGER");
     addColumnIfMissing(this.db, "goal_subagents", "integration_state", "TEXT");
     addColumnIfMissing(this.db, "goal_subagents", "integration_source_branch", "TEXT");
@@ -866,7 +891,9 @@ function rowToMetadata(row: SqliteMetadataRow): GoalSessionMetadata {
     sessionFile: row.session_file ?? undefined,
     sessionName: row.session_name ?? undefined,
     controllerModelScenario: row.controller_model_scenario ?? undefined,
+    controllerModelClass: row.controller_model_class ?? undefined,
     controllerModelArg: row.controller_model_arg ?? undefined,
+    controllerModelResolution: parseRecord(row.controller_model_resolution_json) as GoalSessionMetadata["controllerModelResolution"] | undefined,
     legacySessionBound: row.legacy_session_bound === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -898,7 +925,9 @@ function rowToGoalSummary(row: SqliteGoalSummaryRow): GoalSummary {
     sessionFile: row.session_file ?? undefined,
     sessionName: row.session_name ?? undefined,
     controllerModelScenario: row.controller_model_scenario ?? undefined,
+    controllerModelClass: row.controller_model_class ?? undefined,
     controllerModelArg: row.controller_model_arg ?? undefined,
+    controllerModelResolution: parseRecord(row.controller_model_resolution_json) as GoalSummary["controllerModelResolution"] | undefined,
     legacySessionBound: row.legacy_session_bound === null ? true : row.legacy_session_bound === 1,
   };
 }
@@ -931,7 +960,9 @@ function rowToDagNode(row: SqliteDagNodeRow): GoalDagNode {
     workspace: parseWorkspaceBinding(row.workspace_json),
     risk: row.risk ?? undefined,
     modelScenario: row.model_scenario ?? undefined,
+    modelClass: row.model_class ?? undefined,
     modelArg: row.model_arg ?? undefined,
+    modelResolution: parseRecord(row.model_resolution_json) as GoalDagNode["modelResolution"] | undefined,
     thinkingLevel: row.thinking_level ?? undefined,
     conflictHints: parseConflictHints(row.conflict_hints_json),
     completionGates: parseStringArray(row.completion_gates_json),

@@ -89,7 +89,7 @@ export function formatOpencodeGoalToolDescription(): string {
     '  command: "migrate the API to v2"',
     '  command: "--workspace ./repo --branch main implement auth"',
     '  command: "--dag .goal/backend.dag.json"  (objective comes from the file)',
-    '  command: "--model openai-codex/gpt-5.5 implement feature"',
+    '  command: "--model-routing \'{\\"controllerScenario\\":\\"controller\\",\\"scenarios\\":{\\"controller\\":{\\"modelClass\\":\\"controller\\"}}}\' implement feature"',
     '  command: "--model-routing-file .goal/model-routing.json implement"',
     '  command: "list"',
     '  command: "status"',
@@ -101,6 +101,6 @@ export function formatOpencodeGoalToolDescription(): string {
     "The plugin maps the parsed command through the same portable /goal",
     "runtime used by the Pi adapter; do not translate the command before",
     "calling this tool. Pass the user's input verbatim, including any",
-    "--workspace/--branch/--ref/--dag/--model/--model-routing/--model-routing-file/--tokens flags.",
+    "--workspace/--branch/--ref/--dag/--model-routing/--model-routing-file/--tokens flags.",
   ].join(" ");
 }

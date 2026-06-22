@@ -4,10 +4,12 @@ export type { GoalModelRoutingConfig, GoalModelRoutingRule, GoalModelRoutingRule
 export { parseGoalModelRoutingConfig, parseGoalModelRoutingConfigJson };
 export interface GoalModelScenarioSelection {
     scenario?: string;
-    model?: string;
+    modelClass?: string;
     reason: string;
 }
-export declare function resolveControllerModelArg(config: GoalModelRoutingConfig | undefined, fallbackModelArg?: string): GoalModelScenarioSelection;
+export declare function resolveControllerModelClass(config: GoalModelRoutingConfig | undefined): GoalModelScenarioSelection;
+/** @deprecated Use resolveControllerModelClass plus harness binding resolution. */
+export declare const resolveControllerModelArg: typeof resolveControllerModelClass;
 export declare function selectModelScenarioForNode(node: {
     nodeId: string;
     objective: string;
@@ -21,5 +23,5 @@ export declare function selectModelScenarioForNode(node: {
         capabilities?: string[];
     };
     modelScenario?: string;
-}, config?: GoalModelRoutingConfig, fallbackModelArg?: string): GoalModelScenarioSelection;
+}, config?: GoalModelRoutingConfig): GoalModelScenarioSelection;
 export declare function assertKnownModelScenario(config: GoalModelRoutingConfig | undefined, scenario: string, path: string): void;

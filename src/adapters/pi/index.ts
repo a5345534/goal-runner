@@ -20,8 +20,9 @@ import {
   parseGoalModelRoutingConfigJson,
   parseTokenBudget,
   renderActiveGoalReminderPrompt,
-  resolveControllerModelArg,
+  resolveControllerModelClass,
   resolveDefaultStateRoot,
+  resolveGoalModelForHarness,
   selectModelScenarioForNode,
   type BlockedAuditEvidence,
   type CompletionAuditRequest,
@@ -568,8 +569,15 @@ async function startGoalOwnedPiSession(
   const originSessionKey = resolveSessionKey(ctx);
   const labelObjective = command.objective.length <= 64 ? command.objective : `${command.objective.slice(0, 61)}...`;
   const provisionalSessionName = `goal: ${labelObjective}`;
-  const controllerModel = resolveControllerModelArg(options.modelRouting, modelArgFromContext(ctx));
-  const controllerModelArg = normalizePiModelArg(controllerModel.model);
+  const controllerModel = resolveControllerModelClass(options.modelRouting);
+  if (!controllerModel.modelClass) throw new Error("Model resolution blocked: controller modelClass was not selected");
+  const controllerResolution = resolveGoalModelForHarness({
+    harness: "pi",
+    role: "controller",
+    modelScenario: controllerModel.scenario,
+    modelClass: controllerModel.modelClass,
+  });
+  const controllerModelArg = normalizePiModelArg(controllerResolution.modelArg);
   const background = await backgroundGoalSessionLauncher({
     cwd: binding.workspace,
     sessionId: `goal-${randomUUID().replace(/-/g, "").slice(0, 24)}`,
@@ -598,7 +606,9 @@ async function startGoalOwnedPiSession(
       sessionFile: background.sessionFile,
       sessionName,
       controllerModelScenario: controllerModel.scenario,
+      controllerModelClass: controllerModel.modelClass,
       controllerModelArg,
+      controllerModelResolution: controllerResolution.evidence,
       legacySessionBound: false,
       createdAt: created.goal.createdAt,
       updatedAt: new Date().toISOString(),
@@ -688,9 +698,8 @@ function buildPiGoalControllerLoopOptions(
   controllerDefaults: PiGoalControllerDefaults = {},
 ): Parameters<GoalRuntime["runGoalControllerLoop"]>[1] {
   const workspaceManager = new NativeGitWorkspaceManager({ defaultBaseRef: binding.branch ?? binding.ref, fetch: false });
-  const fallbackModelArg = normalizePiModelArg(modelArgFromContext(ctx));
   const fallbackThinkingLevel = controllerDefaults.thinkingLevel;
-  const adapter = getOrCreatePiGoalControllerAdapter(goal.goalId, fallbackModelArg);
+  const adapter = getOrCreatePiGoalControllerAdapter(goal.goalId, undefined);
   const allocator = createNativeGitSubagentWorkspaceAllocator(workspaceManager, {
     controllerWorkspacePath: binding.workspace,
     baseRef: binding.branch ?? binding.ref,
@@ -704,14 +713,24 @@ function buildPiGoalControllerLoopOptions(
     maxAutoRetries: readPiGoalMaxAutoRetries(),
     workspaceAllocator: async (request) => {
       const allocation = (await allocator(request)) ?? {};
-      const selection = selectPiSubagentModel(request.node, modelRouting, fallbackModelArg);
+      const selection = selectPiSubagentModel(request.node, modelRouting);
+      const resolution = selection.modelArg && request.node.modelResolution
+        ? { modelArg: selection.modelArg, evidence: request.node.modelResolution }
+        : resolveGoalModelForHarness({
+            harness: "pi",
+            role: "subagent",
+            modelScenario: selection.scenario,
+            modelClass: selection.modelClass,
+          });
       return {
         ...allocation,
         metadata: {
           ...(allocation?.metadata ?? {}),
           controllerGoalId: goal.goalId,
-          modelArg: normalizePiModelArg(selection.model),
+          modelArg: normalizePiModelArg(resolution.modelArg),
           modelScenario: selection.scenario,
+          modelClass: selection.modelClass,
+          modelResolution: resolution.evidence,
           modelScenarioReason: selection.reason,
           thinkingLevel: request.node.thinkingLevel ?? fallbackThinkingLevel,
         },
@@ -726,18 +745,20 @@ function buildPiGoalControllerLoopOptions(
 }
 
 function selectPiSubagentModel(
-  node: Pick<GoalDagNode, "nodeId" | "scope" | "risk" | "objective" | "validators" | "expectedOutputs" | "conflictHints" | "modelScenario" | "modelArg">,
+  node: Pick<GoalDagNode, "nodeId" | "scope" | "risk" | "objective" | "validators" | "expectedOutputs" | "conflictHints" | "modelScenario" | "modelClass" | "modelArg" | "modelResolution">,
   modelRouting: GoalModelRoutingConfig | undefined,
-  fallbackModelArg: string | undefined,
-): { scenario?: string; model?: string; reason: string } {
-  if (node.modelArg) {
+): { scenario?: string; modelClass: string; modelArg?: string; reason: string } {
+  if (node.modelArg && node.modelClass) {
     return {
       scenario: node.modelScenario,
-      model: node.modelArg,
-      reason: node.modelScenario ? `persisted node modelScenario:${node.modelScenario}` : "persisted node modelArg",
+      modelClass: node.modelClass,
+      modelArg: node.modelArg,
+      reason: node.modelScenario ? `persisted node modelScenario:${node.modelScenario}` : "persisted node model resolution",
     };
   }
-  return selectModelScenarioForNode(node, modelRouting, fallbackModelArg);
+  const selection = selectModelScenarioForNode(node, modelRouting);
+  if (!selection.modelClass) throw new Error(`Model resolution blocked for node ${node.nodeId}: modelClass was not selected`);
+  return { scenario: selection.scenario, modelClass: selection.modelClass, reason: selection.reason };
 }
 
 function readPiGoalModelRoutingConfig(): GoalModelRoutingConfig | undefined {
@@ -1292,13 +1313,6 @@ function readPiGoalMaxAutoRetries(): number {
   if (!raw) return 2;
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 2;
-}
-
-function modelArgFromContext(ctx: ExtensionContext | ExtensionCommandContext): string | undefined {
-  const model = ctx.model as Record<string, unknown> | undefined;
-  const provider = typeof model?.provider === "string" ? model.provider : undefined;
-  const modelId = typeof model?.id === "string" ? model.id : typeof model?.modelId === "string" ? model.modelId : undefined;
-  return provider && modelId ? `${provider}/${modelId}` : undefined;
 }
 
 const GOAL_CONFIG_KEYS = ["maxSubagents", "maxAutoRetries", "controllerPollMs"] as const;
@@ -1981,7 +1995,7 @@ async function resumeTargetGoal(runtime: GoalRuntime, ctx: ExtensionCommandConte
         cwd: goal.executionWorkspace,
         sessionFile: goal.sessionFile,
         sessionName,
-        modelArg: normalizePiModelArg(goal.controllerModelArg ?? modelArgFromContext(ctx)),
+        modelArg: normalizePiModelArg(goal.controllerModelArg ?? resolveGoalModelForHarness({ harness: "pi", role: "controller", modelScenario: goal.controllerModelScenario, modelClass: goal.controllerModelClass ?? "controller" }).modelArg),
         thinkingLevel: controllerDefaults.thinkingLevel,
       });
       backgroundGoalSessions.set(resumed.goalId, background);

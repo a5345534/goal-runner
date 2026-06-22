@@ -13,7 +13,9 @@ export interface GoalDagPlanNodeInput {
     workspace?: GoalDagNode["workspace"];
     risk?: GoalDagNode["risk"];
     modelScenario?: string;
+    modelClass?: string;
     modelArg?: string;
+    modelResolution?: GoalDagNode["modelResolution"];
     thinkingLevel?: string;
     conflictHints?: GoalDagConflictHints;
     completionGates?: string[];

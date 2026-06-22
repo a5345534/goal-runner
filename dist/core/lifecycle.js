@@ -25,6 +25,10 @@ export function attachPreparedResourcesToNode(node, resources, options = {}) {
     };
     return {
         ...node,
+        modelScenario: preparedResources.modelScenario ?? node.modelScenario,
+        modelClass: preparedResources.modelClass ?? node.modelClass,
+        modelArg: preparedResources.modelArg ?? node.modelArg,
+        modelResolution: preparedResources.modelResolution ?? node.modelResolution,
         preparedResources,
         lifecyclePhase: options.phase ?? node.lifecyclePhase,
         updatedAt: now,

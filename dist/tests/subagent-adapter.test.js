@@ -126,7 +126,7 @@ test("subagent sync ignores stale blocked-to-failed terminal error replays", asy
         harnessAdapterId: "fake-harness",
         status: "blocked",
         prompts: ["initial"],
-        integrationStatus: `blocked: provider/model quota or billing limit reached; configure credentials, quota, or a fallback model before continuing. Error: ${rawError}`,
+        integrationStatus: `blocked: provider/model quota or billing limit reached; configure harness model bindings, credentials, or quota before continuing. Error: ${rawError}`,
         lastActivityAt: "2026-06-02T00:01:00.000Z",
         createdAt: now,
         updatedAt: now,

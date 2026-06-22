@@ -160,8 +160,12 @@ export interface GoalSessionMetadata {
     sessionName?: string;
     /** Model-routing scenario selected for the controller session. */
     controllerModelScenario?: string;
-    /** Canonical provider/model id selected for the controller session. */
+    /** Abstract model class requested for the controller session. */
+    controllerModelClass?: string;
+    /** Concrete provider/model id resolved from harness bindings for the controller session. */
     controllerModelArg?: string;
+    /** Durable model-resolution evidence for the controller session. */
+    controllerModelResolution?: GoalModelResolution;
     legacySessionBound?: boolean;
     createdAt: string;
     updatedAt: string;
@@ -191,7 +195,9 @@ export interface GoalSummary {
     sessionFile?: string;
     sessionName?: string;
     controllerModelScenario?: string;
+    controllerModelClass?: string;
     controllerModelArg?: string;
+    controllerModelResolution?: GoalModelResolution;
     legacySessionBound?: boolean;
 }
 export type GoalDagNodeStatus = "planned" | "ready" | "running" | "selfReportedComplete" | "controllerValidating" | "needsFollowup" | "complete" | "blocked" | "failed" | "superseded";
@@ -206,7 +212,9 @@ export interface GoalNodePreparedResources {
     sessionId?: string;
     sessionFile?: string;
     modelScenario?: string;
+    modelClass?: string;
     modelArg?: string;
+    modelResolution?: GoalModelResolution;
     thinkingLevel?: string;
     metadata?: Record<string, unknown>;
     supersededAt?: string;
@@ -262,8 +270,8 @@ export interface GoalControllerActionAttemptRecord {
     error?: string;
     evidence?: Record<string, unknown>;
 }
-import type { GoalDagConflictHints, GoalDagNodeKind, GoalValidationArtifactLock, GoalDagValidationContract, GoalDagNodeWorkspaceBinding } from "goal-contract";
-export type { GoalDagConflictHints, GoalDagNodeKind, GoalValidationArtifactLock, GoalDagValidationContract, GoalDagNodeWorkspaceBinding, };
+import type { GoalDagConflictHints, GoalDagNodeKind, GoalValidationArtifactLock, GoalDagValidationContract, GoalDagNodeWorkspaceBinding, GoalModelResolution } from "goal-contract";
+export type { GoalDagConflictHints, GoalDagNodeKind, GoalValidationArtifactLock, GoalDagValidationContract, GoalDagNodeWorkspaceBinding, GoalModelResolution, };
 export interface GoalDagNode {
     goalId: string;
     nodeId: string;
@@ -281,8 +289,12 @@ export interface GoalDagNode {
     risk?: "low" | "medium" | "high";
     /** Model-routing scenario selected for this node, resolved by DAG defaults/rules or explicit node config. */
     modelScenario?: string;
-    /** Canonical provider/model id selected for this node, persisted for restart-safe scheduling. */
+    /** Abstract model class selected for this node before harness binding resolution. */
+    modelClass?: string;
+    /** Concrete provider/model id resolved from harness bindings and persisted for restart-safe scheduling. */
     modelArg?: string;
+    /** Durable model-resolution evidence for this node. */
+    modelResolution?: GoalModelResolution;
     /** Pi thinking level (off|minimal|low|medium|high|xhigh) selected for this node. */
     thinkingLevel?: string;
     conflictHints?: GoalDagConflictHints;

@@ -85,10 +85,10 @@ Nodes with no `after` dependencies are immediately schedulable, subject to contr
   },
   "modelRouting": {
     "scenarios": {
-      "controller": { "model": "openai-codex/gpt-5.5" },
-      "implementation": { "model": "openai-codex/gpt-5.5" },
-      "docs": { "model": "openai/gpt-5-mini" },
-      "review": { "model": "anthropic/claude-opus" }
+      "controller": { "modelClass": "controller" },
+      "implementation": { "modelClass": "implementation" },
+      "docs": { "modelClass": "implementation" },
+      "review": { "modelClass": "strict-reviewer" }
     },
     "controllerScenario": "controller",
     "defaultSubagentScenario": "implementation",
@@ -156,7 +156,7 @@ Nodes with no `after` dependencies are immediately schedulable, subject to contr
 | `version` | yes | `1` | File format version. Only `1` is accepted. |
 | `objective` | yes | non-empty string | The goal objective shown in status/monitor and used for the controller session. |
 | `defaults` | no | object | Defaults copied to nodes that do not override them. |
-| `modelRouting` | no | object | Scenario-to-model routing table used by Pi for the controller session and DAG node subagents. |
+| `modelRouting` | no | object | Scenario-to-`modelClass` routing table. Concrete provider/model ids are resolved by goal-runner harness bindings. |
 | `nodes` | yes | non-empty array | Explicit DAG nodes. Default maximum is 20 nodes. |
 
 ## Node fields
@@ -323,17 +323,17 @@ A node-level field overrides the corresponding default. For example, if `default
   "modelRouting": {
     "scenarios": {
       "controller": {
-        "model": "openai-codex/gpt-5.5",
+        "modelClass": "controller",
         "description": "Long-horizon goal supervision"
       },
       "implementation": {
-        "model": "openai-codex/gpt-5.5"
+        "modelClass": "controller"
       },
       "docs": {
-        "model": "openai/gpt-5-mini"
+        "modelClass": "implementation"
       },
       "review": {
-        "model": "anthropic/claude-opus"
+        "modelClass": "strict-reviewer"
       }
     },
     "controllerScenario": "controller",
@@ -357,7 +357,7 @@ A node-level field overrides the corresponding default. For example, if `default
 }
 ```
 
-Scenario ids must match `^[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$`. `model` is the adapter-neutral canonical `provider/model` string; harness adapters translate it into their native request shapes.
+Scenario ids must match `^[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$`. `modelClass` is an abstract class id. Harness adapters resolve it through binding catalogs and record resolution evidence; concrete provider/model ids are not valid in DAG JSON.
 
 Selection order for subagents:
 
@@ -365,7 +365,7 @@ Selection order for subagents:
 2. `defaults.modelScenario`
 3. first matching `modelRouting.rules[]`
 4. `modelRouting.defaultSubagentScenario`
-5. the current Pi session model
+5. no scenario resolves: execution blocks until routing is made explicit
 
 Rule `when` supports:
 
@@ -386,7 +386,7 @@ Pi also accepts a reusable model-routing config outside the DAG file:
 ```bash
 AGENT_GOAL_MODEL_ROUTING_FILE=.goal/models.json
 # or
-AGENT_GOAL_MODEL_ROUTING_JSON='{ "scenarios": { "implementation": { "model": "openai-codex/gpt-5.5" } }, "defaultSubagentScenario": "implementation" }'
+AGENT_GOAL_MODEL_ROUTING_JSON='{ "scenarios": { "implementation": { "modelClass": "implementation" } }, "defaultSubagentScenario": "implementation" }'
 ```
 
 A DAG file's `modelRouting` takes precedence over environment-provided routing.

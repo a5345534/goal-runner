@@ -84,13 +84,6 @@ const TERMINATED_ERROR_PATTERNS = [
     /assistant error:\s*terminated/i,
     /\bterminated\b/i,
 ];
-const CONTEXT_FALLBACK_MODELS = {
-    "openai-codex/gpt-5.3-codex-spark": "deepseek/deepseek-v4-pro",
-    "deepseek/deepseek-v4-flash": "deepseek/deepseek-v4-pro",
-    "minimax/MiniMax-M3": "deepseek/deepseek-v4-pro",
-    "deepseek/deepseek-v4-pro": "deepseek/deepseek-v4-pro", // already largest, no fallback
-    "openai-codex/gpt-5.5": "deepseek/deepseek-v4-pro",
-};
 async function recordControllerEvent(runtime, goalId, event, details = {}, at) {
     if (!runtime.recordControllerEvent)
         return;
@@ -162,15 +155,6 @@ function isMissingSessionTerminalError(message) {
 function isTerminatedSessionError(message) {
     return TERMINATED_ERROR_PATTERNS.some((pattern) => pattern.test(message));
 }
-function contextFallbackModel(currentModel) {
-    if (!currentModel)
-        return undefined;
-    const fallback = CONTEXT_FALLBACK_MODELS[currentModel];
-    // Don't fallback if already on the largest model
-    if (fallback === currentModel)
-        return undefined;
-    return fallback;
-}
 function buildRecoveryPrompt(node, errorMessage, retryCount, maxRetries) {
     return [
         `[SYSTEM RECOVERY] Your previous assistant turn encountered a recoverable error after ${retryCount} recovery attempt(s):`,
@@ -193,7 +177,7 @@ function buildUnhandledScenarioRecoveryPrompt(node, errorMessage, retryCount, ma
     ].join("\n");
 }
 function quotaBlockedSummary(errorMessage) {
-    return `blocked: provider/model quota or billing limit reached; configure credentials, quota, or a fallback model before continuing. Error: ${errorMessage}`;
+    return `blocked: provider/model quota or billing limit reached; configure harness model bindings, credentials, or quota before continuing. Error: ${errorMessage}`;
 }
 function unhandledScenarioBlockedSummary(errorMessage) {
     return `blocked: unhandled subagent error after in-place recovery attempts; add a controller recovery handler or provide developer guidance. Error: ${errorMessage}`;
@@ -207,14 +191,6 @@ function buildBlockedNodeRecoveryPrompt(node, blockedReason, retryCount, maxRetr
         `When done, report exactly: SUBAGENT_RESULT: <summary of changes, verification, and remaining risks>`,
         `If the blocker truly requires external input or an unavailable state change, report exactly: SUBAGENT_BLOCKED: <specific blocker and needed input/state change>`,
         `Best-effort blocked-node recovery ${retryCount + 1}/${maxRetries}.`,
-    ].join("\n");
-}
-function buildContextUpgradePrompt(node, oldModel, newModel) {
-    return [
-        `[SYSTEM RECOVERY] The previous model (${oldModel}) ran out of context window.`,
-        `You have been restarted with a larger-context model: ${newModel}.`,
-        `Please resume your work on: "${node.objective}"`,
-        `Report with SUBAGENT_RESULT: <summary> when done, or SUBAGENT_BLOCKED: <reason> if blocked.`,
     ].join("\n");
 }
 function buildMissingSessionReplacementPrompt(node, errorMessage, retryCount, maxRetries) {
@@ -360,6 +336,8 @@ async function startReplacementSubagent(runtime, adapter, node, subagent, state,
         ref: reusableResources.ref ?? allocation?.ref,
         modelArg: metadataString(allocation?.metadata, "modelArg") ?? reusableResources.modelArg,
         modelScenario: metadataString(allocation?.metadata, "modelScenario") ?? reusableResources.modelScenario,
+        modelClass: metadataString(allocation?.metadata, "modelClass") ?? reusableResources.modelClass,
+        modelResolution: metadataModelResolution(allocation?.metadata) ?? reusableResources.modelResolution,
         thinkingLevel: metadataString(allocation?.metadata, "thinkingLevel") ?? reusableResources.thinkingLevel ?? node.thinkingLevel,
         metadata: { ...(reusableResources.metadata ?? {}), ...(allocation?.metadata ?? {}) },
         updatedAt: tickStartedAt,
@@ -457,78 +435,18 @@ async function tryAutoRecoverFailedNode(runtime, adapter, node, subagent, state,
     const isContext = isContextExceededError(errorMessage);
     const oldModel = node.modelArg ?? subagent.workspacePath ?? "unknown";
     if (isContext) {
-        const fallback = contextFallbackModel(node.modelArg);
-        if (!fallback) {
-            const summary = unhandledScenarioBlockedSummary(errorMessage);
-            const blockedSubagent = withSubagentPatch(subagent, { status: "blocked", integrationStatus: summary, retryCount, updatedAt: tickStartedAt });
-            const blockedNode = withNodePatch(node, { status: "blocked", lastValidationSummary: summary, updatedAt: tickStartedAt });
-            await runtime.saveGoalSubagent(blockedSubagent);
-            await runtime.saveGoalDagNode(blockedNode);
-            await recordControllerEvent(runtime, subagent.goalId, "recovery.blocked", {
-                nodeId: node.nodeId,
-                subagentId: subagent.subagentId,
-                reason: summary,
-            }, tickStartedAt);
-            result.blocked.push(blockedNode);
-            result.synced.push(blockedSubagent);
-            return true;
-        }
-        await runtime.saveGoalDagNode(withNodePatch(node, {
-            status: "running",
-            modelArg: fallback,
-            thinkingLevel: "high",
-            lastValidationSummary: `last-resort context fallback from ${node.modelArg ?? "unknown"} to ${fallback}`,
-            updatedAt: tickStartedAt,
-        }));
-        node = { ...node, modelArg: fallback, thinkingLevel: "high" };
-        const recoveryPrompt = buildContextUpgradePrompt(node, oldModel, fallback);
-        const replacementSubagentId = uniqueReplacementSubagentId(state.subagents, subagent.subagentId, retryCount + 1);
-        const reusableResources = recoveryPreparedResources(node, subagent, tickStartedAt, {
-            subagentId: replacementSubagentId,
-            clearSession: true,
-            modelArg: fallback,
-            thinkingLevel: "high",
-            metadata: { contextFallbackFrom: oldModel, contextFallbackTo: fallback, contextFallbackReason: errorMessage },
-        });
-        const allocation = hasConcretePreparedResource(reusableResources)
-            ? undefined
-            : await options.workspaceAllocator?.({ goalId: subagent.goalId, node, state, adapterId: adapter.adapterId, tickStartedAt });
-        const preparedResources = {
-            ...reusableResources,
-            subagentId: allocation?.subagentId ?? replacementSubagentId,
-            workspacePath: reusableResources.workspacePath ?? allocation?.cwd,
-            branch: reusableResources.branch ?? allocation?.branch,
-            ref: reusableResources.ref ?? allocation?.ref,
-            metadata: { ...(reusableResources.metadata ?? {}), ...(allocation?.metadata ?? {}) },
-            updatedAt: tickStartedAt,
-        };
-        const startOptions = {
-            subagentId: preparedResources.subagentId,
-            cwd: preparedResources.workspacePath,
-            branch: preparedResources.branch,
-            ref: preparedResources.ref,
-            initialPrompt: recoveryPrompt,
-            preparedResources,
-            metadata: { ...(options.metadata ?? {}), ...(preparedResources.metadata ?? {}) },
-            now: tickStartedAt,
-            thinkingLevel: "high",
-        };
-        await runtime.saveGoalSubagent(withSubagentPatch(subagent, {
-            status: "blocked",
-            integrationStatus: `context exceeded with ${oldModel}; work transferred to last-resort fallback model ${fallback}`,
-            retryCount: retryCount + 1,
-            updatedAt: tickStartedAt,
-        }));
-        const newSubagent = await startGoalSubagentWithTimeout(runtime, options, adapter, node, startOptions, tickStartedAt);
-        await recordControllerEvent(runtime, subagent.goalId, "recovery.started", {
+        const summary = `Model resolution blocked automatic context fallback after ${oldModel}: ${errorMessage}`;
+        const blockedSubagent = withSubagentPatch(subagent, { status: "blocked", integrationStatus: summary, retryCount, updatedAt: tickStartedAt });
+        const blockedNode = withNodePatch(node, { status: "blocked", lastValidationSummary: summary, updatedAt: tickStartedAt });
+        await runtime.saveGoalSubagent(blockedSubagent);
+        await runtime.saveGoalDagNode(blockedNode);
+        await recordControllerEvent(runtime, subagent.goalId, "recovery.blocked", {
             nodeId: node.nodeId,
-            subagentId: newSubagent.subagentId,
-            previousSubagentId: subagent.subagentId,
-            fromModel: oldModel,
-            toModel: fallback,
-            reason: errorMessage,
+            subagentId: subagent.subagentId,
+            reason: summary,
         }, tickStartedAt);
-        result.started.push(newSubagent);
+        result.blocked.push(blockedNode);
+        result.synced.push(blockedSubagent);
         return true;
     }
     const isTransient = isTransientError(errorMessage);
@@ -1202,6 +1120,8 @@ async function reconcileStaleRunnerStartingNodes(runtime, goalId, options, resul
             ref: node.preparedResources?.ref ?? allocation?.ref,
             modelArg: metadataString(allocation?.metadata, "modelArg") ?? node.preparedResources?.modelArg ?? node.modelArg,
             modelScenario: metadataString(allocation?.metadata, "modelScenario") ?? node.preparedResources?.modelScenario ?? node.modelScenario,
+            modelClass: metadataString(allocation?.metadata, "modelClass") ?? node.preparedResources?.modelClass ?? node.modelClass,
+            modelResolution: metadataModelResolution(allocation?.metadata) ?? node.preparedResources?.modelResolution ?? node.modelResolution,
             thinkingLevel: metadataString(allocation?.metadata, "thinkingLevel") ?? node.preparedResources?.thinkingLevel ?? node.thinkingLevel,
             metadata: { ...(node.preparedResources?.metadata ?? {}), ...(allocation?.metadata ?? {}) },
             createdAt: node.preparedResources?.createdAt ?? tickStartedAt,
@@ -1522,6 +1442,8 @@ async function startRecoverySubagentWithSupersededResources(runtime, options, st
         ref: allocation?.ref,
         modelArg: metadataString(allocation?.metadata, "modelArg") ?? node.preparedResources?.modelArg ?? node.modelArg,
         modelScenario: metadataString(allocation?.metadata, "modelScenario") ?? node.preparedResources?.modelScenario ?? node.modelScenario,
+        modelClass: metadataString(allocation?.metadata, "modelClass") ?? node.preparedResources?.modelClass ?? node.modelClass,
+        modelResolution: metadataModelResolution(allocation?.metadata) ?? node.preparedResources?.modelResolution ?? node.modelResolution,
         thinkingLevel: metadataString(allocation?.metadata, "thinkingLevel") ?? node.preparedResources?.thinkingLevel ?? node.thinkingLevel,
         metadata: { ...(options.metadata ?? {}), ...(allocation?.metadata ?? {}), recoveryAction: decision.action, recoveryFor: subagent.subagentId },
         createdAt: tickStartedAt,
@@ -1593,6 +1515,12 @@ function metadataString(metadata, key) {
     const value = metadata?.[key];
     return typeof value === "string" && value ? value : undefined;
 }
+function metadataModelResolution(metadata) {
+    const value = metadata?.modelResolution;
+    return value && typeof value === "object" && !Array.isArray(value)
+        ? value
+        : undefined;
+}
 function recoveryPreparedResources(node, subagent, now, options = {}) {
     const base = node.preparedResources ?? {};
     return {
@@ -1606,6 +1534,8 @@ function recoveryPreparedResources(node, subagent, now, options = {}) {
         sessionFile: options.clearSession ? undefined : base.sessionFile ?? subagent.sessionFile,
         modelArg: options.modelArg ?? base.modelArg ?? node.modelArg,
         modelScenario: base.modelScenario ?? node.modelScenario,
+        modelClass: options.modelClass ?? base.modelClass ?? node.modelClass,
+        modelResolution: options.modelResolution ?? base.modelResolution ?? node.modelResolution,
         thinkingLevel: options.thinkingLevel ?? base.thinkingLevel ?? node.thinkingLevel,
         metadata: { ...(base.metadata ?? {}), ...(options.metadata ?? {}) },
         createdAt: base.createdAt ?? subagent.createdAt,
@@ -2234,6 +2164,8 @@ async function startReadyNodes(runtime, goalId, options, result, tickStartedAt) 
             ref: allocation?.ref,
             modelArg: metadataString(allocation?.metadata, "modelArg") ?? metadataString(options.metadata, "modelArg") ?? node.modelArg,
             modelScenario: metadataString(allocation?.metadata, "modelScenario") ?? metadataString(options.metadata, "modelScenario") ?? node.modelScenario,
+            modelClass: metadataString(allocation?.metadata, "modelClass") ?? metadataString(options.metadata, "modelClass") ?? node.modelClass,
+            modelResolution: metadataModelResolution(allocation?.metadata) ?? metadataModelResolution(options.metadata) ?? node.modelResolution,
             thinkingLevel: metadataString(allocation?.metadata, "thinkingLevel") ?? metadataString(options.metadata, "thinkingLevel") ?? node.thinkingLevel,
             metadata: { ...(options.metadata ?? {}), ...(allocation?.metadata ?? {}) },
             createdAt: tickStartedAt,

@@ -1014,9 +1014,9 @@ test("Pi DAG model routing selects controller and subagent models", async () => 
         objective: "Route model scenarios",
         modelRouting: {
             scenarios: {
-                controller: { model: "openai-codex/gpt-5.5" },
-                implementation: { model: "implementation/model" },
-                docs: { model: "deepseek/deepseek-v4-pro" },
+                controller: { modelClass: "controller" },
+                implementation: { modelClass: "implementation" },
+                docs: { modelClass: "implementation" },
             },
             controllerScenario: "controller",
             defaultSubagentScenario: "implementation",
@@ -1238,7 +1238,7 @@ test("Pi goal start defaults to orchestration and target lifecycle commands use 
         await commandHandler?.(`--workspace ${workspace} --branch main write a small story`, controllerCtx);
         assert.equal(launched.length, 2);
         assert.equal(launched[0]?.cwd, workspace);
-        assert.equal(launched[0]?.modelArg, "test/model");
+        assert.equal(launched[0]?.modelArg, "openai-codex/gpt-5.5");
         assert.equal(prompts.length, 1);
         assert.match(prompts[0] ?? "", /SUBAGENT_RESULT/);
         const shortId = notifications.at(-1)?.match(/\(([0-9a-f]{8})\)/)?.[1];

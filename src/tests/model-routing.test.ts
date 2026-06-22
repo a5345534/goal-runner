@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   createGoalDagNodesFromFileContent,
   parseGoalModelRoutingConfig,
+  resolveGoalModelForHarness,
   selectModelScenarioForNode,
   GoalRuntime,
   SQLiteGoalStore,
@@ -13,10 +14,10 @@ import {
 
 const modelRouting = {
   scenarios: {
-    controller: { model: "openai-codex/gpt-5.5" },
-    implementation: { model: "openai-codex/gpt-5.5" },
-    docs: { model: "openai/gpt-5-mini" },
-    review: { model: "anthropic/claude-opus" },
+    controller: { modelClass: "controller" },
+    implementation: { modelClass: "implementation" },
+    docs: { modelClass: "implementation" },
+    review: { modelClass: "strict-reviewer" },
   },
   controllerScenario: "controller",
   defaultSubagentScenario: "implementation",
@@ -26,7 +27,7 @@ const modelRouting = {
   ],
 };
 
-test("model routing selects explicit, rule, then default scenarios", () => {
+test("model routing selects explicit, rule, then default model classes", () => {
   const config = parseGoalModelRoutingConfig(modelRouting);
 
   assert.deepEqual(
@@ -39,7 +40,7 @@ test("model routing selects explicit, rule, then default scenarios", () => {
       expectedOutputs: [],
       modelScenario: "review",
     }, config),
-    { scenario: "review", model: "anthropic/claude-opus", reason: "explicit node modelScenario review" },
+    { scenario: "review", modelClass: "strict-reviewer", reason: "explicit node modelScenario review" },
   );
   assert.deepEqual(
     selectModelScenarioForNode({
@@ -50,7 +51,7 @@ test("model routing selects explicit, rule, then default scenarios", () => {
       validators: [],
       expectedOutputs: [],
     }, config),
-    { scenario: "docs", model: "openai/gpt-5-mini", reason: "routing rule docs" },
+    { scenario: "docs", modelClass: "implementation", reason: "routing rule docs" },
   );
   assert.deepEqual(
     selectModelScenarioForNode({
@@ -59,11 +60,11 @@ test("model routing selects explicit, rule, then default scenarios", () => {
       validators: [],
       expectedOutputs: [],
     }, config),
-    { scenario: "implementation", model: "openai-codex/gpt-5.5", reason: "default subagent scenario implementation" },
+    { scenario: "implementation", modelClass: "implementation", reason: "default subagent scenario implementation" },
   );
 });
 
-test("DAG file model routing stores selected scenario and model on nodes", () => {
+test("DAG file model routing stores selected scenario and modelClass on nodes", () => {
   const plan = createGoalDagNodesFromFileContent(
     "goal-1",
     JSON.stringify({
@@ -79,14 +80,26 @@ test("DAG file model routing stores selected scenario and model on nodes", () =>
     { now: "2026-06-02T00:00:00.000Z" },
   );
 
-  assert.deepEqual(plan.nodes.map((node) => [node.nodeId, node.modelScenario, node.modelArg]), [
-    ["docs-node", "docs", "openai/gpt-5-mini"],
-    ["review-node", "review", "anthropic/claude-opus"],
-    ["explicit-node", "review", "anthropic/claude-opus"],
+  assert.deepEqual(plan.nodes.map((node) => [node.nodeId, node.modelScenario, node.modelClass, node.modelArg]), [
+    ["docs-node", "docs", "implementation", undefined],
+    ["review-node", "review", "strict-reviewer", undefined],
+    ["explicit-node", "review", "strict-reviewer", undefined],
   ]);
 });
 
-test("SQLite store persists DAG node model scenario and model arg", async () => {
+test("harness binding resolution returns concrete model evidence", () => {
+  const resolution = resolveGoalModelForHarness({
+    harness: "pi",
+    role: "subagent",
+    modelScenario: "review",
+    modelClass: "strict-reviewer",
+  });
+  assert.equal(resolution.modelArg, "openai-codex/gpt-5.5");
+  assert.equal(resolution.evidence.status, "resolved");
+  assert.equal(resolution.evidence.requested.modelClass, "strict-reviewer");
+});
+
+test("SQLite store persists DAG node model class, arg, and resolution evidence", async () => {
   const dir = mkdtempSync(join(tmpdir(), "goal-model-routing-"));
   const dbPath = join(dir, "goals.sqlite");
   try {
@@ -108,14 +121,21 @@ test("SQLite store persists DAG node model scenario and model arg", async () => 
       }),
       { now: "2026-06-02T00:00:00.000Z" },
     );
-    await firstRuntime.saveGoalDagNode(plan.nodes[0]!);
+    const resolution = resolveGoalModelForHarness({ harness: "pi", role: "subagent", modelScenario: "docs", modelClass: "implementation" });
+    await firstRuntime.saveGoalDagNode({
+      ...plan.nodes[0]!,
+      modelArg: resolution.modelArg,
+      modelResolution: resolution.evidence,
+    });
     firstStore.close();
 
     const secondStore = new SQLiteGoalStore({ dbPath });
     const secondRuntime = new GoalRuntime({ store: secondStore });
     const node = await secondRuntime.getGoalDagNode("goal-1", "docs-node");
     assert.equal(node?.modelScenario, "docs");
-    assert.equal(node?.modelArg, "openai/gpt-5-mini");
+    assert.equal(node?.modelClass, "implementation");
+    assert.equal(node?.modelArg, "deepseek/deepseek-v4-pro");
+    assert.equal(node?.modelResolution?.requested.modelClass, "implementation");
     assert.deepEqual(node?.workspace, { worktreeSlug: "docs-worktree", branch: "feat/docs-worktree", baseRef: "main" });
     secondStore.close();
   } finally {
