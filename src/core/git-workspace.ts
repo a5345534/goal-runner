@@ -1699,13 +1699,18 @@ function scanChangedSubmoduleGitlinks(
 ): ChangedSubmoduleGitlink[] {
   // When targetTreeish is "INDEX" (integration phase: scan staged vs HEAD):
   //   git diff --raw --abbrev=40 --cached -z HEAD
-  // When targetTreeish is a commit (closeout phase: scan between two commits):
+  // When baseTreeish is "ALL" (scan all gitlinks in target tree):
+  //   git ls-tree -r -z targetTreeish (for closeout full-tree verification)
+  // When both are commits (closeout phase: scan between two commits):
   //   git diff --raw --abbrev=40 -z baseTreeish targetTreeish
   // -z output produces NUL-terminated records:
-  //   :<meta>\0<path>\0         (regular)
-  //   :<meta>\0<oldPath>\0<newPath>\0  (rename)
+  //   :<meta>\0<path>\0         (regular diff)
+  //   :<meta>\0<oldPath>\0<newPath>\0  (rename diff)
   const useCached = !targetTreeish || targetTreeish === "INDEX";
-  const args = useCached
+  const scanAll = baseTreeish === "ALL";
+  const args = scanAll
+    ? ["ls-tree", "-r", "-z", targetTreeish!]
+    : useCached
     ? ["diff", "--raw", "--abbrev=40", "--cached", "-z", baseTreeish]
     : ["diff", "--raw", "--abbrev=40", "-z", baseTreeish, targetTreeish!];
 
@@ -1718,6 +1723,27 @@ function scanChangedSubmoduleGitlinks(
   if (!output) return [];
 
   const gitlinks: ChangedSubmoduleGitlink[] = [];
+
+  if (scanAll) {
+    // Parse ls-tree -r -z output: <mode> <type> <sha>\t<path>\0
+    const entries = output.split("\0").filter((e) => e.trim());
+    for (const entry of entries) {
+      const tabIdx = entry.indexOf("\t");
+      if (tabIdx === -1) continue;
+      const meta = entry.slice(0, tabIdx);
+      const p = entry.slice(tabIdx + 1);
+      const metaParts = meta.split(/\s+/);
+      const mode = metaParts[0];
+      if (mode !== "160000") continue;
+      const newSha = metaParts[2];
+      if (newSha) {
+        gitlinks.push({ path: p, status: "added", newSha });
+      }
+    }
+    return gitlinks;
+  }
+
+  // Parse diff --raw -z output
   const tokens = output.split("\0");
 
   let i = 0;
@@ -1829,8 +1855,10 @@ function normalizeSubmoduleUrl(url: string, parentWorkspacePath: string): string
   if (url.startsWith("./") || url.startsWith("../")) {
     const parentRemoteUrl = safeGit(parentWorkspacePath, ["remote", "get-url", "origin"]);
     if (!parentRemoteUrl) return undefined;
-    const base = parentRemoteUrl.replace(/\/[^/]+$/, "/");
-    return resolveRelativeUrl(base, url);
+    // Pass the full parent URL (not stripped) to resolveRelativeUrl.
+    // For "../sub.git", the first ".." removes the repo name component,
+    // giving the correct sibling-repo-in-same-directory result.
+    return resolveRelativeUrl(parentRemoteUrl, url);
   }
   return url.trim();
 }
@@ -1846,7 +1874,8 @@ function resolveRelativeUrl(base: string, relative: string): string {
     return baseParts.join("/");
   }
   if (relative.startsWith("./")) {
-    const cleanBase = base.replace(/\/$/, "");
+    // Remove last path component (the repo filename) for ./ resolution
+    const cleanBase = base.replace(/\/[^/]+$/, "");
     const suffix = relative.slice(2);
     return `${cleanBase}/${suffix}`;
   }

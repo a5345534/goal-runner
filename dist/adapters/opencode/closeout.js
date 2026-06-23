@@ -21,8 +21,9 @@ import { AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY, cleanupTerminalSubagentWorkspac
 export async function finalizeOpencodeGoalFromDagTerminalState(runtime, goalId, binding, options = {}) {
     let closeoutBlockedReason;
     // Closeout-time submodule publish re-verification BEFORE finalizing.
-    // For auto-allocated controller workspaces, verify that all submodule
-    // gitlinks changed in the last commit (HEAD~1..HEAD) are durably reachable.
+    // For auto-allocated controller workspaces, scan ALL submodule gitlinks
+    // in the current HEAD tree (not just the last commit diff) and verify
+    // each is durably reachable.
     // This must run before finalizeGoalFromDagTerminalState so a blocked
     // re-verify prevents the goal from being marked complete.
     if (options.isAutoAllocatedControllerWorkspace?.(binding)) {
@@ -31,7 +32,7 @@ export async function finalizeOpencodeGoalFromDagTerminalState(runtime, goalId, 
             goalId,
             parentWorkspacePath: binding.workspace,
             sourceWorkspacePaths: [binding.workspace],
-            baseTreeish: "HEAD~1",
+            baseTreeish: "ALL",
             targetTreeish: "HEAD",
             phase: "closeout",
             policy: { ...AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY, submodulePublishMode: "block-if-unpublished" },
@@ -96,6 +97,9 @@ export function formatOpencodeCloseoutDiagnostics(result, shortGoalId) {
     const lines = [];
     if (!result.terminal)
         return lines;
+    if (result.closeoutBlockedReason) {
+        lines.push(`Goal ${shortGoalId} closeout blocked: ${result.closeoutBlockedReason}`);
+    }
     const errors = result.cleanup.filter((entry) => entry.action === "error");
     if (errors.length > 0) {
         lines.push(`Goal ${shortGoalId} completed but ${errors.length} subagent workspace cleanup(s) failed: ${errors
