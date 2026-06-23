@@ -888,12 +888,18 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(runtime, ctx, goalId, bindi
         // Closeout-time submodule publish and push gates for auto-allocated controller workspaces
         if (isAutoAllocated) {
             const closeoutPolicy = AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY;
-            // Submodule re-verification on the promoted target tree
+            // Submodule re-verification on the promoted target tree.
+            // Compare the target's pre-promotion HEAD against the post-promotion merge commit
+            // to catch any submodule gitlink changes that entered via the promotion merge.
+            const targetWorkspace = promotion.result?.targetWorkspacePath ?? binding.workspace;
+            const baseForReverify = promotion.result?.targetHead ?? "HEAD";
+            const targetForReverify = promotion.result?.promotionCommitSha ?? "HEAD";
             const reverify = manager.ensureSubmoduleGitlinksDurablyPublished({
                 goalId,
-                parentWorkspacePath: binding.workspace,
-                sourceWorkspacePaths: [binding.workspace],
-                targetTreeish: "HEAD",
+                parentWorkspacePath: targetWorkspace,
+                sourceWorkspacePaths: [targetWorkspace, binding.workspace],
+                baseTreeish: baseForReverify,
+                targetTreeish: targetForReverify,
                 phase: "closeout",
                 policy: closeoutPolicy,
             });
@@ -918,7 +924,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(runtime, ctx, goalId, bindi
                 if (parentRemoteUrl) {
                     const prePush = manager.verifyRecursiveCheckout({
                         parentRemoteUrl,
-                        targetWorkspacePath: binding.workspace,
+                        targetWorkspacePath: targetWorkspace,
                         targetCommitSha: promotion.result?.promotionCommitSha,
                         mode: "pre-push-local-commit",
                     });
@@ -938,48 +944,58 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(runtime, ctx, goalId, bindi
             }
             // Parent push
             const pushTarget = manager.normalizePromotionTarget({ controllerWorkspacePath: binding.workspace, controllerBranch: binding.branch, targetRef: binding.promotionTargetRef }, closeoutPolicy);
-            if (pushTarget.ok) {
-                const parentPush = manager.pushParentTargetBranch({
-                    targetWorkspacePath: pushTarget.value.targetWorkspacePath,
+            if (!pushTarget.ok) {
+                await recordPiControllerEvent(runtime, goalId, "parentPush.blocked", {
+                    reason: pushTarget.reason,
+                });
+                await runtime.blockGoalFromControllerCloseout(goalId, `parent push target normalization blocked: ${pushTarget.reason}`, {
+                    reason: pushTarget.reason,
+                });
+                if (options.notify !== false)
+                    safeNotify(ctx, `Goal ${goalId.slice(0, 8)} blocked during parent push target resolution: ${pushTarget.reason}`, "warning");
+                stopPiGoalBackgroundResources(goalId);
+                return true;
+            }
+            const parentPush = manager.pushParentTargetBranch({
+                targetWorkspacePath: pushTarget.value.targetWorkspacePath,
+                remoteName: pushTarget.value.remoteName,
+                remoteBranch: pushTarget.value.remoteBranch,
+                recurseSubmodules: "check",
+            });
+            if (parentPush.status === "blocked") {
+                await recordPiControllerEvent(runtime, goalId, "parentPush.blocked", {
+                    summary: parentPush.summary,
                     remoteName: pushTarget.value.remoteName,
                     remoteBranch: pushTarget.value.remoteBranch,
-                    recurseSubmodules: "check",
                 });
-                if (parentPush.status === "blocked") {
-                    await recordPiControllerEvent(runtime, goalId, "parentPush.blocked", {
-                        summary: parentPush.summary,
-                        remoteName: pushTarget.value.remoteName,
+                await runtime.blockGoalFromControllerCloseout(goalId, `parent push blocked: ${parentPush.summary}`, {
+                    parentPushStatus: "blocked",
+                });
+                if (options.notify !== false)
+                    safeNotify(ctx, `Goal ${goalId.slice(0, 8)} blocked during parent push: ${parentPush.summary}`, "warning");
+                stopPiGoalBackgroundResources(goalId);
+                return true;
+            }
+            // Post-push remote checkout verification
+            if (closeoutPolicy.postPushRemoteCheckoutVerification) {
+                const parentRemoteUrl = getParentRemoteUrl(binding.workspace, pushTarget.value.remoteName);
+                if (parentRemoteUrl) {
+                    const postPush = manager.verifyRecursiveCheckout({
+                        parentRemoteUrl,
                         remoteBranch: pushTarget.value.remoteBranch,
+                        mode: "post-push-remote-branch",
                     });
-                    await runtime.blockGoalFromControllerCloseout(goalId, `parent push blocked: ${parentPush.summary}`, {
-                        parentPushStatus: "blocked",
-                    });
-                    if (options.notify !== false)
-                        safeNotify(ctx, `Goal ${goalId.slice(0, 8)} blocked during parent push: ${parentPush.summary}`, "warning");
-                    stopPiGoalBackgroundResources(goalId);
-                    return true;
-                }
-                // Post-push remote checkout verification
-                if (closeoutPolicy.postPushRemoteCheckoutVerification && pushTarget.ok) {
-                    const parentRemoteUrl = getParentRemoteUrl(binding.workspace, pushTarget.value.remoteName);
-                    if (parentRemoteUrl) {
-                        const postPush = manager.verifyRecursiveCheckout({
-                            parentRemoteUrl,
-                            remoteBranch: pushTarget.value.remoteBranch,
-                            mode: "post-push-remote-branch",
+                    if (postPush.status === "blocked") {
+                        await recordPiControllerEvent(runtime, goalId, "recursiveCheckout.postPushBlocked", {
+                            summary: postPush.summary,
                         });
-                        if (postPush.status === "blocked") {
-                            await recordPiControllerEvent(runtime, goalId, "recursiveCheckout.postPushBlocked", {
-                                summary: postPush.summary,
-                            });
-                            await runtime.blockGoalFromControllerCloseout(goalId, `post-push checkout verification blocked: ${postPush.summary}`, {
-                                postPushStatus: "blocked",
-                            });
-                            if (options.notify !== false)
-                                safeNotify(ctx, `Goal ${goalId.slice(0, 8)} blocked during post-push verification: ${postPush.summary}`, "warning");
-                            stopPiGoalBackgroundResources(goalId);
-                            return true;
-                        }
+                        await runtime.blockGoalFromControllerCloseout(goalId, `post-push checkout verification blocked: ${postPush.summary}`, {
+                            postPushStatus: "blocked",
+                        });
+                        if (options.notify !== false)
+                            safeNotify(ctx, `Goal ${goalId.slice(0, 8)} blocked during post-push verification: ${postPush.summary}`, "warning");
+                        stopPiGoalBackgroundResources(goalId);
+                        return true;
                     }
                 }
             }

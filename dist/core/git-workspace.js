@@ -441,6 +441,13 @@ export class NativeGitWorkspaceManager {
                 blockers.push({ path: gitlink.path, sha: newSha, reason: `failed to push retained ref ${durableRef} for ${url}`, error: pushOk === false ? "push failed" : undefined });
                 continue;
             }
+            // Prove remote availability via isolated fresh fetch after push
+            const fetchOk = verifySubmoduleShaFromIsolatedFetch(url, durableRef, newSha);
+            if (!fetchOk) {
+                blockers.push({ path: gitlink.path, sha: newSha, reason: `pushed retained ref ${durableRef} but cannot fetch/verify SHA ${shortSha(newSha)} from ${url} via isolated fetch` });
+                continue;
+            }
+            verified.push({ path: gitlink.path, sha: newSha, canonicalUrl: url, durableRef, isolatedFetchVerified: true });
             published.push({
                 path: gitlink.path,
                 sha: newSha,
@@ -536,28 +543,29 @@ export class NativeGitWorkspaceManager {
     }
     verifyRecursiveCheckout(request) {
         const tmpDir = resolve("/tmp", `goal-submodule-checkout-${Date.now()}`);
+        const uniqueDir = resolve(tmpDir, String(Date.now()));
         try {
-            mkdirSync(tmpDir, { recursive: true });
+            mkdirSync(uniqueDir, { recursive: true });
             if (request.mode === "pre-push-local-commit") {
                 if (!request.targetWorkspacePath || !request.targetCommitSha) {
                     return { status: "blocked", summary: "pre-push mode requires targetWorkspacePath and targetCommitSha", mode: request.mode };
                 }
                 // Clone parent remote, then fetch local commit
-                safeGit(tmpDir, ["init", "-b", "main"]);
-                safeGit(tmpDir, ["remote", "add", "origin", request.parentRemoteUrl]);
-                safeGit(tmpDir, ["fetch", request.targetWorkspacePath, request.targetCommitSha]);
-                safeGit(tmpDir, ["checkout", "--detach", "FETCH_HEAD"]);
+                git(uniqueDir, ["init", "-b", "main"]);
+                safeGit(uniqueDir, ["remote", "add", "origin", request.parentRemoteUrl]);
+                git(uniqueDir, ["fetch", request.targetWorkspacePath, request.targetCommitSha]);
+                git(uniqueDir, ["checkout", "--detach", "FETCH_HEAD"]);
             }
             else {
-                // Post-push: clone remote branch
+                // Post-push: clone remote branch (clone into a subdir, not the dir itself)
                 if (!request.remoteBranch) {
                     return { status: "blocked", summary: "post-push mode requires remoteBranch", mode: request.mode };
                 }
-                git(tmpDir, ["clone", "--branch", request.remoteBranch, "--recurse-submodules", request.parentRemoteUrl, tmpDir]);
+                git(tmpDir, ["clone", "--branch", request.remoteBranch, "--recurse-submodules", request.parentRemoteUrl, uniqueDir]);
             }
             // Try recursive submodule checkout
-            safeGit(tmpDir, ["submodule", "sync", "--recursive"]);
-            safeGit(tmpDir, ["submodule", "update", "--init", "--recursive"]);
+            git(uniqueDir, ["submodule", "sync", "--recursive"]);
+            git(uniqueDir, ["submodule", "update", "--init", "--recursive"]);
             return { status: "passed", summary: `recursive checkout verification passed (${request.mode})`, mode: request.mode };
         }
         catch (error) {
@@ -570,6 +578,7 @@ export class NativeGitWorkspaceManager {
             };
         }
         finally {
+            rmRecursiveSafe(uniqueDir);
             rmRecursiveSafe(tmpDir);
         }
     }
@@ -1154,51 +1163,84 @@ function safeGit(cwd, args) {
     }
 }
 // ── Submodule publish and closeout helper functions ──
-function scanChangedSubmoduleGitlinks(parentWorkspacePath, baseTreeish = "HEAD", targetTreeish = "INDEX") {
-    // Scan staged changes against base for mode 160000 entries (submodule gitlinks)
-    const output = safeGit(parentWorkspacePath, ["diff", "--raw", "--cached", "-z", baseTreeish]);
+function scanChangedSubmoduleGitlinks(parentWorkspacePath, baseTreeish = "HEAD", targetTreeish) {
+    // When targetTreeish is "INDEX" (integration phase: scan staged vs HEAD):
+    //   git diff --raw --cached -z HEAD
+    // When targetTreeish is a commit (closeout phase: scan between two commits):
+    //   git diff --raw -z baseTreeish targetTreeish
+    // -z output produces NUL-terminated records:
+    //   :<meta>\0<path>\0         (regular)
+    //   :<meta>\0<oldPath>\0<newPath>\0  (rename)
+    const useCached = !targetTreeish || targetTreeish === "INDEX";
+    const args = useCached
+        ? ["diff", "--raw", "--cached", "-z", baseTreeish]
+        : ["diff", "--raw", "-z", baseTreeish, targetTreeish];
+    let output;
+    try {
+        output = git(parentWorkspacePath, args);
+    }
+    catch {
+        return [];
+    }
     if (!output)
         return [];
     const gitlinks = [];
-    const entries = output.split("\0").filter((e) => e.trim());
-    for (const entry of entries) {
-        // Format: :<oldMode> <newMode> <oldSha> <newSha> <status>\t<path>
-        const tabIdx = entry.indexOf("\t");
-        if (tabIdx === -1)
+    const tokens = output.split("\0");
+    let i = 0;
+    while (i < tokens.length) {
+        const meta = tokens[i];
+        if (!meta || !meta.startsWith(":")) {
+            i++;
             continue;
-        const meta = entry.slice(0, tabIdx);
-        const rawPath = entry.slice(tabIdx + 1);
-        const parts = meta.split(/\s+/);
+        }
+        const parts = meta.slice(1).split(/\s+/);
+        // parts: [oldMode, newMode, oldSha, newSha, status]
         const oldMode = parts[0];
         const newMode = parts[1];
-        // Only mode 160000 entries are submodule gitlinks
-        if (oldMode !== "160000" && newMode !== "160000")
-            continue;
+        const oldShaRaw = parts[2];
+        const newShaRaw = parts[3];
         const status = parts[4];
-        const oldSha = parts[2] !== "0000000000000000000000000000000000000000" ? parts[2] : undefined;
-        const newSha = parts[3] !== "0000000000000000000000000000000000000000" ? parts[3] : undefined;
+        if (!status) {
+            i++;
+            continue;
+        }
+        // Only mode 160000 entries are submodule gitlinks
+        if (oldMode !== "160000" && newMode !== "160000") {
+            i += status.length > 1 ? 3 : 2; // skip rename (3 tokens) or regular (2)
+            continue;
+        }
+        const oldSha = oldShaRaw !== "0000000000000000000000000000000000000000" ? oldShaRaw : undefined;
+        const newSha = newShaRaw !== "0000000000000000000000000000000000000000" ? newShaRaw : undefined;
         let mappedStatus;
         let path;
         let oldPath;
-        if (status === "R") {
+        if (status.length > 1) {
+            // Rename: R<score>, followed by oldPath then newPath
             mappedStatus = "renamed";
-            const paths = rawPath.split("\t");
-            oldPath = paths[0];
-            path = paths[1] ?? rawPath;
-        }
-        else if (status === "A") {
-            mappedStatus = "added";
-            path = rawPath;
-        }
-        else if (status === "D") {
-            mappedStatus = "deleted";
-            path = rawPath;
+            oldPath = tokens[i + 1] || undefined;
+            path = tokens[i + 2] || (tokens[i + 1] ?? "");
+            i += 3;
         }
         else {
-            mappedStatus = "modified";
-            path = rawPath;
+            const statusCode = status;
+            const p = tokens[i + 1] || "";
+            if (statusCode === "A") {
+                mappedStatus = "added";
+                path = p;
+            }
+            else if (statusCode === "D") {
+                mappedStatus = "deleted";
+                path = p;
+            }
+            else {
+                mappedStatus = "modified";
+                path = p;
+            }
+            i += 2;
         }
-        gitlinks.push({ path, status: mappedStatus, oldPath, oldSha, newSha });
+        if (path) {
+            gitlinks.push({ path, status: mappedStatus, oldPath, oldSha, newSha });
+        }
     }
     return gitlinks;
 }
@@ -1324,34 +1366,57 @@ function verifySubmoduleShaFromIsolatedFetch(canonicalUrl, durableRef, sha) {
 }
 function normalizePromotionTargetRef(controllerWorkspacePath, repoRoot, targetRef, remoteName) {
     const ref = targetRef.trim();
-    // Is it a commit SHA?
-    const isCommit = safeGit(repoRoot, ["rev-parse", "--verify", `${ref}^{commit}`]);
-    if (isCommit)
-        return undefined; // Detached; cannot auto-push
-    // Is it a remote ref like origin/main?
-    if (ref.startsWith(`${remoteName}/`)) {
+    // Check if this is a known branch or remote ref BEFORE trying commit-ish.
+    // (rev-parse <name>^{commit} succeeds for both branch names and commit SHAs,
+    // so we must distinguish: use show-ref to check if it's a branch first.)
+    const isRemoteRef = ref.startsWith(`${remoteName}/`);
+    const isKnownLocalBranch = gitRefExists(repoRoot, ref);
+    // Is it a bare commit SHA or tag (not a known branch/remote ref)?
+    if (!isRemoteRef && !isKnownLocalBranch) {
+        try {
+            const type = git(repoRoot, ["cat-file", "-t", ref]);
+            if (type === "commit" || type === "tag")
+                return undefined; // Detached commit/tag
+        }
+        catch {
+            // Not a valid ref at all
+        }
+        return undefined;
+    }
+    // Is it a bare commit SHA or tag (not a known branch/remote ref)?
+    if (!isRemoteRef && !isKnownLocalBranch) {
+        try {
+            const type = git(repoRoot, ["cat-file", "-t", ref]);
+            if (type === "commit" || type === "tag")
+                return undefined; // Detached commit/tag
+        }
+        catch {
+            // Not a valid ref at all
+        }
+        return undefined;
+    }
+    if (isRemoteRef) {
         const remoteBranch = ref.slice(remoteName.length + 1);
-        const localBranch = remoteBranch;
-        const targetWs = resolveControllerPromotionTarget(controllerWorkspacePath, ref, undefined, "goal");
-        // Fallback: use HEAD
         const head = safeGit(repoRoot, ["rev-parse", "--verify", "HEAD"]);
         if (!head)
             return undefined;
+        // Find local worktree for this branch
+        const worktrees = listGitWorktrees(repoRoot);
+        const target = worktrees.find((w) => w.branch === remoteBranch);
         return {
             remoteName,
             remoteBranch,
-            localTargetBranch: localBranch,
-            targetWorkspacePath: controllerWorkspacePath,
-            targetHead: head,
+            localTargetBranch: remoteBranch,
+            targetWorkspacePath: target?.worktreePath ?? controllerWorkspacePath,
+            targetHead: target?.head ?? head,
         };
     }
-    // Treat as local branch name
+    // Local branch name
     const localBranch = ref.replace(/^refs\/heads\//, "");
     const remoteBranch = localBranch;
     const head = safeGit(repoRoot, ["rev-parse", "--verify", `refs/heads/${localBranch}`]);
     if (!head)
         return undefined;
-    // Find target worktree
     const worktrees = listGitWorktrees(repoRoot);
     const target = worktrees.find((w) => w.branch === localBranch);
     const targetWs = target?.worktreePath ?? controllerWorkspacePath;
