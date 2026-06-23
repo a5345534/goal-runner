@@ -24,7 +24,9 @@
     "./opencode/workspace": "./dist/adapters/opencode/workspace.js",
     "./opencode/model-routing": "./dist/adapters/opencode/model-routing.js",
     "./opencode/monitor": "./dist/adapters/opencode/monitor-ui.js",
-    "./opencode/closeout": "./dist/adapters/opencode/closeout.js"
+    "./opencode/closeout": "./dist/adapters/opencode/closeout.js",
+    "./catalogs/bindings/pi.json": "./catalogs/bindings/pi.json",
+    "./catalogs/bindings/opencode.json": "./catalogs/bindings/opencode.json"
   },
   "files": [
     "dist",
