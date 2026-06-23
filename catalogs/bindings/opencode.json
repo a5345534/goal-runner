@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "harness": "opencode",
+  "bindings": {
+    "controller": {
+      "model": "openai-codex/gpt-5.5",
+      "declaredCapabilities": {
+        "reasoning": "very_high",
+        "contextWindowTokens": 256000,
+        "toolUse": "required",
+        "structuredOutput": "strict",
+        "formatFollowing": "very_high",
+        "sourceCitation": "required",
+        "costSensitivity": "medium",
+        "privacy": "cloud-ok"
+      }
+    },
+    "implementation": {
+      "model": "deepseek/deepseek-v4-pro",
+      "declaredCapabilities": {
+        "reasoning": "high",
+        "contextWindowTokens": 256000,
+        "toolUse": "required",
+        "structuredOutput": "preferred",
+        "formatFollowing": "high",
+        "sourceCitation": "preferred",
+        "costSensitivity": "medium",
+        "privacy": "cloud-ok"
+      }
+    },
+    "strict-reviewer": {
+      "model": "openai-codex/gpt-5.5",
+      "declaredCapabilities": {
+        "reasoning": "very_high",
+        "contextWindowTokens": 256000,
+        "toolUse": "required",
+        "structuredOutput": "strict",
+        "formatFollowing": "very_high",
+        "sourceCitation": "required",
+        "costSensitivity": "medium",
+        "privacy": "cloud-ok"
+      }
+    },
+    "evidence-collector": {
+      "model": "deepseek/deepseek-v4-flash",
+      "declaredCapabilities": {
+        "reasoning": "medium",
+        "contextWindowTokens": 256000,
+        "toolUse": "required",
+        "structuredOutput": "preferred",
+        "formatFollowing": "medium",
+        "sourceCitation": "required",
+        "costSensitivity": "high",
+        "privacy": "cloud-ok"
+      }
+    },
+    "value-judge": {
+      "model": "openai-codex/gpt-5.5",
+      "declaredCapabilities": {
+        "reasoning": "very_high",
+        "contextWindowTokens": 256000,
+        "toolUse": "required",
+        "structuredOutput": "strict",
+        "formatFollowing": "very_high",
+        "sourceCitation": "required",
+        "costSensitivity": "medium",
+        "privacy": "cloud-ok"
+      }
+    },
+    "spec-writer": {
+      "model": "deepseek/deepseek-v4-pro",
+      "declaredCapabilities": {
+        "reasoning": "high",
+        "contextWindowTokens": 256000,
+        "toolUse": "required",
+        "structuredOutput": "strict",
+        "formatFollowing": "high",
+        "sourceCitation": "required",
+        "costSensitivity": "medium",
+        "privacy": "cloud-ok"
+      }
+    },
+    "explainer-writer": {
+      "model": "deepseek/deepseek-v4-pro",
+      "declaredCapabilities": {
+        "reasoning": "high",
+        "contextWindowTokens": 256000,
+        "toolUse": "required",
+        "structuredOutput": "preferred",
+        "formatFollowing": "high",
+        "sourceCitation": "required",
+        "costSensitivity": "medium",
+        "privacy": "cloud-ok"
+      }
+    }
+  }
+}
