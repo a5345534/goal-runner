@@ -179,6 +179,164 @@ export interface NativeGitSubagentCleanupResult {
   reachabilityVerified?: boolean;
 }
 
+// ── Submodule publish and closeout policy types ──
+
+export type NativeGitRemoteCloseoutMode =
+  | "local-only"
+  | "push-parent"
+  | "block-if-cannot-push";
+
+export type NativeGitSubmodulePublishMode =
+  | "verify-only"
+  | "publish-retained-ref-if-trusted"
+  | "block-if-unpublished";
+
+export interface NativeGitCloseoutPolicy {
+  remoteCloseoutMode: NativeGitRemoteCloseoutMode;
+  submodulePublishMode: NativeGitSubmodulePublishMode;
+  cleanupAutoAllocatedWorktrees: boolean;
+  allowExplicitWorkspaceCleanup: false;
+  parentRemote?: string;
+  targetBranch?: string;
+  durableRefPrefix?: string;
+  durableRefPatterns: string[];
+  trustedSubmoduleUrlPatterns: string[];
+  verifyNestedSubmodules: boolean;
+  prePushCheckoutSimulation: boolean;
+  postPushRemoteCheckoutVerification: boolean;
+}
+
+export const AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY: NativeGitCloseoutPolicy = {
+  remoteCloseoutMode: "block-if-cannot-push",
+  submodulePublishMode: "publish-retained-ref-if-trusted",
+  cleanupAutoAllocatedWorktrees: true,
+  allowExplicitWorkspaceCleanup: false,
+  parentRemote: "origin",
+  durableRefPatterns: [
+    "refs/heads/main",
+    "refs/heads/master",
+    "refs/heads/release/*",
+    "refs/heads/goal-runner/retained/*",
+  ],
+  trustedSubmoduleUrlPatterns: [],
+  verifyNestedSubmodules: true,
+  prePushCheckoutSimulation: true,
+  postPushRemoteCheckoutVerification: true,
+};
+
+export const EXPLICIT_WORKSPACE_DEFAULT_CLOSEOUT_POLICY: NativeGitCloseoutPolicy = {
+  remoteCloseoutMode: "local-only",
+  submodulePublishMode: "block-if-unpublished",
+  cleanupAutoAllocatedWorktrees: false,
+  allowExplicitWorkspaceCleanup: false,
+  parentRemote: "origin",
+  durableRefPatterns: [
+    "refs/heads/main",
+    "refs/heads/master",
+    "refs/heads/release/*",
+    "refs/heads/goal-runner/retained/*",
+  ],
+  trustedSubmoduleUrlPatterns: [],
+  verifyNestedSubmodules: true,
+  prePushCheckoutSimulation: false,
+  postPushRemoteCheckoutVerification: false,
+};
+
+export interface ChangedSubmoduleGitlink {
+  path: string;
+  status: "added" | "modified" | "deleted" | "renamed";
+  oldPath?: string;
+  oldSha?: string;
+  newSha?: string;
+  canonicalUrl?: string;
+  oldCanonicalUrl?: string;
+}
+
+export interface NativeGitSubmodulePublishRequest {
+  goalId: string;
+  parentWorkspacePath: string;
+  sourceWorkspacePaths: string[];
+  baseTreeish?: string;
+  targetTreeish?: string;
+  phase: "integration" | "closeout";
+  policy: NativeGitCloseoutPolicy;
+}
+
+export interface NativeGitSubmodulePublishResult {
+  status: "passed" | "skipped" | "blocked";
+  summary: string;
+  phase: "integration" | "closeout";
+  changedGitlinks: ChangedSubmoduleGitlink[];
+  published: PublishedSubmoduleRef[];
+  verified: VerifiedSubmoduleRef[];
+  blockers: SubmodulePublishBlocker[];
+}
+
+export interface PublishedSubmoduleRef {
+  path: string;
+  sha: string;
+  canonicalUrl: string;
+  durableRef: string;
+  alreadyContained: boolean;
+  sourceWorkspacePath?: string;
+}
+
+export interface VerifiedSubmoduleRef {
+  path: string;
+  sha: string;
+  canonicalUrl: string;
+  durableRef: string;
+  isolatedFetchVerified: boolean;
+  nestedVerified?: boolean;
+}
+
+export interface SubmodulePublishBlocker {
+  path: string;
+  sha?: string;
+  reason: string;
+  error?: string;
+}
+
+export interface NormalizedPromotionTarget {
+  remoteName: string;
+  remoteBranch: string;
+  localTargetBranch: string;
+  targetWorkspacePath: string;
+  targetHead: string;
+  remoteHead?: string;
+}
+
+export interface NativeGitParentPushRequest {
+  targetWorkspacePath: string;
+  remoteName: string;
+  remoteBranch: string;
+  recurseSubmodules: "check";
+}
+
+export interface NativeGitParentPushResult {
+  status: "passed" | "blocked" | "skipped";
+  summary: string;
+  remoteName?: string;
+  remoteBranch?: string;
+  pushedHead?: string;
+  error?: string;
+}
+
+export interface NativeGitRecursiveCheckoutVerificationRequest {
+  parentRemoteUrl: string;
+  targetWorkspacePath?: string;
+  targetCommitSha?: string;
+  remoteBranch?: string;
+  mode: "pre-push-local-commit" | "post-push-remote-branch";
+}
+
+export interface NativeGitRecursiveCheckoutVerificationResult {
+  status: "passed" | "blocked" | "skipped";
+  summary: string;
+  mode: "pre-push-local-commit" | "post-push-remote-branch";
+  error?: string;
+}
+
 export class NativeGitWorkspaceManager {
   private readonly options: Required<Omit<NativeGitWorkspaceManagerOptions, "worktreeRoot" | "defaultBaseRef">> & Pick<NativeGitWorkspaceManagerOptions, "worktreeRoot" | "defaultBaseRef">;
 
@@ -449,6 +607,34 @@ export class NativeGitWorkspaceManager {
 
     try {
       git(controllerWorkspacePath, ["merge", "--no-ff", "--no-commit", sourceHead]);
+
+      // Integration-time submodule publish gate: scan staged gitlinks and ensure
+      // every changed submodule SHA is durably remote-fetchable before the merge
+      // commit enters the controller branch history.
+      const publish = this.ensureSubmoduleGitlinksDurablyPublished({
+        goalId: request.subagent.goalId,
+        parentWorkspacePath: controllerWorkspacePath,
+        sourceWorkspacePaths: [
+          source.workspacePath,
+          controllerWorkspacePath,
+        ].filter((p): p is string => Boolean(p)),
+        baseTreeish: "HEAD",
+        targetTreeish: "INDEX",
+        phase: "integration",
+        policy: AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY,
+      });
+
+      if (publish.status === "blocked") {
+        abortMergeAndCleanPostMergeValidationArtifacts(controllerWorkspacePath);
+        return nativeGitIntegrationFailure(
+          request,
+          `submodule publish blocked: ${publish.summary}`,
+          { sourceBranch, sourceRef, sourceHead },
+          `[SYSTEM FOLLOW-UP: SUBMODULE_PUBLISH_BLOCKED]\n${publish.summary}\n\nPush the referenced submodule SHAs to their remotes, or configure closeout policy to allow retained ref publish for trusted submodule URLs. Then retry integration.`,
+          publish.blockers.map((b) => `${b.path}: ${b.reason}`),
+        );
+      }
+
       const postMergeValidation = runPostMergeValidationIfNeeded(request, controllerWorkspacePath);
       if (!postMergeValidation.ok) {
         abortMergeAndCleanPostMergeValidationArtifacts(controllerWorkspacePath);
@@ -556,6 +742,231 @@ export class NativeGitWorkspaceManager {
         targetWorkspacePath: target.workspacePath,
         targetHead: target.head,
       });
+    }
+  }
+
+  // ── Submodule publish and closeout gate methods ──
+
+  ensureSubmoduleGitlinksDurablyPublished(request: NativeGitSubmodulePublishRequest): NativeGitSubmodulePublishResult {
+    const gitlinks = scanChangedSubmoduleGitlinks(request.parentWorkspacePath, request.baseTreeish, request.targetTreeish);
+
+    if (gitlinks.length === 0) {
+      return {
+        status: "skipped",
+        summary: "no changed submodule gitlinks detected",
+        phase: request.phase,
+        changedGitlinks: [],
+        published: [],
+        verified: [],
+        blockers: [],
+      };
+    }
+
+    const published: PublishedSubmoduleRef[] = [];
+    const verified: VerifiedSubmoduleRef[] = [];
+    const blockers: SubmodulePublishBlocker[] = [];
+
+    for (const gitlink of gitlinks) {
+      if (gitlink.status === "deleted") {
+        continue;
+      }
+
+      const newSha = gitlink.newSha;
+      if (!newSha) {
+        blockers.push({ path: gitlink.path, reason: "changed submodule gitlink has no new SHA" });
+        continue;
+      }
+
+      // Resolve canonical URL from parent tree .gitmodules
+      const url = resolveSubmoduleCanonicalUrl(request.parentWorkspacePath, gitlink.path, request.targetTreeish);
+      if (!url) {
+        blockers.push({ path: gitlink.path, sha: newSha, reason: `cannot resolve canonical URL for submodule path ${gitlink.path} from .gitmodules` });
+        continue;
+      }
+      gitlink.canonicalUrl = url;
+
+      // URL trust check
+      if (!isSubmoduleUrlTrusted(url, gitlink, request.policy)) {
+        blockers.push({ path: gitlink.path, sha: newSha, reason: `submodule URL ${url} is not trusted for publish` });
+        continue;
+      }
+
+      // Locate the commit object
+      const objectSource = locateSubmoduleCommitObject(newSha, request.sourceWorkspacePaths, gitlink.path);
+      if (!objectSource) {
+        blockers.push({ path: gitlink.path, sha: newSha, reason: `cannot locate submodule commit ${shortSha(newSha)} in any source workspace` });
+        continue;
+      }
+
+      // Check if SHA is already on a durable remote ref
+      const existingRef = findDurableRefContainingSha(url, newSha, request.policy.durableRefPatterns);
+      if (existingRef) {
+        const fetchOk = verifySubmoduleShaFromIsolatedFetch(url, existingRef, newSha);
+        if (fetchOk) {
+          verified.push({ path: gitlink.path, sha: newSha, canonicalUrl: url, durableRef: existingRef, isolatedFetchVerified: true });
+          continue;
+        }
+      }
+
+      // Try to publish retained ref
+      if (request.policy.submodulePublishMode === "verify-only" || request.policy.submodulePublishMode === "block-if-unpublished") {
+        blockers.push({ path: gitlink.path, sha: newSha, reason: `submodule SHA ${shortSha(newSha)} is not on any durable remote ref and publish mode is ${request.policy.submodulePublishMode}` });
+        continue;
+      }
+
+      const pathSlug = sanitizeSlug(gitlink.path).slice(0, 32) || "submodule";
+      const sha12 = shortSha(newSha);
+      const durableRef = `refs/heads/goal-runner/retained/${request.goalId}/${pathSlug}-${sha12}`;
+
+      const pushOk = publishShaToRetainedRef(objectSource, gitlink.path, url, newSha, durableRef);
+      if (!pushOk) {
+        blockers.push({ path: gitlink.path, sha: newSha, reason: `failed to push retained ref ${durableRef} for ${url}`, error: pushOk === false ? "push failed" : undefined });
+        continue;
+      }
+
+      published.push({
+        path: gitlink.path,
+        sha: newSha,
+        canonicalUrl: url,
+        durableRef,
+        alreadyContained: false,
+        sourceWorkspacePath: objectSource,
+      });
+    }
+
+    const hasBlockers = blockers.length > 0;
+    return {
+      status: hasBlockers ? "blocked" : "passed",
+      summary: hasBlockers
+        ? `submodule publish blocked: ${blockers.map((b) => `${b.path}: ${b.reason}`).join("; ")}`
+        : `submodule publish passed: ${gitlinks.length} gitlink(s) scanned, ${verified.length} verified, ${published.length} published`,
+      phase: request.phase,
+      changedGitlinks: gitlinks,
+      published,
+      verified,
+      blockers,
+    };
+  }
+
+  normalizePromotionTarget(
+    request: NativeGitControllerBranchPromotionRequest,
+    policy: NativeGitCloseoutPolicy,
+  ): { ok: true; value: NormalizedPromotionTarget } | { ok: false; reason: string } {
+    const controllerWorkspacePath = resolve(request.controllerWorkspacePath);
+    const repoRoot = findGitRepositoryRoot(controllerWorkspacePath);
+    if (!repoRoot) return { ok: false, reason: `controller workspace is not inside a Git repository: ${controllerWorkspacePath}` };
+
+    const targetRef = request.targetRef ?? policy.targetBranch;
+    if (!targetRef) return { ok: false, reason: "no promotion target ref configured" };
+
+    const remoteName = policy.parentRemote ?? "origin";
+    const remoteUrl = safeGit(repoRoot, ["remote", "get-url", remoteName]);
+    if (!remoteUrl) return { ok: false, reason: `cannot resolve remote URL for ${remoteName}` };
+
+    const normalized = normalizePromotionTargetRef(controllerWorkspacePath, repoRoot, targetRef, remoteName);
+    if (!normalized) return { ok: false, reason: `cannot normalize promotion target ref: ${targetRef}` };
+
+    return { ok: true, value: normalized };
+  }
+
+  syncTargetBranchBeforePromotion(
+    target: NormalizedPromotionTarget,
+  ): { status: "synced" | "blocked"; summary: string } {
+    const repoRoot = findGitRepositoryRoot(target.targetWorkspacePath);
+    if (!repoRoot) return { status: "blocked", summary: "target workspace is not inside a Git repository" };
+
+    // Fetch latest remote target branch
+    const fetchRefspec = `refs/heads/${target.remoteBranch}:refs/remotes/${target.remoteName}/${target.remoteBranch}`;
+    safeGit(repoRoot, ["fetch", target.remoteName, fetchRefspec]);
+
+    const remoteHead = safeGit(repoRoot, ["rev-parse", "--verify", `refs/remotes/${target.remoteName}/${target.remoteBranch}`]);
+    if (!remoteHead) return { status: "blocked", summary: `cannot resolve remote target branch ${target.remoteName}/${target.remoteBranch}` };
+
+    if (target.targetHead === remoteHead) {
+      return { status: "synced", summary: `target ${target.localTargetBranch} is already at remote ${target.remoteName}/${target.remoteBranch}` };
+    }
+
+    if (gitIsAncestor(repoRoot, target.targetHead, remoteHead)) {
+      // Local is behind remote; fast-forward
+      try {
+        git(target.targetWorkspacePath, ["merge", "--ff-only", remoteHead]);
+        return { status: "synced", summary: `fast-forwarded target ${target.localTargetBranch} to ${target.remoteName}/${target.remoteBranch}` };
+      } catch {
+        return { status: "blocked", summary: "failed to fast-forward local target to remote" };
+      }
+    }
+
+    if (gitIsAncestor(repoRoot, remoteHead, target.targetHead)) {
+      return { status: "blocked", summary: `local target ${target.localTargetBranch} has unpushed commits; cannot promote` };
+    }
+
+    return { status: "blocked", summary: `target ${target.localTargetBranch} and ${target.remoteName}/${target.remoteBranch} have diverged` };
+  }
+
+  pushParentTargetBranch(request: NativeGitParentPushRequest): NativeGitParentPushResult {
+    try {
+      const head = safeGit(request.targetWorkspacePath, ["rev-parse", "--verify", "HEAD"]);
+      if (!head) return { status: "blocked", summary: "target workspace has no HEAD", error: "no HEAD" };
+
+      const refspec = `HEAD:refs/heads/${request.remoteBranch}`;
+      git(request.targetWorkspacePath, ["push", "--recurse-submodules=check", request.remoteName, refspec]);
+
+      return {
+        status: "passed",
+        summary: `pushed ${shortSha(head)} to ${request.remoteName}/${request.remoteBranch}`,
+        remoteName: request.remoteName,
+        remoteBranch: request.remoteBranch,
+        pushedHead: head,
+      };
+    } catch (error) {
+      const message = gitErrorMessage(error);
+      return {
+        status: "blocked",
+        summary: `parent push blocked: ${message}`,
+        remoteName: request.remoteName,
+        remoteBranch: request.remoteBranch,
+        error: message,
+      };
+    }
+  }
+
+  verifyRecursiveCheckout(request: NativeGitRecursiveCheckoutVerificationRequest): NativeGitRecursiveCheckoutVerificationResult {
+    const tmpDir = resolve("/tmp", `goal-submodule-checkout-${Date.now()}`);
+    try {
+      mkdirSync(tmpDir, { recursive: true });
+
+      if (request.mode === "pre-push-local-commit") {
+        if (!request.targetWorkspacePath || !request.targetCommitSha) {
+          return { status: "blocked", summary: "pre-push mode requires targetWorkspacePath and targetCommitSha", mode: request.mode };
+        }
+        // Clone parent remote, then fetch local commit
+        safeGit(tmpDir, ["init", "-b", "main"]);
+        safeGit(tmpDir, ["remote", "add", "origin", request.parentRemoteUrl]);
+        safeGit(tmpDir, ["fetch", request.targetWorkspacePath, request.targetCommitSha]);
+        safeGit(tmpDir, ["checkout", "--detach", "FETCH_HEAD"]);
+      } else {
+        // Post-push: clone remote branch
+        if (!request.remoteBranch) {
+          return { status: "blocked", summary: "post-push mode requires remoteBranch", mode: request.mode };
+        }
+        git(tmpDir, ["clone", "--branch", request.remoteBranch, "--recurse-submodules", request.parentRemoteUrl, tmpDir]);
+      }
+
+      // Try recursive submodule checkout
+      safeGit(tmpDir, ["submodule", "sync", "--recursive"]);
+      safeGit(tmpDir, ["submodule", "update", "--init", "--recursive"]);
+
+      return { status: "passed", summary: `recursive checkout verification passed (${request.mode})`, mode: request.mode };
+    } catch (error) {
+      const message = gitErrorMessage(error);
+      return {
+        status: "blocked",
+        summary: `recursive checkout verification failed (${request.mode}): ${message}`,
+        mode: request.mode,
+        error: message,
+      };
+    } finally {
+      rmRecursiveSafe(tmpDir);
     }
   }
 
@@ -1243,5 +1654,265 @@ function safeGit(cwd: string, args: string[]): string {
     return git(cwd, args);
   } catch {
     return "";
+  }
+}
+
+// ── Submodule publish and closeout helper functions ──
+
+function scanChangedSubmoduleGitlinks(
+  parentWorkspacePath: string,
+  baseTreeish: string = "HEAD",
+  targetTreeish: string = "INDEX",
+): ChangedSubmoduleGitlink[] {
+  // Scan staged changes against base for mode 160000 entries (submodule gitlinks)
+  const output = safeGit(parentWorkspacePath, ["diff", "--raw", "--cached", "-z", baseTreeish]);
+  if (!output) return [];
+
+  const gitlinks: ChangedSubmoduleGitlink[] = [];
+  const entries = output.split("\0").filter((e) => e.trim());
+
+  for (const entry of entries) {
+    // Format: :<oldMode> <newMode> <oldSha> <newSha> <status>\t<path>
+    const tabIdx = entry.indexOf("\t");
+    if (tabIdx === -1) continue;
+    const meta = entry.slice(0, tabIdx);
+    const rawPath = entry.slice(tabIdx + 1);
+
+    const parts = meta.split(/\s+/);
+    const oldMode = parts[0];
+    const newMode = parts[1];
+
+    // Only mode 160000 entries are submodule gitlinks
+    if (oldMode !== "160000" && newMode !== "160000") continue;
+
+    const status = parts[4] as "A" | "M" | "D" | "R" | "T" | "U" | "X";
+    const oldSha = parts[2] !== "0000000000000000000000000000000000000000" ? parts[2] : undefined;
+    const newSha = parts[3] !== "0000000000000000000000000000000000000000" ? parts[3] : undefined;
+
+    let mappedStatus: ChangedSubmoduleGitlink["status"];
+    let path: string;
+    let oldPath: string | undefined;
+
+    if (status === "R") {
+      mappedStatus = "renamed";
+      const paths = rawPath.split("\t");
+      oldPath = paths[0];
+      path = paths[1] ?? rawPath;
+    } else if (status === "A") {
+      mappedStatus = "added";
+      path = rawPath;
+    } else if (status === "D") {
+      mappedStatus = "deleted";
+      path = rawPath;
+    } else {
+      mappedStatus = "modified";
+      path = rawPath;
+    }
+
+    gitlinks.push({ path, status: mappedStatus, oldPath, oldSha, newSha });
+  }
+
+  return gitlinks;
+}
+
+function resolveSubmoduleCanonicalUrl(
+  parentWorkspacePath: string,
+  submodulePath: string,
+  treeish: string = "HEAD",
+): string | undefined {
+  // Resolve from .gitmodules in the target tree
+  const key = `submodule.${submodulePath}.url`;
+  const url = safeGit(parentWorkspacePath, ["config", "-f", ".gitmodules", "--get", key]);
+  if (!url) return undefined;
+
+  // Normalize relative URLs
+  if (url.startsWith("./") || url.startsWith("../")) {
+    const parentRemoteUrl = safeGit(parentWorkspacePath, ["remote", "get-url", "origin"]);
+    if (!parentRemoteUrl) return undefined;
+    const base = parentRemoteUrl.replace(/\/[^/]+$/, "/");
+    const normalized = resolveRelativeUrl(base, url);
+    return normalized;
+  }
+
+  return url.trim();
+}
+
+function resolveRelativeUrl(base: string, relative: string): string {
+  if (relative.startsWith("../")) {
+    const baseParts = base.replace(/\/$/, "").split("/");
+    const relParts = relative.split("/");
+    for (const part of relParts) {
+      if (part === "..") baseParts.pop();
+      else if (part !== ".") baseParts.push(part);
+    }
+    return baseParts.join("/");
+  }
+  if (relative.startsWith("./")) {
+    return (base.replace(/\/$/, "") + "/" + relative.slice(2)).replace(/\/\//g, "/");
+  }
+  return relative;
+}
+
+function isSubmoduleUrlTrusted(
+  url: string,
+  _gitlink: ChangedSubmoduleGitlink,
+  policy: NativeGitCloseoutPolicy,
+): boolean {
+  if (policy.trustedSubmoduleUrlPatterns.length === 0) {
+    // Default: allow all URLs when no explicit patterns configured
+    return true;
+  }
+  return policy.trustedSubmoduleUrlPatterns.some((pattern) => {
+    if (pattern.endsWith("*")) {
+      return url.startsWith(pattern.slice(0, -1));
+    }
+    return url === pattern || url.includes(pattern);
+  });
+}
+
+function locateSubmoduleCommitObject(
+  sha: string,
+  sourceWorkspacePaths: string[],
+  submodulePath: string,
+): string | undefined {
+  for (const workspacePath of sourceWorkspacePaths) {
+    if (!workspacePath) continue;
+    const submoduleWorktree = resolve(workspacePath, submodulePath);
+    const exists = safeGit(submoduleWorktree, ["rev-parse", "--verify", `${sha}^{commit}`]);
+    if (exists) return workspacePath;
+
+    const modulesPath = resolve(findGitRepositoryRoot(workspacePath) ?? workspacePath, ".git", "modules", submodulePath);
+    const modulesExists = safeGit(modulesPath, ["rev-parse", "--verify", `${sha}^{commit}`]);
+    if (modulesExists) return modulesPath;
+  }
+  return undefined;
+}
+
+function findDurableRefContainingSha(
+  canonicalUrl: string,
+  sha: string,
+  durableRefPatterns: string[],
+): string | undefined {
+  // Perform isolated fetch and check each durable ref pattern
+  // For simplicity, try ls-remote against the remote
+  for (const pattern of durableRefPatterns) {
+    try {
+      const refs = safeGit("/tmp", ["ls-remote", "--refs", canonicalUrl, pattern]);
+      if (!refs) continue;
+      for (const line of refs.split("\n")) {
+        const [remoteSha, ref] = line.split(/\s+/);
+        if (remoteSha === sha) return ref;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+function publishShaToRetainedRef(
+  sourceWorkspacePath: string,
+  submodulePath: string,
+  canonicalUrl: string,
+  sha: string,
+  durableRef: string,
+): boolean {
+  try {
+    // Push the specific SHA to the retained ref from the source workspace clone
+    const submoduleClone = resolve(sourceWorkspacePath, submodulePath);
+    if (!existsSync(submoduleClone)) return false;
+
+    // Ensure the remote URL matches canonical
+    const currentOrigin = safeGit(submoduleClone, ["remote", "get-url", "origin"]);
+    if (currentOrigin !== canonicalUrl) {
+      safeGit(submoduleClone, ["remote", "set-url", "origin", canonicalUrl]);
+    }
+
+    execFileSync("git", ["push", "--no-verify", canonicalUrl, `${sha}:${durableRef}`], {
+      cwd: submoduleClone,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function verifySubmoduleShaFromIsolatedFetch(
+  canonicalUrl: string,
+  durableRef: string,
+  sha: string,
+): boolean {
+  const tmpDir = resolve("/tmp", `goal-submodule-fetch-${Date.now()}`);
+  try {
+    mkdirSync(tmpDir, { recursive: true });
+    safeGit(tmpDir, ["init", "--bare"]);
+    safeGit(tmpDir, ["remote", "add", "origin", canonicalUrl]);
+    safeGit(tmpDir, ["fetch", "--no-tags", "origin", durableRef]);
+    const ok = safeGit(tmpDir, ["cat-file", "-e", `${sha}^{commit}`]);
+    return ok === undefined ? false : true;
+  } catch {
+    return false;
+  } finally {
+    rmRecursiveSafe(tmpDir);
+  }
+}
+
+function normalizePromotionTargetRef(
+  controllerWorkspacePath: string,
+  repoRoot: string,
+  targetRef: string,
+  remoteName: string,
+): NormalizedPromotionTarget | undefined {
+  const ref = targetRef.trim();
+
+  // Is it a commit SHA?
+  const isCommit = safeGit(repoRoot, ["rev-parse", "--verify", `${ref}^{commit}`]);
+  if (isCommit) return undefined; // Detached; cannot auto-push
+
+  // Is it a remote ref like origin/main?
+  if (ref.startsWith(`${remoteName}/`)) {
+    const remoteBranch = ref.slice(remoteName.length + 1);
+    const localBranch = remoteBranch;
+    const targetWs = resolveControllerPromotionTarget(controllerWorkspacePath, ref, undefined, "goal");
+    // Fallback: use HEAD
+    const head = safeGit(repoRoot, ["rev-parse", "--verify", "HEAD"]);
+    if (!head) return undefined;
+    return {
+      remoteName,
+      remoteBranch,
+      localTargetBranch: localBranch,
+      targetWorkspacePath: controllerWorkspacePath,
+      targetHead: head,
+    };
+  }
+
+  // Treat as local branch name
+  const localBranch = ref.replace(/^refs\/heads\//, "");
+  const remoteBranch = localBranch;
+  const head = safeGit(repoRoot, ["rev-parse", "--verify", `refs/heads/${localBranch}`]);
+  if (!head) return undefined;
+
+  // Find target worktree
+  const worktrees = listGitWorktrees(repoRoot);
+  const target = worktrees.find((w) => w.branch === localBranch);
+  const targetWs = target?.worktreePath ?? controllerWorkspacePath;
+  const targetHead = target?.head ?? head;
+
+  return {
+    remoteName,
+    remoteBranch,
+    localTargetBranch: localBranch,
+    targetWorkspacePath: targetWs,
+    targetHead,
+  };
+}
+
+function rmRecursiveSafe(path: string): void {
+  try {
+    execFileSync("rm", ["-rf", path], { stdio: "ignore" });
+  } catch {
+    // Best effort
   }
 }

@@ -155,6 +155,108 @@ export interface NativeGitSubagentCleanupResult {
     forceReason?: string;
     reachabilityVerified?: boolean;
 }
+export type NativeGitRemoteCloseoutMode = "local-only" | "push-parent" | "block-if-cannot-push";
+export type NativeGitSubmodulePublishMode = "verify-only" | "publish-retained-ref-if-trusted" | "block-if-unpublished";
+export interface NativeGitCloseoutPolicy {
+    remoteCloseoutMode: NativeGitRemoteCloseoutMode;
+    submodulePublishMode: NativeGitSubmodulePublishMode;
+    cleanupAutoAllocatedWorktrees: boolean;
+    allowExplicitWorkspaceCleanup: false;
+    parentRemote?: string;
+    targetBranch?: string;
+    durableRefPrefix?: string;
+    durableRefPatterns: string[];
+    trustedSubmoduleUrlPatterns: string[];
+    verifyNestedSubmodules: boolean;
+    prePushCheckoutSimulation: boolean;
+    postPushRemoteCheckoutVerification: boolean;
+}
+export declare const AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY: NativeGitCloseoutPolicy;
+export declare const EXPLICIT_WORKSPACE_DEFAULT_CLOSEOUT_POLICY: NativeGitCloseoutPolicy;
+export interface ChangedSubmoduleGitlink {
+    path: string;
+    status: "added" | "modified" | "deleted" | "renamed";
+    oldPath?: string;
+    oldSha?: string;
+    newSha?: string;
+    canonicalUrl?: string;
+    oldCanonicalUrl?: string;
+}
+export interface NativeGitSubmodulePublishRequest {
+    goalId: string;
+    parentWorkspacePath: string;
+    sourceWorkspacePaths: string[];
+    baseTreeish?: string;
+    targetTreeish?: string;
+    phase: "integration" | "closeout";
+    policy: NativeGitCloseoutPolicy;
+}
+export interface NativeGitSubmodulePublishResult {
+    status: "passed" | "skipped" | "blocked";
+    summary: string;
+    phase: "integration" | "closeout";
+    changedGitlinks: ChangedSubmoduleGitlink[];
+    published: PublishedSubmoduleRef[];
+    verified: VerifiedSubmoduleRef[];
+    blockers: SubmodulePublishBlocker[];
+}
+export interface PublishedSubmoduleRef {
+    path: string;
+    sha: string;
+    canonicalUrl: string;
+    durableRef: string;
+    alreadyContained: boolean;
+    sourceWorkspacePath?: string;
+}
+export interface VerifiedSubmoduleRef {
+    path: string;
+    sha: string;
+    canonicalUrl: string;
+    durableRef: string;
+    isolatedFetchVerified: boolean;
+    nestedVerified?: boolean;
+}
+export interface SubmodulePublishBlocker {
+    path: string;
+    sha?: string;
+    reason: string;
+    error?: string;
+}
+export interface NormalizedPromotionTarget {
+    remoteName: string;
+    remoteBranch: string;
+    localTargetBranch: string;
+    targetWorkspacePath: string;
+    targetHead: string;
+    remoteHead?: string;
+}
+export interface NativeGitParentPushRequest {
+    targetWorkspacePath: string;
+    remoteName: string;
+    remoteBranch: string;
+    recurseSubmodules: "check";
+}
+export interface NativeGitParentPushResult {
+    status: "passed" | "blocked" | "skipped";
+    summary: string;
+    remoteName?: string;
+    remoteBranch?: string;
+    pushedHead?: string;
+    error?: string;
+}
+export interface NativeGitRecursiveCheckoutVerificationRequest {
+    parentRemoteUrl: string;
+    targetWorkspacePath?: string;
+    targetCommitSha?: string;
+    remoteBranch?: string;
+    mode: "pre-push-local-commit" | "post-push-remote-branch";
+}
+export interface NativeGitRecursiveCheckoutVerificationResult {
+    status: "passed" | "blocked" | "skipped";
+    summary: string;
+    mode: "pre-push-local-commit" | "post-push-remote-branch";
+    error?: string;
+}
 export declare class NativeGitWorkspaceManager {
     private readonly options;
     constructor(options?: NativeGitWorkspaceManagerOptions);
@@ -164,6 +266,20 @@ export declare class NativeGitWorkspaceManager {
     cleanupWorkspace(request: NativeGitWorkspaceCleanupRequest): NativeGitWorkspaceCleanupWorkspaceResult;
     integrateSubagentBranch(request: NativeGitSubagentBranchIntegrationRequest): NativeGitSubagentBranchIntegrationResult;
     promoteControllerBranch(request: NativeGitControllerBranchPromotionRequest): NativeGitControllerBranchPromotionResult;
+    ensureSubmoduleGitlinksDurablyPublished(request: NativeGitSubmodulePublishRequest): NativeGitSubmodulePublishResult;
+    normalizePromotionTarget(request: NativeGitControllerBranchPromotionRequest, policy: NativeGitCloseoutPolicy): {
+        ok: true;
+        value: NormalizedPromotionTarget;
+    } | {
+        ok: false;
+        reason: string;
+    };
+    syncTargetBranchBeforePromotion(target: NormalizedPromotionTarget): {
+        status: "synced" | "blocked";
+        summary: string;
+    };
+    pushParentTargetBranch(request: NativeGitParentPushRequest): NativeGitParentPushResult;
+    verifyRecursiveCheckout(request: NativeGitRecursiveCheckoutVerificationRequest): NativeGitRecursiveCheckoutVerificationResult;
     resolveBaseRef(repoRoot: string, overrideBaseRef?: string): string;
     private resolveSubagentBaseRef;
     private resolveWorktreeRoot;
