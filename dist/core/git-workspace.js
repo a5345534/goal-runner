@@ -423,14 +423,14 @@ export class NativeGitWorkspaceManager {
                 blockers.push({ path: gitlink.path, sha: newSha, reason: `cannot locate submodule commit ${shortSha(newSha)} in any source workspace` });
                 continue;
             }
-            // URL trust check (only gates publish; verify already passed above)
-            if (!isSubmoduleUrlTrusted(url, gitlink, request.policy)) {
-                blockers.push({ path: gitlink.path, sha: newSha, reason: `submodule URL ${url} is not in trustedSubmoduleUrlPatterns; cannot publish retained ref` });
-                continue;
-            }
-            // Policy-mode check for non-publish modes
+            // Policy-mode check: non-publish modes block here without passing trust check
             if (request.policy.submodulePublishMode === "verify-only" || request.policy.submodulePublishMode === "block-if-unpublished") {
                 blockers.push({ path: gitlink.path, sha: newSha, reason: `submodule SHA ${shortSha(newSha)} is not on any durable remote ref and publish mode is ${request.policy.submodulePublishMode}` });
+                continue;
+            }
+            // URL trust check (only gates publish-retained-ref path)
+            if (!isSubmoduleUrlTrusted(url, gitlink, request.policy)) {
+                blockers.push({ path: gitlink.path, sha: newSha, reason: `submodule URL ${url} is not in trustedSubmoduleUrlPatterns; cannot publish retained ref` });
                 continue;
             }
             // Publish retained ref
@@ -1317,7 +1317,9 @@ function resolveRelativeUrl(base, relative) {
         return baseParts.join("/");
     }
     if (relative.startsWith("./")) {
-        return (base.replace(/\/$/, "") + "/" + relative.slice(2)).replace(/\/\//g, "/");
+        const cleanBase = base.replace(/\/$/, "");
+        const suffix = relative.slice(2);
+        return `${cleanBase}/${suffix}`;
     }
     return relative;
 }
@@ -1351,42 +1353,45 @@ function locateSubmoduleCommitObject(sha, sourceWorkspacePaths, submodulePath) {
     return undefined;
 }
 function findDurableRefContainingSha(canonicalUrl, sha, durableRefPatterns) {
-    // Collect all remote refs matching durable patterns,
-    // fetch them into a temp bare repo, and check if the SHA
-    // is reachable from any fetched ref (not just tip equality).
-    const tmpDir = resolve("/tmp", `goal-durable-check-${Date.now()}`);
-    try {
-        mkdirSync(tmpDir, { recursive: true });
-        git(tmpDir, ["init", "--bare"]);
+    // Collect all remote refs matching durable patterns via ls-remote.
+    // For each candidate ref, fetch into a temp bare repo and check if
+    // the SHA is reachable. Return the first ref that actually contains
+    // the SHA (not just the first candidate).
+    for (const pattern of durableRefPatterns) {
+        let refsOutput;
+        try {
+            refsOutput = git("/tmp", ["ls-remote", "--refs", canonicalUrl, pattern]);
+        }
+        catch {
+            continue;
+        }
+        if (!refsOutput)
+            continue;
         const candidateRefs = [];
-        for (const pattern of durableRefPatterns) {
+        for (const line of refsOutput.split("\n")) {
+            const parts = line.split(/\s+/);
+            const ref = parts[1];
+            if (ref && !candidateRefs.includes(ref))
+                candidateRefs.push(ref);
+        }
+        for (const candidateRef of candidateRefs) {
+            const tmpDir = resolve("/tmp", `goal-durable-check-${Date.now()}`);
             try {
-                const out = git("/tmp", ["ls-remote", "--refs", canonicalUrl, pattern]);
-                for (const line of out.split("\n")) {
-                    const parts = line.split(/\s+/);
-                    const ref = parts[1];
-                    if (ref && !candidateRefs.includes(ref))
-                        candidateRefs.push(ref);
-                }
+                mkdirSync(tmpDir, { recursive: true });
+                git(tmpDir, ["init", "--bare"]);
+                git(tmpDir, ["fetch", "--no-tags", canonicalUrl, candidateRef]);
+                git(tmpDir, ["cat-file", "-e", `${sha}^{commit}`]);
+                return candidateRef; // SHA reachable from this durable ref
             }
             catch {
-                // pattern may not match any refs — skip
+                // This candidate ref does not contain the SHA — try next
+            }
+            finally {
+                rmRecursiveSafe(tmpDir);
             }
         }
-        if (candidateRefs.length === 0)
-            return undefined;
-        // Fetch all candidate refs at once
-        git(tmpDir, ["fetch", "--no-tags", canonicalUrl, ...candidateRefs]);
-        // Check if SHA is reachable from any fetched history
-        git(tmpDir, ["cat-file", "-e", `${sha}^{commit}`]);
-        return candidateRefs[0]; // SHA contained in at least one durable ref
     }
-    catch {
-        return undefined;
-    }
-    finally {
-        rmRecursiveSafe(tmpDir);
-    }
+    return undefined;
 }
 function publishShaToRetainedRef(sourceWorkspacePath, submodulePath, canonicalUrl, sha, durableRef) {
     try {

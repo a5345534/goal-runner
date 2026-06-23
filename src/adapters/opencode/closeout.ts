@@ -12,13 +12,14 @@
 //   3. clean up the auto-allocated controller worktree when applicable
 //   4. stop the detached `opencode serve` background session for the goal
 
-import { cleanupTerminalSubagentWorkspaces, NativeGitWorkspaceManager, type NativeGitSubagentCleanupResult, type NativeGitSubagentCleanupPolicy } from "../../core/index.js";
+import { AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY, cleanupTerminalSubagentWorkspaces, NativeGitWorkspaceManager, type NativeGitSubagentCleanupResult, type NativeGitSubagentCleanupPolicy } from "../../core/index.js";
 import type { GoalRuntime } from "../../core/index.js";
 import type { ResolvedWorkspaceBinding } from "../pi/workspace.js";
 
 export interface OpencodeGoalCloseoutResult {
   terminal: boolean;
   finalizationChanged: boolean;
+  closeoutBlockedReason?: string;
   cleanup: NativeGitSubagentCleanupResult[];
   controllerCleanupError?: string;
   backgroundSessionStopped: boolean;
@@ -56,14 +57,36 @@ export async function finalizeOpencodeGoalFromDagTerminalState(
   }
 
   let cleanup: NativeGitSubagentCleanupResult[] = [];
+  let closeoutBlockedReason: string | undefined;
+
   if (finalization.changed) {
     const state = await runtime.getGoalOrchestrationState(goalId);
     const manager = new NativeGitWorkspaceManager({ fetch: false });
-    cleanup = cleanupTerminalSubagentWorkspaces(manager, state, options.cleanupPolicy);
+
+    // Closeout-time submodule publish re-verification before allowing cleanup.
+    // For auto-allocated controller workspaces, verify that all submodule
+    // gitlinks are durably reachable before proceeding to cleanup.
+    if (options.isAutoAllocatedControllerWorkspace?.(binding)) {
+      const reverify = manager.ensureSubmoduleGitlinksDurablyPublished({
+        goalId,
+        parentWorkspacePath: binding.workspace,
+        sourceWorkspacePaths: [binding.workspace],
+        phase: "closeout",
+        policy: { ...AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY, submodulePublishMode: "block-if-unpublished" },
+      });
+      if (reverify.status === "blocked") {
+        closeoutBlockedReason = `closeout submodule re-verification blocked: ${reverify.summary}`;
+      }
+    }
+
+    // Only cleanup if closeout gates passed
+    if (!closeoutBlockedReason) {
+      cleanup = cleanupTerminalSubagentWorkspaces(manager, state, options.cleanupPolicy);
+    }
   }
 
   let controllerCleanupError: string | undefined;
-  if (finalization.changed && options.isAutoAllocatedControllerWorkspace?.(binding)) {
+  if (finalization.changed && !closeoutBlockedReason && options.isAutoAllocatedControllerWorkspace?.(binding)) {
     try {
       const manager = new NativeGitWorkspaceManager({ fetch: false });
       manager.cleanupWorkspace({ worktreePath: binding.workspace, branch: binding.branch });
@@ -78,6 +101,7 @@ export async function finalizeOpencodeGoalFromDagTerminalState(
   return {
     terminal: true,
     finalizationChanged: finalization.changed,
+    closeoutBlockedReason,
     cleanup,
     controllerCleanupError,
     backgroundSessionStopped,

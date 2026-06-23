@@ -4,6 +4,7 @@ import type { ResolvedWorkspaceBinding } from "../pi/workspace.js";
 export interface OpencodeGoalCloseoutResult {
     terminal: boolean;
     finalizationChanged: boolean;
+    closeoutBlockedReason?: string;
     cleanup: NativeGitSubagentCleanupResult[];
     controllerCleanupError?: string;
     backgroundSessionStopped: boolean;
