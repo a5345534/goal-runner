@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -19,6 +19,7 @@ import {
   type GoalSubagentRecord,
   type HarnessSubagentAdapter,
   type HarnessSubagentStartRequest,
+  type NativeGitCloseoutPolicy,
 } from "../core/index.js";
 
 function git(cwd: string, args: string[]): string {
@@ -34,6 +35,64 @@ function createRepo(): string {
   git(repo, ["add", "README.md"]);
   git(repo, ["commit", "-m", "initial"]);
   return repo;
+}
+
+function createSubmoduleGitlinkFixture(options: { modulesSource?: boolean; gitmodulesUrl?: string; parentOriginUrl?: string } = {}): {
+  root: string;
+  parent: string;
+  remote: string;
+  sha: string;
+} {
+  const root = mkdtempSync(join(tmpdir(), "goal-native-submodule-"));
+  const remote = join(root, "sub.git");
+  const parent = join(root, "parent");
+  const submodulePath = join(parent, "deps", "sub");
+
+  git(root, ["init", "--bare", remote]);
+  mkdirSync(parent, { recursive: true });
+  git(parent, ["init", "-b", "main"]);
+  git(parent, ["config", "user.email", "goal@example.test"]);
+  git(parent, ["config", "user.name", "Goal Test"]);
+  if (options.parentOriginUrl) git(parent, ["remote", "add", "origin", options.parentOriginUrl]);
+  git(parent, ["commit", "--allow-empty", "-m", "initial"]);
+
+  mkdirSync(submodulePath, { recursive: true });
+  git(submodulePath, ["init", "-b", "main"]);
+  git(submodulePath, ["config", "user.email", "goal@example.test"]);
+  git(submodulePath, ["config", "user.name", "Goal Test"]);
+  git(submodulePath, ["remote", "add", "origin", remote]);
+  writeFileSync(join(submodulePath, "sub.txt"), "submodule content\n");
+  git(submodulePath, ["add", "sub.txt"]);
+  git(submodulePath, ["commit", "-m", "submodule commit"]);
+  const sha = git(submodulePath, ["rev-parse", "HEAD"]);
+
+  writeFileSync(join(parent, ".gitmodules"), `[submodule "deps/sub"]\n\tpath = deps/sub\n\turl = ${options.gitmodulesUrl ?? remote}\n`);
+  git(parent, ["add", ".gitmodules"]);
+  git(parent, ["update-index", "--add", "--cacheinfo", `160000,${sha},deps/sub`]);
+
+  if (options.modulesSource) {
+    const modulesPath = join(parent, ".git", "modules", "deps", "sub");
+    mkdirSync(join(parent, ".git", "modules", "deps"), { recursive: true });
+    renameSync(submodulePath, modulesPath);
+  }
+
+  return { root, parent, remote, sha };
+}
+
+function submodulePublishPolicy(overrides: Partial<NativeGitCloseoutPolicy> = {}): NativeGitCloseoutPolicy {
+  return {
+    remoteCloseoutMode: "block-if-cannot-push",
+    submodulePublishMode: "publish-retained-ref-if-trusted",
+    cleanupAutoAllocatedWorktrees: true,
+    allowExplicitWorkspaceCleanup: false,
+    parentRemote: "origin",
+    durableRefPatterns: [],
+    trustedSubmoduleUrlPatterns: [],
+    verifyNestedSubmodules: true,
+    prePushCheckoutSimulation: false,
+    postPushRemoteCheckoutVerification: false,
+    ...overrides,
+  };
 }
 
 function integrationNode(overrides: Partial<GoalDagNode> = {}): GoalDagNode {
@@ -1297,4 +1356,122 @@ test("dirty explicitly-bound workspace is rejected", () => {
     /uncommitted changes/,
     "dirty workspace must be rejected",
   );
+});
+
+test("submodule retained publish uses .git/modules object source", () => {
+  const fixture = createSubmoduleGitlinkFixture({ modulesSource: true });
+  try {
+    const result = new NativeGitWorkspaceManager({ fetch: false }).ensureSubmoduleGitlinksDurablyPublished({
+      goalId: "goal-modules-source",
+      parentWorkspacePath: fixture.parent,
+      sourceWorkspacePaths: [fixture.parent],
+      baseTreeish: "HEAD",
+      targetTreeish: "INDEX",
+      phase: "integration",
+      policy: submodulePublishPolicy({
+        trustedSubmoduleUrlPatterns: [`${fixture.remote}*`],
+        submodulePublishMode: "publish-retained-ref-if-trusted",
+      }),
+    });
+
+    assert.equal(result.status, "passed");
+    assert.equal(result.published.length, 1);
+    assert.match(result.published[0]!.durableRef, /^refs\/heads\/goal-runner\/retained\/goal-modules-source\/deps-sub-/);
+    assert.ok(git("/tmp", ["ls-remote", "--refs", fixture.remote, "refs/heads/goal-runner/retained/*"]).includes(result.published[0]!.durableRef));
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("submodule retained publish is fail-closed when create-only ls-remote check fails", () => {
+  const fixture = createSubmoduleGitlinkFixture();
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  const binDir = mkdtempSync(join(tmpdir(), "goal-fake-git-"));
+  const fakeGit = join(binDir, "git");
+  writeFileSync(fakeGit, `#!/usr/bin/env bash\nif [ "$1" = "ls-remote" ]; then exit 128; fi\nexec "${realGit}" "$@"\n`);
+  chmodSync(fakeGit, 0o755);
+
+  const oldPath = process.env.PATH;
+  try {
+    process.env.PATH = `${binDir}:${oldPath ?? ""}`;
+    const result = new NativeGitWorkspaceManager({ fetch: false }).ensureSubmoduleGitlinksDurablyPublished({
+      goalId: "goal-ls-remote-fails",
+      parentWorkspacePath: fixture.parent,
+      sourceWorkspacePaths: [fixture.parent],
+      baseTreeish: "HEAD",
+      targetTreeish: "INDEX",
+      phase: "integration",
+      policy: submodulePublishPolicy({
+        trustedSubmoduleUrlPatterns: [`${fixture.remote}*`],
+        submodulePublishMode: "publish-retained-ref-if-trusted",
+      }),
+    });
+
+    assert.equal(result.status, "blocked");
+    assert.equal(result.published.length, 0);
+    assert.match(result.blockers[0]?.reason ?? "", /failed to push retained ref/);
+  } finally {
+    process.env.PATH = oldPath;
+    assert.equal(git("/tmp", ["ls-remote", "--refs", fixture.remote, "refs/heads/goal-runner/retained/*"]), "");
+    rmSync(binDir, { recursive: true, force: true });
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("submodule trusted URL matching rejects substring-only matches", () => {
+  const fixture = createSubmoduleGitlinkFixture({ gitmodulesUrl: "https://evil.example/github.com/org/repo.git" });
+  try {
+    const result = new NativeGitWorkspaceManager({ fetch: false }).ensureSubmoduleGitlinksDurablyPublished({
+      goalId: "goal-trust-substring",
+      parentWorkspacePath: fixture.parent,
+      sourceWorkspacePaths: [fixture.parent],
+      baseTreeish: "HEAD",
+      targetTreeish: "INDEX",
+      phase: "integration",
+      policy: submodulePublishPolicy({
+        trustedSubmoduleUrlPatterns: ["github.com/org"],
+        submodulePublishMode: "publish-retained-ref-if-trusted",
+      }),
+    });
+
+    assert.equal(result.status, "blocked");
+    assert.match(result.blockers[0]?.reason ?? "", /not in trustedSubmoduleUrlPatterns/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("relative submodule URLs resolve to sibling remotes for durable verification", () => {
+  const root = mkdtempSync(join(tmpdir(), "goal-relative-submodule-"));
+  const orgDir = join(root, "org");
+  const parentOrigin = join(orgDir, "repo.git");
+  const subRemote = join(orgDir, "sub.git");
+  mkdirSync(orgDir, { recursive: true });
+  git(root, ["init", "--bare", parentOrigin]);
+  const fixture = createSubmoduleGitlinkFixture({ parentOriginUrl: parentOrigin, gitmodulesUrl: "../sub.git" });
+  try {
+    renameSync(fixture.remote, subRemote);
+    git(join(fixture.parent, "deps", "sub"), ["remote", "set-url", "origin", subRemote]);
+    git(join(fixture.parent, "deps", "sub"), ["push", "origin", "HEAD:refs/heads/main"]);
+
+    const result = new NativeGitWorkspaceManager({ fetch: false }).ensureSubmoduleGitlinksDurablyPublished({
+      goalId: "goal-relative-url",
+      parentWorkspacePath: fixture.parent,
+      sourceWorkspacePaths: [fixture.parent],
+      baseTreeish: "HEAD",
+      targetTreeish: "INDEX",
+      phase: "integration",
+      policy: submodulePublishPolicy({
+        durableRefPatterns: ["refs/heads/main"],
+        submodulePublishMode: "block-if-unpublished",
+      }),
+    });
+
+    assert.equal(result.status, "passed");
+    assert.equal(result.verified[0]?.canonicalUrl, subRemote);
+    assert.equal(result.verified[0]?.durableRef, "refs/heads/main");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
 });

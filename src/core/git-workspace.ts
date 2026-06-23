@@ -1993,7 +1993,9 @@ function publishShaToRetainedRef(
         return false; // Exists with different SHA — create-only
       }
     } catch {
-      // ls-remote unreachable; attempt push below
+      // Create-only requires proving the retained ref does not already exist.
+      // If ls-remote is unavailable, fail closed rather than risking an update.
+      return false;
     }
 
     execFileSync("git", ["push", "--no-verify", canonicalUrl, `${sha}:${durableRef}`], {
