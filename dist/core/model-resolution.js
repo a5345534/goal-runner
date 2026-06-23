@@ -89,7 +89,7 @@ export function readBundledModelClassCatalog() {
 }
 export function readBundledModelBindingCatalog(harness) {
     const normalizedHarness = normalizeHarness(harness);
-    const specifier = `goal-contract/catalogs/bindings/${normalizedHarness}.json`;
+    const specifier = `goal-runner/catalogs/bindings/${normalizedHarness}.json`;
     const cached = bindingCatalogCache.get(specifier);
     if (cached)
         return cached;
@@ -139,7 +139,7 @@ function loadModelBindingCatalogFromEnvOrBundled(harness, env) {
         const catalog = parseGoalModelBindingCatalogJson(bindingJson, source);
         return { catalog: assertBindingCatalogHarness(catalog, normalizedHarness, source), source };
     }
-    const source = `goal-contract/catalogs/bindings/${normalizedHarness}.json`;
+    const source = `goal-runner/catalogs/bindings/${normalizedHarness}.json`;
     return {
         catalog: assertBindingCatalogHarness(readBundledModelBindingCatalog(normalizedHarness), normalizedHarness, source),
         source,

@@ -31,7 +31,8 @@
     "src",
     "templates",
     "schemas",
-    "docs"
+    "docs",
+    "catalogs"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -89,6 +90,6 @@
     "node": ">=22.5.0"
   },
   "dependencies": {
-    "goal-contract": "github:a5345534/goal-contract#8523c07"
+    "goal-contract": "github:a5345534/goal-contract#a68c7da"
   }
 }
