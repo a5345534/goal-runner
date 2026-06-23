@@ -9,7 +9,7 @@ import { parseGoalCommand, validateGoalObjective } from "./parser.js";
 import { renderBudgetLimitPrompt, renderContinuationPrompt, renderObjectiveUpdatedPrompt } from "./prompts.js";
 import { isAutoContinuableStatus, normalizeGoalStatus } from "./status.js";
 import { sendGoalSubagentPrompt as sendGoalSubagentPromptThroughAdapter, startGoalSubagent as startGoalSubagentThroughAdapter, syncGoalSubagentState, } from "./subagent-adapter.js";
-const TERMINAL_DAG_NODE_STATUSES = new Set(["complete", "blocked", "failed", "superseded"]);
+const TERMINAL_DAG_NODE_STATUSES = new Set(["complete", "blocked", "blockedTerminal", "failed", "superseded"]);
 export class GoalRuntime {
     store;
     callbacks;

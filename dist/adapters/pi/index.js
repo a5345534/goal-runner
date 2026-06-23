@@ -829,7 +829,7 @@ async function reconcilePiBackgroundRunnersBeforePoll(runtime, goalId) {
     }
 }
 function isTerminalPiSubagentStatus(status) {
-    return status === "complete" || status === "blocked" || status === "failed";
+    return status === "complete" || status === "blocked" || status === "blockedTerminal" || status === "failed";
 }
 function newestPiBackgroundRunner(records) {
     return records.reduce((newest, record) => runnerDirMtimeMs(record.runnerDir) >= runnerDirMtimeMs(newest.runnerDir) ? record : newest);
@@ -918,7 +918,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(runtime, ctx, goalId, bindi
     }
     return true;
 }
-const TERMINAL_PI_DAG_NODE_STATUSES = new Set(["complete", "blocked", "failed", "superseded"]);
+const TERMINAL_PI_DAG_NODE_STATUSES = new Set(["complete", "blocked", "blockedTerminal", "failed", "superseded"]);
 function assessPiDagTerminalState(state) {
     if (state.nodes.length === 0)
         return { terminal: false, allComplete: false, integrationIssues: [] };

@@ -79,7 +79,7 @@ export interface GoalDagTerminalFinalizationResult {
   goal?: GoalRecord;
 }
 
-const TERMINAL_DAG_NODE_STATUSES = new Set<GoalDagNode["status"]>(["complete", "blocked", "failed", "superseded"]);
+const TERMINAL_DAG_NODE_STATUSES = new Set<GoalDagNode["status"]>(["complete", "blocked", "blockedTerminal", "failed", "superseded"]);
 
 export class GoalRuntime {
   private readonly store: GoalStore;

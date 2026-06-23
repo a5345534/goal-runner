@@ -986,7 +986,7 @@ async function reconcilePiBackgroundRunnersBeforePoll(runtime: GoalRuntime, goal
 }
 
 function isTerminalPiSubagentStatus(status: GoalSubagentRecord["status"]): boolean {
-  return status === "complete" || status === "blocked" || status === "failed";
+  return status === "complete" || status === "blocked" || status === "blockedTerminal" || status === "failed";
 }
 
 function newestPiBackgroundRunner<T extends { runnerDir: string }>(records: T[]): T {
@@ -1089,7 +1089,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
   return true;
 }
 
-const TERMINAL_PI_DAG_NODE_STATUSES = new Set<GoalDagNode["status"]>(["complete", "blocked", "failed", "superseded"]);
+const TERMINAL_PI_DAG_NODE_STATUSES = new Set<GoalDagNode["status"]>(["complete", "blocked", "blockedTerminal", "failed", "superseded"]);
 
 function assessPiDagTerminalState(state: GoalOrchestrationState): {
   terminal: boolean;
