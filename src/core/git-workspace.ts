@@ -1897,7 +1897,7 @@ function isSubmoduleUrlTrusted(
     if (pattern.endsWith("*")) {
       return url.startsWith(pattern.slice(0, -1));
     }
-    return url === pattern || url.includes(pattern);
+    return url === pattern;
   });
 }
 
@@ -1970,13 +1970,34 @@ function publishShaToRetainedRef(
   durableRef: string,
 ): boolean {
   try {
-    // Push the specific SHA to the retained ref directly via canonicalUrl.
+    // Push the specific SHA to the retained ref via canonicalUrl only.
     // Do NOT mutate the submodule workspace's origin remote.
-    const submoduleClone = resolve(sourceWorkspacePath, submodulePath);
-    if (!existsSync(submoduleClone)) return false;
+    //
+    // The object source may be a regular submodule worktree
+    // (resolve(sourceWorkspace, submodulePath)) or a bare git repo
+    // at .git/modules/<submodulePath> (use directly).
+    let pushRepo: string;
+    if (sourceWorkspacePath.includes(`${sep}.git${sep}modules${sep}`)) {
+      pushRepo = sourceWorkspacePath;
+    } else {
+      pushRepo = resolve(sourceWorkspacePath, submodulePath);
+      if (!existsSync(pushRepo)) return false;
+    }
+
+    // Create-only: refuse to update an existing retained ref with a different SHA.
+    try {
+      const existing = git("/tmp", ["ls-remote", "--refs", canonicalUrl, durableRef]);
+      if (existing) {
+        const [existingSha] = existing.split(/\s+/);
+        if (existingSha && existingSha === sha) return true; // Already published, same SHA
+        return false; // Exists with different SHA — create-only
+      }
+    } catch {
+      // ls-remote unreachable; attempt push below
+    }
 
     execFileSync("git", ["push", "--no-verify", canonicalUrl, `${sha}:${durableRef}`], {
-      cwd: submoduleClone,
+      cwd: pushRepo,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });

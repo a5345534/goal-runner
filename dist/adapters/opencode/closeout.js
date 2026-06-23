@@ -28,6 +28,7 @@ export async function finalizeOpencodeGoalFromDagTerminalState(runtime, goalId, 
     // re-verify prevents the goal from being marked complete.
     if (options.isAutoAllocatedControllerWorkspace?.(binding)) {
         const manager = new NativeGitWorkspaceManager({ fetch: false });
+        // Gate 1: submodule publish re-verification (full tree scan)
         const reverify = manager.ensureSubmoduleGitlinksDurablyPublished({
             goalId,
             parentWorkspacePath: binding.workspace,
@@ -39,15 +40,46 @@ export async function finalizeOpencodeGoalFromDagTerminalState(runtime, goalId, 
         });
         if (reverify.status === "blocked") {
             closeoutBlockedReason = `closeout submodule re-verification blocked: ${reverify.summary}`;
-            // Block the goal via the runtime so it stays blocked/not-complete
             try {
                 await runtime.blockGoalFromControllerCloseout(goalId, closeoutBlockedReason, {
                     closeoutGate: "submodulePublish",
                     blockers: reverify.blockers.map((b) => ({ path: b.path, reason: b.reason })),
                 });
             }
-            catch {
-                // Best-effort: runtime may have already finalized the goal
+            catch { /* Best-effort */ }
+        }
+        // Gate 2: parent push with --recurse-submodules=check (if target ref configured)
+        if (!closeoutBlockedReason && binding.promotionTargetRef) {
+            const pushTarget = manager.normalizePromotionTarget({ controllerWorkspacePath: binding.workspace, controllerBranch: binding.branch, targetRef: binding.promotionTargetRef }, { ...AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY, remoteCloseoutMode: "push-parent" });
+            if (pushTarget.ok) {
+                const parentPush = manager.pushParentTargetBranch({
+                    targetWorkspacePath: pushTarget.value.targetWorkspacePath,
+                    remoteName: pushTarget.value.remoteName,
+                    remoteBranch: pushTarget.value.remoteBranch,
+                    recurseSubmodules: "check",
+                });
+                if (parentPush.status === "blocked") {
+                    closeoutBlockedReason = `parent push blocked: ${parentPush.summary}`;
+                    try {
+                        await runtime.blockGoalFromControllerCloseout(goalId, closeoutBlockedReason, {
+                            closeoutGate: "parentPush",
+                            remoteName: pushTarget.value.remoteName,
+                            remoteBranch: pushTarget.value.remoteBranch,
+                        });
+                    }
+                    catch { /* Best-effort */ }
+                }
+            }
+            else if (pushTarget.reason !== "no promotion target ref configured") {
+                // Target ref was provided but normalization failed — block
+                closeoutBlockedReason = `parent push target normalization blocked: ${pushTarget.reason}`;
+                try {
+                    await runtime.blockGoalFromControllerCloseout(goalId, closeoutBlockedReason, {
+                        closeoutGate: "parentPush",
+                        reason: pushTarget.reason,
+                    });
+                }
+                catch { /* Best-effort */ }
             }
         }
     }
