@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
-import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { requiredSubagentIntegrationTerminalSuccess } from "./integration.js";
 import type { GoalControllerIntegrator, GoalControllerWorkspaceAllocator, GoalControllerWorkspaceAllocationRequest } from "./controller-loop.js";
 import type { GoalDagNode, GoalOrchestrationState, GoalSubagentRecord } from "./types.js";
@@ -785,20 +785,7 @@ export class NativeGitWorkspaceManager {
       }
       gitlink.canonicalUrl = url;
 
-      // URL trust check
-      if (!isSubmoduleUrlTrusted(url, gitlink, request.policy)) {
-        blockers.push({ path: gitlink.path, sha: newSha, reason: `submodule URL ${url} is not trusted for publish` });
-        continue;
-      }
-
-      // Locate the commit object
-      const objectSource = locateSubmoduleCommitObject(newSha, request.sourceWorkspacePaths, gitlink.path);
-      if (!objectSource) {
-        blockers.push({ path: gitlink.path, sha: newSha, reason: `cannot locate submodule commit ${shortSha(newSha)} in any source workspace` });
-        continue;
-      }
-
-      // Check if SHA is already on a durable remote ref
+      // Check if SHA is already on a durable remote ref (no trust required for verify)
       const existingRef = findDurableRefContainingSha(url, newSha, request.policy.durableRefPatterns);
       if (existingRef) {
         const fetchOk = verifySubmoduleShaFromIsolatedFetch(url, existingRef, newSha);
@@ -808,19 +795,33 @@ export class NativeGitWorkspaceManager {
         }
       }
 
-      // Try to publish retained ref
+      // Locate the commit object (needed for push)
+      const objectSource = locateSubmoduleCommitObject(newSha, request.sourceWorkspacePaths, gitlink.path);
+      if (!objectSource) {
+        blockers.push({ path: gitlink.path, sha: newSha, reason: `cannot locate submodule commit ${shortSha(newSha)} in any source workspace` });
+        continue;
+      }
+
+      // URL trust check (only gates publish; verify already passed above)
+      if (!isSubmoduleUrlTrusted(url, gitlink, request.policy)) {
+        blockers.push({ path: gitlink.path, sha: newSha, reason: `submodule URL ${url} is not in trustedSubmoduleUrlPatterns; cannot publish retained ref` });
+        continue;
+      }
+
+      // Policy-mode check for non-publish modes
       if (request.policy.submodulePublishMode === "verify-only" || request.policy.submodulePublishMode === "block-if-unpublished") {
         blockers.push({ path: gitlink.path, sha: newSha, reason: `submodule SHA ${shortSha(newSha)} is not on any durable remote ref and publish mode is ${request.policy.submodulePublishMode}` });
         continue;
       }
 
+      // Publish retained ref
       const pathSlug = sanitizeSlug(gitlink.path).slice(0, 32) || "submodule";
       const sha12 = shortSha(newSha);
       const durableRef = `refs/heads/goal-runner/retained/${request.goalId}/${pathSlug}-${sha12}`;
 
       const pushOk = publishShaToRetainedRef(objectSource, gitlink.path, url, newSha, durableRef);
       if (!pushOk) {
-        blockers.push({ path: gitlink.path, sha: newSha, reason: `failed to push retained ref ${durableRef} for ${url}`, error: pushOk === false ? "push failed" : undefined });
+        blockers.push({ path: gitlink.path, sha: newSha, reason: `failed to push retained ref ${durableRef} for ${url}` });
         continue;
       }
 
@@ -1675,16 +1676,16 @@ function scanChangedSubmoduleGitlinks(
   targetTreeish?: string,
 ): ChangedSubmoduleGitlink[] {
   // When targetTreeish is "INDEX" (integration phase: scan staged vs HEAD):
-  //   git diff --raw --cached -z HEAD
+  //   git diff --raw --abbrev=40 --cached -z HEAD
   // When targetTreeish is a commit (closeout phase: scan between two commits):
-  //   git diff --raw -z baseTreeish targetTreeish
+  //   git diff --raw --abbrev=40 -z baseTreeish targetTreeish
   // -z output produces NUL-terminated records:
   //   :<meta>\0<path>\0         (regular)
   //   :<meta>\0<oldPath>\0<newPath>\0  (rename)
   const useCached = !targetTreeish || targetTreeish === "INDEX";
   const args = useCached
-    ? ["diff", "--raw", "--cached", "-z", baseTreeish]
-    : ["diff", "--raw", "-z", baseTreeish, targetTreeish!];
+    ? ["diff", "--raw", "--abbrev=40", "--cached", "-z", baseTreeish]
+    : ["diff", "--raw", "--abbrev=40", "-z", baseTreeish, targetTreeish!];
 
   let output: string;
   try {
@@ -1751,22 +1752,64 @@ function scanChangedSubmoduleGitlinks(
 function resolveSubmoduleCanonicalUrl(
   parentWorkspacePath: string,
   submodulePath: string,
-  treeish: string = "HEAD",
+  _treeish: string = "HEAD",
 ): string | undefined {
-  // Resolve from .gitmodules in the target tree
-  const key = `submodule.${submodulePath}.url`;
-  const url = safeGit(parentWorkspacePath, ["config", "-f", ".gitmodules", "--get", key]);
-  if (!url) return undefined;
+  // Parse .gitmodules INI to find the section whose `path` matches submodulePath,
+  // then read that section's `url`. Section names in .gitmodules are
+  // submodule.<name> where <name> may differ from <path>.
+  let config: string;
+  try {
+    config = readFileSync(join(parentWorkspacePath, ".gitmodules"), "utf8");
+  } catch {
+    return undefined;
+  }
 
-  // Normalize relative URLs
+  const lines = config.split(/\r?\n/);
+  let currentPath: string | undefined;
+  let currentSection: string | undefined;
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith(";") || line.startsWith("#")) continue;
+
+    // Section header: [submodule "name"]
+    const sectionMatch = line.match(/^\[submodule\s+"([^"]+)"\]$/);
+    if (sectionMatch) {
+      // Resolve previous section before starting new one
+      if (currentSection && currentPath === submodulePath) {
+        const key = `submodule.${currentSection}.url`;
+        const url = safeGit(parentWorkspacePath, ["config", "-f", ".gitmodules", "--get", key]);
+        if (url) return normalizeSubmoduleUrl(url, parentWorkspacePath);
+      }
+      currentSection = sectionMatch[1];
+      currentPath = undefined;
+      continue;
+    }
+
+    if (!currentSection) continue;
+
+    const kv = line.split(/\s*=\s*/, 2);
+    if (kv.length < 2) continue;
+    if (kv[0] === "path") currentPath = kv[1];
+  }
+
+  // Check last section
+  if (currentSection && currentPath === submodulePath) {
+    const key = `submodule.${currentSection}.url`;
+    const url = safeGit(parentWorkspacePath, ["config", "-f", ".gitmodules", "--get", key]);
+    if (url) return normalizeSubmoduleUrl(url, parentWorkspacePath);
+  }
+
+  return undefined;
+}
+
+function normalizeSubmoduleUrl(url: string, parentWorkspacePath: string): string | undefined {
   if (url.startsWith("./") || url.startsWith("../")) {
     const parentRemoteUrl = safeGit(parentWorkspacePath, ["remote", "get-url", "origin"]);
     if (!parentRemoteUrl) return undefined;
     const base = parentRemoteUrl.replace(/\/[^/]+$/, "/");
-    const normalized = resolveRelativeUrl(base, url);
-    return normalized;
+    return resolveRelativeUrl(base, url);
   }
-
   return url.trim();
 }
 
@@ -1791,9 +1834,11 @@ function isSubmoduleUrlTrusted(
   _gitlink: ChangedSubmoduleGitlink,
   policy: NativeGitCloseoutPolicy,
 ): boolean {
+  // Empty allowlist = fail-closed: no URL is trusted to receive retained ref pushes.
+  // Note: verification of SHAs already on durable remote refs does NOT require trust
+  // (trust check only gates the publish-retained-ref path).
   if (policy.trustedSubmoduleUrlPatterns.length === 0) {
-    // Default: allow all URLs when no explicit patterns configured
-    return true;
+    return false;
   }
   return policy.trustedSubmoduleUrlPatterns.some((pattern) => {
     if (pattern.endsWith("*")) {
@@ -1826,21 +1871,41 @@ function findDurableRefContainingSha(
   sha: string,
   durableRefPatterns: string[],
 ): string | undefined {
-  // Perform isolated fetch and check each durable ref pattern
-  // For simplicity, try ls-remote against the remote
-  for (const pattern of durableRefPatterns) {
-    try {
-      const refs = safeGit("/tmp", ["ls-remote", "--refs", canonicalUrl, pattern]);
-      if (!refs) continue;
-      for (const line of refs.split("\n")) {
-        const [remoteSha, ref] = line.split(/\s+/);
-        if (remoteSha === sha) return ref;
+  // Collect all remote refs matching durable patterns,
+  // fetch them into a temp bare repo, and check if the SHA
+  // is reachable from any fetched ref (not just tip equality).
+  const tmpDir = resolve("/tmp", `goal-durable-check-${Date.now()}`);
+  try {
+    mkdirSync(tmpDir, { recursive: true });
+    git(tmpDir, ["init", "--bare"]);
+
+    const candidateRefs: string[] = [];
+    for (const pattern of durableRefPatterns) {
+      try {
+        const out = git("/tmp", ["ls-remote", "--refs", canonicalUrl, pattern]);
+        for (const line of out.split("\n")) {
+          const parts = line.split(/\s+/);
+          const ref = parts[1];
+          if (ref && !candidateRefs.includes(ref)) candidateRefs.push(ref);
+        }
+      } catch {
+        // pattern may not match any refs — skip
       }
-    } catch {
-      continue;
     }
+
+    if (candidateRefs.length === 0) return undefined;
+
+    // Fetch all candidate refs at once
+    git(tmpDir, ["fetch", "--no-tags", canonicalUrl, ...candidateRefs]);
+
+    // Check if SHA is reachable from any fetched history
+    git(tmpDir, ["cat-file", "-e", `${sha}^{commit}`]);
+    return candidateRefs[0]; // SHA contained in at least one durable ref
+  } catch {
+    return undefined;
+  } finally {
+    rmRecursiveSafe(tmpDir);
   }
-  return undefined;
 }
 
 function publishShaToRetainedRef(
@@ -1851,15 +1916,10 @@ function publishShaToRetainedRef(
   durableRef: string,
 ): boolean {
   try {
-    // Push the specific SHA to the retained ref from the source workspace clone
+    // Push the specific SHA to the retained ref directly via canonicalUrl.
+    // Do NOT mutate the submodule workspace's origin remote.
     const submoduleClone = resolve(sourceWorkspacePath, submodulePath);
     if (!existsSync(submoduleClone)) return false;
-
-    // Ensure the remote URL matches canonical
-    const currentOrigin = safeGit(submoduleClone, ["remote", "get-url", "origin"]);
-    if (currentOrigin !== canonicalUrl) {
-      safeGit(submoduleClone, ["remote", "set-url", "origin", canonicalUrl]);
-    }
 
     execFileSync("git", ["push", "--no-verify", canonicalUrl, `${sha}:${durableRef}`], {
       cwd: submoduleClone,
@@ -1880,11 +1940,13 @@ function verifySubmoduleShaFromIsolatedFetch(
   const tmpDir = resolve("/tmp", `goal-submodule-fetch-${Date.now()}`);
   try {
     mkdirSync(tmpDir, { recursive: true });
-    safeGit(tmpDir, ["init", "--bare"]);
-    safeGit(tmpDir, ["remote", "add", "origin", canonicalUrl]);
-    safeGit(tmpDir, ["fetch", "--no-tags", "origin", durableRef]);
-    const ok = safeGit(tmpDir, ["cat-file", "-e", `${sha}^{commit}`]);
-    return ok === undefined ? false : true;
+    git(tmpDir, ["init", "--bare"]);
+    git(tmpDir, ["remote", "add", "origin", canonicalUrl]);
+    git(tmpDir, ["fetch", "--no-tags", "origin", durableRef]);
+    // cat-file -e exits 0 with empty output on success; git() returns "".
+    // If the object doesn't exist, cat-file -e throws.
+    git(tmpDir, ["cat-file", "-e", `${sha}^{commit}`]);
+    return true;
   } catch {
     return false;
   } finally {
@@ -1900,22 +1962,47 @@ function normalizePromotionTargetRef(
 ): NormalizedPromotionTarget | undefined {
   const ref = targetRef.trim();
 
+  // Normalize canonical remote refs: refs/remotes/<remote>/<branch> → treat as remoteRef
+  if (ref.startsWith("refs/remotes/")) {
+    const parts = ref.slice("refs/remotes/".length).split("/", 2);
+    if (parts[0] === remoteName) {
+      const remoteBranch = parts[1] ?? ref.slice("refs/remotes/".length + remoteName.length + 1);
+      const head = safeGit(repoRoot, ["rev-parse", "--verify", "HEAD"]);
+      if (!head) return undefined;
+      const worktrees = listGitWorktrees(repoRoot);
+      const target = worktrees.find((w) => w.branch === remoteBranch);
+      return {
+        remoteName,
+        remoteBranch,
+        localTargetBranch: remoteBranch,
+        targetWorkspacePath: target?.worktreePath ?? controllerWorkspacePath,
+        targetHead: target?.head ?? head,
+      };
+    }
+    return undefined;
+  }
+
+  // Normalize canonical local refs: refs/heads/<branch>
+  if (ref.startsWith("refs/heads/")) {
+    const localBranch = ref.slice("refs/heads/".length);
+    const head = safeGit(repoRoot, ["rev-parse", "--verify", `refs/heads/${localBranch}`]);
+    if (!head) return undefined;
+    const worktrees = listGitWorktrees(repoRoot);
+    const target = worktrees.find((w) => w.branch === localBranch);
+    return {
+      remoteName,
+      remoteBranch: localBranch,
+      localTargetBranch: localBranch,
+      targetWorkspacePath: target?.worktreePath ?? controllerWorkspacePath,
+      targetHead: target?.head ?? head,
+    };
+  }
+
   // Check if this is a known branch or remote ref BEFORE trying commit-ish.
   // (rev-parse <name>^{commit} succeeds for both branch names and commit SHAs,
   // so we must distinguish: use show-ref to check if it's a branch first.)
   const isRemoteRef = ref.startsWith(`${remoteName}/`);
   const isKnownLocalBranch = gitRefExists(repoRoot, ref);
-
-  // Is it a bare commit SHA or tag (not a known branch/remote ref)?
-  if (!isRemoteRef && !isKnownLocalBranch) {
-    try {
-      const type = git(repoRoot, ["cat-file", "-t", ref]);
-      if (type === "commit" || type === "tag") return undefined; // Detached commit/tag
-    } catch {
-      // Not a valid ref at all
-    }
-    return undefined;
-  }
 
   // Is it a bare commit SHA or tag (not a known branch/remote ref)?
   if (!isRemoteRef && !isKnownLocalBranch) {
