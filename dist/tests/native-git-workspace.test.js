@@ -555,6 +555,104 @@ test("native git promotion merges controller branch into target branch before cl
         rmSync(repo, { recursive: true, force: true });
     }
 });
+test("native git promotion syncs remote target before merging controller", () => {
+    const repo = createRepo();
+    const root = mkdtempSync(join(tmpdir(), "goal-promotion-remote-"));
+    try {
+        const remote = join(root, "origin.git");
+        const upstream = join(root, "upstream");
+        git(root, ["init", "--bare", remote]);
+        git(repo, ["remote", "add", "origin", remote]);
+        git(repo, ["push", "-u", "origin", "main"]);
+        git(remote, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+        const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+        const controller = manager.allocateControllerWorkspace({
+            invocationCwd: repo,
+            goalId: "goal-promote-remote-sync",
+            objective: "Promote after remote sync",
+        });
+        git(root, ["clone", remote, upstream]);
+        git(upstream, ["config", "user.email", "goal@example.test"]);
+        git(upstream, ["config", "user.name", "Goal Test"]);
+        writeFileSync(join(upstream, "remote.txt"), "remote advanced\n");
+        git(upstream, ["add", "remote.txt"]);
+        git(upstream, ["commit", "-m", "feat: remote target advance"]);
+        git(upstream, ["push", "origin", "main"]);
+        const remoteHead = git(upstream, ["rev-parse", "HEAD"]);
+        writeFileSync(join(controller.worktreePath, "feature.txt"), "controller done\n");
+        git(controller.worktreePath, ["add", "feature.txt"]);
+        git(controller.worktreePath, ["commit", "-m", "feat: controller work"]);
+        const controllerHead = git(controller.worktreePath, ["rev-parse", "HEAD"]);
+        const result = manager.promoteControllerBranch({
+            controllerWorkspacePath: controller.worktreePath,
+            controllerBranch: controller.branch,
+            targetRef: controller.baseRef,
+        });
+        assert.equal(result.status, "complete");
+        assert.equal(result.targetHead, remoteHead);
+        assert.equal(result.targetRemoteHead, remoteHead);
+        assert.match(result.targetSyncSummary ?? "", /fast-forwarded target main to origin\/main/);
+        assert.equal(git(repo, ["show", "HEAD:remote.txt"]), "remote advanced");
+        assert.equal(git(repo, ["show", "HEAD:feature.txt"]), "controller done");
+        assert.doesNotThrow(() => git(repo, ["merge-base", "--is-ancestor", remoteHead, "HEAD"]));
+        assert.doesNotThrow(() => git(repo, ["merge-base", "--is-ancestor", controllerHead, "HEAD"]));
+        manager.cleanupWorkspace({ repoRoot: repo, worktreePath: controller.worktreePath, branch: controller.branch, force: true });
+    }
+    finally {
+        rmSync(root, { recursive: true, force: true });
+        rmSync(repo, { recursive: true, force: true });
+    }
+});
+test("native git promotion blocks diverged target before creating promotion commits", () => {
+    const repo = createRepo();
+    const root = mkdtempSync(join(tmpdir(), "goal-promotion-diverged-"));
+    try {
+        const remote = join(root, "origin.git");
+        const upstream = join(root, "upstream");
+        git(root, ["init", "--bare", remote]);
+        git(repo, ["remote", "add", "origin", remote]);
+        git(repo, ["push", "-u", "origin", "main"]);
+        git(remote, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+        const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+        const controller = manager.allocateControllerWorkspace({
+            invocationCwd: repo,
+            goalId: "goal-promote-diverged",
+            objective: "Do not promote diverged target",
+        });
+        writeFileSync(join(repo, "local-only.txt"), "local only\n");
+        git(repo, ["add", "local-only.txt"]);
+        git(repo, ["commit", "-m", "feat: local target only"]);
+        const localHead = git(repo, ["rev-parse", "HEAD"]);
+        git(root, ["clone", remote, upstream]);
+        git(upstream, ["config", "user.email", "goal@example.test"]);
+        git(upstream, ["config", "user.name", "Goal Test"]);
+        writeFileSync(join(upstream, "remote-only.txt"), "remote only\n");
+        git(upstream, ["add", "remote-only.txt"]);
+        git(upstream, ["commit", "-m", "feat: remote target only"]);
+        git(upstream, ["push", "origin", "main"]);
+        const remoteHead = git(upstream, ["rev-parse", "HEAD"]);
+        writeFileSync(join(controller.worktreePath, "feature.txt"), "controller done\n");
+        git(controller.worktreePath, ["add", "feature.txt"]);
+        git(controller.worktreePath, ["commit", "-m", "feat: controller work"]);
+        const result = manager.promoteControllerBranch({
+            controllerWorkspacePath: controller.worktreePath,
+            controllerBranch: controller.branch,
+            targetRef: controller.baseRef,
+        });
+        assert.equal(result.status, "blocked");
+        assert.match(result.summary, /target branch sync blocked: target main and origin\/main have diverged/);
+        assert.equal(result.targetHead, localHead);
+        assert.equal(result.targetRemoteHead, remoteHead);
+        assert.equal(git(repo, ["rev-parse", "HEAD"]), localHead);
+        assert.equal(git(repo, ["show", "HEAD:local-only.txt"]), "local only");
+        assert.throws(() => git(repo, ["show", "HEAD:feature.txt"]));
+        manager.cleanupWorkspace({ repoRoot: repo, worktreePath: controller.worktreePath, branch: controller.branch, force: true });
+    }
+    finally {
+        rmSync(root, { recursive: true, force: true });
+        rmSync(repo, { recursive: true, force: true });
+    }
+});
 test("native git promotion blocks dirty target worktrees", () => {
     const repo = createRepo();
     try {

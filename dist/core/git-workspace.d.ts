@@ -141,6 +141,8 @@ export interface NativeGitControllerBranchPromotionResult {
     targetBranch?: string;
     targetWorkspacePath?: string;
     targetHead?: string;
+    targetRemoteHead?: string;
+    targetSyncSummary?: string;
     promotionCommitSha?: string;
     error?: string;
 }
@@ -232,6 +234,13 @@ export interface NormalizedPromotionTarget {
     targetHead: string;
     remoteHead?: string;
 }
+export interface NativeGitTargetBranchSyncResult {
+    status: "synced" | "skipped" | "blocked";
+    summary: string;
+    targetHead?: string;
+    remoteHead?: string;
+    error?: string;
+}
 export interface NativeGitParentPushRequest {
     targetWorkspacePath: string;
     remoteName: string;
@@ -276,10 +285,7 @@ export declare class NativeGitWorkspaceManager {
         ok: false;
         reason: string;
     };
-    syncTargetBranchBeforePromotion(target: NormalizedPromotionTarget): {
-        status: "synced" | "blocked";
-        summary: string;
-    };
+    syncTargetBranchBeforePromotion(target: NormalizedPromotionTarget): NativeGitTargetBranchSyncResult;
     pushParentTargetBranch(request: NativeGitParentPushRequest): NativeGitParentPushResult;
     verifyRecursiveCheckout(request: NativeGitRecursiveCheckoutVerificationRequest): NativeGitRecursiveCheckoutVerificationResult;
     resolveBaseRef(repoRoot: string, overrideBaseRef?: string): string;

@@ -335,7 +335,27 @@ export class NativeGitWorkspaceManager {
                 targetHead: target.head,
             });
         }
-        if (controllerHead === target.head || gitIsAncestor(target.workspacePath, controllerHead, target.head)) {
+        const sync = this.syncTargetBranchBeforePromotion({
+            remoteName: this.options.remote,
+            remoteBranch: target.targetBranch,
+            localTargetBranch: target.targetBranch,
+            targetWorkspacePath: target.workspacePath,
+            targetHead: target.head,
+        });
+        if (sync.status === "blocked") {
+            return nativeGitPromotionBlocked(request, `target branch sync blocked: ${sync.summary}`, {
+                controllerBranch,
+                controllerHead,
+                targetRef: target.targetRef,
+                targetBranch: target.targetBranch,
+                targetWorkspacePath: target.workspacePath,
+                targetHead: sync.targetHead ?? target.head,
+                targetRemoteHead: sync.remoteHead,
+                targetSyncSummary: sync.summary,
+            });
+        }
+        const syncedTargetHead = sync.targetHead ?? (safeGit(target.workspacePath, ["rev-parse", "--verify", "HEAD"]) || target.head);
+        if (controllerHead === syncedTargetHead || gitIsAncestor(target.workspacePath, controllerHead, syncedTargetHead)) {
             return {
                 status: "notRequired",
                 summary: `controller ${shortSha(controllerHead)} is already contained in target ${target.targetBranch}`,
@@ -344,8 +364,10 @@ export class NativeGitWorkspaceManager {
                 targetRef: target.targetRef,
                 targetBranch: target.targetBranch,
                 targetWorkspacePath: target.workspacePath,
-                targetHead: target.head,
-                promotionCommitSha: target.head,
+                targetHead: syncedTargetHead,
+                targetRemoteHead: sync.remoteHead,
+                targetSyncSummary: sync.summary,
+                promotionCommitSha: syncedTargetHead,
             };
         }
         try {
@@ -359,7 +381,9 @@ export class NativeGitWorkspaceManager {
                 targetRef: target.targetRef,
                 targetBranch: target.targetBranch,
                 targetWorkspacePath: target.workspacePath,
-                targetHead: target.head,
+                targetHead: syncedTargetHead,
+                targetRemoteHead: sync.remoteHead,
+                targetSyncSummary: sync.summary,
                 promotionCommitSha,
             };
         }
@@ -371,7 +395,9 @@ export class NativeGitWorkspaceManager {
                 targetRef: target.targetRef,
                 targetBranch: target.targetBranch,
                 targetWorkspacePath: target.workspacePath,
-                targetHead: target.head,
+                targetHead: syncedTargetHead,
+                targetRemoteHead: sync.remoteHead,
+                targetSyncSummary: sync.summary,
             });
         }
     }
@@ -490,31 +516,86 @@ export class NativeGitWorkspaceManager {
     }
     syncTargetBranchBeforePromotion(target) {
         const repoRoot = findGitRepositoryRoot(target.targetWorkspacePath);
-        if (!repoRoot)
-            return { status: "blocked", summary: "target workspace is not inside a Git repository" };
-        // Fetch latest remote target branch
-        const fetchRefspec = `refs/heads/${target.remoteBranch}:refs/remotes/${target.remoteName}/${target.remoteBranch}`;
-        safeGit(repoRoot, ["fetch", target.remoteName, fetchRefspec]);
-        const remoteHead = safeGit(repoRoot, ["rev-parse", "--verify", `refs/remotes/${target.remoteName}/${target.remoteBranch}`]);
-        if (!remoteHead)
-            return { status: "blocked", summary: `cannot resolve remote target branch ${target.remoteName}/${target.remoteBranch}` };
-        if (target.targetHead === remoteHead) {
-            return { status: "synced", summary: `target ${target.localTargetBranch} is already at remote ${target.remoteName}/${target.remoteBranch}` };
+        if (!repoRoot) {
+            return { status: "blocked", summary: "target workspace is not inside a Git repository", targetHead: target.targetHead };
         }
-        if (gitIsAncestor(repoRoot, target.targetHead, remoteHead)) {
-            // Local is behind remote; fast-forward
+        const currentTargetHead = safeGit(target.targetWorkspacePath, ["rev-parse", "--verify", "HEAD"]) || target.targetHead;
+        const remoteUrl = safeGit(repoRoot, ["remote", "get-url", target.remoteName]);
+        if (!remoteUrl) {
+            return {
+                status: "skipped",
+                summary: `remote ${target.remoteName} is not configured; skipped target sync`,
+                targetHead: currentTargetHead,
+            };
+        }
+        // Fetch latest remote target branch. This must fail closed: stale remote-tracking
+        // refs are not sufficient evidence that the local target is safe to promote.
+        const fetchRefspec = `refs/heads/${target.remoteBranch}:refs/remotes/${target.remoteName}/${target.remoteBranch}`;
+        try {
+            git(repoRoot, ["fetch", target.remoteName, fetchRefspec]);
+        }
+        catch (error) {
+            const message = gitErrorMessage(error);
+            return {
+                status: "blocked",
+                summary: `failed to fetch remote target branch ${target.remoteName}/${target.remoteBranch}: ${message}`,
+                targetHead: currentTargetHead,
+                error: message,
+            };
+        }
+        const remoteHead = safeGit(repoRoot, ["rev-parse", "--verify", `refs/remotes/${target.remoteName}/${target.remoteBranch}`]);
+        if (!remoteHead) {
+            return {
+                status: "blocked",
+                summary: `cannot resolve remote target branch ${target.remoteName}/${target.remoteBranch}`,
+                targetHead: currentTargetHead,
+            };
+        }
+        if (currentTargetHead === remoteHead) {
+            return {
+                status: "synced",
+                summary: `target ${target.localTargetBranch} is already at remote ${target.remoteName}/${target.remoteBranch}`,
+                targetHead: currentTargetHead,
+                remoteHead,
+            };
+        }
+        if (gitIsAncestor(repoRoot, currentTargetHead, remoteHead)) {
+            // Local is behind remote; fast-forward before any controller merge is attempted.
             try {
                 git(target.targetWorkspacePath, ["merge", "--ff-only", remoteHead]);
-                return { status: "synced", summary: `fast-forwarded target ${target.localTargetBranch} to ${target.remoteName}/${target.remoteBranch}` };
+                const updatedTargetHead = safeGit(target.targetWorkspacePath, ["rev-parse", "--verify", "HEAD"]) || remoteHead;
+                return {
+                    status: "synced",
+                    summary: `fast-forwarded target ${target.localTargetBranch} to ${target.remoteName}/${target.remoteBranch}`,
+                    targetHead: updatedTargetHead,
+                    remoteHead,
+                };
             }
-            catch {
-                return { status: "blocked", summary: "failed to fast-forward local target to remote" };
+            catch (error) {
+                const message = gitErrorMessage(error);
+                return {
+                    status: "blocked",
+                    summary: `failed to fast-forward local target to remote: ${message}`,
+                    targetHead: currentTargetHead,
+                    remoteHead,
+                    error: message,
+                };
             }
         }
-        if (gitIsAncestor(repoRoot, remoteHead, target.targetHead)) {
-            return { status: "blocked", summary: `local target ${target.localTargetBranch} has unpushed commits; cannot promote` };
+        if (gitIsAncestor(repoRoot, remoteHead, currentTargetHead)) {
+            return {
+                status: "blocked",
+                summary: `local target ${target.localTargetBranch} has unpushed commits; cannot promote`,
+                targetHead: currentTargetHead,
+                remoteHead,
+            };
         }
-        return { status: "blocked", summary: `target ${target.localTargetBranch} and ${target.remoteName}/${target.remoteBranch} have diverged` };
+        return {
+            status: "blocked",
+            summary: `target ${target.localTargetBranch} and ${target.remoteName}/${target.remoteBranch} have diverged`,
+            targetHead: currentTargetHead,
+            remoteHead,
+        };
     }
     pushParentTargetBranch(request) {
         try {
@@ -1051,6 +1132,8 @@ function nativeGitPromotionBlocked(request, error, context = {}) {
         targetBranch: context.targetBranch,
         targetWorkspacePath: context.targetWorkspacePath,
         targetHead: context.targetHead,
+        targetRemoteHead: context.targetRemoteHead,
+        targetSyncSummary: context.targetSyncSummary,
         promotionCommitSha: context.promotionCommitSha,
     };
 }
