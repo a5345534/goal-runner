@@ -46,38 +46,54 @@ export async function finalizeOpencodeGoalFromDagTerminalState(
   binding: ResolvedWorkspaceBinding,
   options: OpencodeGoalCloseoutOptions = {},
 ): Promise<OpencodeGoalCloseoutResult> {
+  let closeoutBlockedReason: string | undefined;
+
+  // Closeout-time submodule publish re-verification BEFORE finalizing.
+  // For auto-allocated controller workspaces, verify that all submodule
+  // gitlinks changed in the last commit (HEAD~1..HEAD) are durably reachable.
+  // This must run before finalizeGoalFromDagTerminalState so a blocked
+  // re-verify prevents the goal from being marked complete.
+  if (options.isAutoAllocatedControllerWorkspace?.(binding)) {
+    const manager = new NativeGitWorkspaceManager({ fetch: false });
+    const reverify = manager.ensureSubmoduleGitlinksDurablyPublished({
+      goalId,
+      parentWorkspacePath: binding.workspace,
+      sourceWorkspacePaths: [binding.workspace],
+      baseTreeish: "HEAD~1",
+      targetTreeish: "HEAD",
+      phase: "closeout",
+      policy: { ...AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY, submodulePublishMode: "block-if-unpublished" },
+    });
+    if (reverify.status === "blocked") {
+      closeoutBlockedReason = `closeout submodule re-verification blocked: ${reverify.summary}`;
+      // Block the goal via the runtime so it stays blocked/not-complete
+      try {
+        await runtime.blockGoalFromControllerCloseout(goalId, closeoutBlockedReason, {
+          closeoutGate: "submodulePublish",
+          blockers: reverify.blockers.map((b) => ({ path: b.path, reason: b.reason })),
+        });
+      } catch {
+        // Best-effort: runtime may have already finalized the goal
+      }
+    }
+  }
+
   const finalization = await runtime.finalizeGoalFromDagTerminalState(goalId);
   if (!finalization.terminal) {
     return {
       terminal: false,
       finalizationChanged: finalization.changed,
+      closeoutBlockedReason,
       cleanup: [],
       backgroundSessionStopped: false,
     };
   }
 
   let cleanup: NativeGitSubagentCleanupResult[] = [];
-  let closeoutBlockedReason: string | undefined;
 
   if (finalization.changed) {
     const state = await runtime.getGoalOrchestrationState(goalId);
     const manager = new NativeGitWorkspaceManager({ fetch: false });
-
-    // Closeout-time submodule publish re-verification before allowing cleanup.
-    // For auto-allocated controller workspaces, verify that all submodule
-    // gitlinks are durably reachable before proceeding to cleanup.
-    if (options.isAutoAllocatedControllerWorkspace?.(binding)) {
-      const reverify = manager.ensureSubmoduleGitlinksDurablyPublished({
-        goalId,
-        parentWorkspacePath: binding.workspace,
-        sourceWorkspacePaths: [binding.workspace],
-        phase: "closeout",
-        policy: { ...AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY, submodulePublishMode: "block-if-unpublished" },
-      });
-      if (reverify.status === "blocked") {
-        closeoutBlockedReason = `closeout submodule re-verification blocked: ${reverify.summary}`;
-      }
-    }
 
     // Only cleanup if closeout gates passed
     if (!closeoutBlockedReason) {

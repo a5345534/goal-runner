@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { requiredSubagentIntegrationTerminalSuccess } from "./integration.js";
 export const AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY = {
     remoteCloseoutMode: "block-if-cannot-push",
@@ -727,7 +727,26 @@ export function cleanupSubagentWorkspace(manager, subagent, policy = {}) {
         return cleanupResult(subagent, "error", undefined, error instanceof Error ? error.message : String(error), decision.forceAuthorized, decision.forceReason);
     }
 }
+function isExplicitSubagentWorkspace(subagent) {
+    // Auto-allocated workspaces have goal/<prefix>/ goal-scoped branches
+    // and their worktree directory contains .worktrees/
+    const branch = subagent.branch ?? "";
+    const ws = subagent.workspacePath ?? "";
+    if (!ws || !branch)
+        return true; // No workspace = nothing to cleanup
+    const isAutoBranch = branch.startsWith("goal/");
+    const isAutoPath = basename(ws).startsWith("goal-") && ws.includes(`${sep}.worktrees${sep}`);
+    return !(isAutoBranch && isAutoPath);
+}
 function cleanupDecision(subagent, policy) {
+    // Explicitly-bound workspaces are never auto-cleaned unless policy explicitly allows
+    if (!policy.allowExplicitWorkspaceCleanup && isExplicitSubagentWorkspace(subagent)) {
+        return {
+            action: "preserve",
+            forceAuthorized: false,
+            forceReason: "explicit workspace cleanup disabled by policy",
+        };
+    }
     let action;
     if (subagent.status === "complete")
         action = policy.completed ?? "remove";
@@ -1434,9 +1453,10 @@ function normalizePromotionTargetRef(controllerWorkspacePath, repoRoot, targetRe
     const ref = targetRef.trim();
     // Normalize canonical remote refs: refs/remotes/<remote>/<branch> → treat as remoteRef
     if (ref.startsWith("refs/remotes/")) {
-        const parts = ref.slice("refs/remotes/".length).split("/", 2);
-        if (parts[0] === remoteName) {
-            const remoteBranch = parts[1] ?? ref.slice("refs/remotes/".length + remoteName.length + 1);
+        const afterRemotes = ref.slice("refs/remotes/".length);
+        const remotePrefix = `${remoteName}/`;
+        if (afterRemotes.startsWith(remotePrefix)) {
+            const remoteBranch = afterRemotes.slice(remotePrefix.length);
             const head = safeGit(repoRoot, ["rev-parse", "--verify", "HEAD"]);
             if (!head)
                 return undefined;

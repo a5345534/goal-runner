@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { requiredSubagentIntegrationTerminalSuccess } from "./integration.js";
 import type { GoalControllerIntegrator, GoalControllerWorkspaceAllocator, GoalControllerWorkspaceAllocationRequest } from "./controller-loop.js";
 import type { GoalDagNode, GoalOrchestrationState, GoalSubagentRecord } from "./types.js";
@@ -108,6 +108,8 @@ export interface NativeGitSubagentCleanupPolicy {
   promotionStatus?: NativeGitControllerBranchPromotionStatus;
   /** Verify that the subagent source commit is still reachable before force deletion. */
   verifySourceReachable?: boolean;
+  /** Allow cleanup of explicitly-bound (non-auto-allocated) workspaces. Defaults false. */
+  allowExplicitWorkspaceCleanup?: boolean;
 }
 
 export interface NativeGitSubagentBranchIntegrationRequest {
@@ -1159,7 +1161,27 @@ export function cleanupSubagentWorkspace(
   }
 }
 
+function isExplicitSubagentWorkspace(subagent: GoalSubagentRecord): boolean {
+  // Auto-allocated workspaces have goal/<prefix>/ goal-scoped branches
+  // and their worktree directory contains .worktrees/
+  const branch = subagent.branch ?? "";
+  const ws = subagent.workspacePath ?? "";
+  if (!ws || !branch) return true; // No workspace = nothing to cleanup
+  const isAutoBranch = branch.startsWith("goal/");
+  const isAutoPath = basename(ws).startsWith("goal-") && ws.includes(`${sep}.worktrees${sep}`);
+  return !(isAutoBranch && isAutoPath);
+}
+
 function cleanupDecision(subagent: GoalSubagentRecord, policy: NativeGitSubagentCleanupPolicy): NativeGitSubagentCleanupDecision {
+  // Explicitly-bound workspaces are never auto-cleaned unless policy explicitly allows
+  if (!policy.allowExplicitWorkspaceCleanup && isExplicitSubagentWorkspace(subagent)) {
+    return {
+      action: "preserve",
+      forceAuthorized: false,
+      forceReason: "explicit workspace cleanup disabled by policy",
+    };
+  }
+
   let action: NativeGitSubagentCleanupAction;
   if (subagent.status === "complete") action = policy.completed ?? "remove";
   else if (subagent.status === "blocked") action = policy.blocked ?? "preserve";
@@ -1967,9 +1989,10 @@ function normalizePromotionTargetRef(
 
   // Normalize canonical remote refs: refs/remotes/<remote>/<branch> → treat as remoteRef
   if (ref.startsWith("refs/remotes/")) {
-    const parts = ref.slice("refs/remotes/".length).split("/", 2);
-    if (parts[0] === remoteName) {
-      const remoteBranch = parts[1] ?? ref.slice("refs/remotes/".length + remoteName.length + 1);
+    const afterRemotes = ref.slice("refs/remotes/".length);
+    const remotePrefix = `${remoteName}/`;
+    if (afterRemotes.startsWith(remotePrefix)) {
+      const remoteBranch = afterRemotes.slice(remotePrefix.length);
       const head = safeGit(repoRoot, ["rev-parse", "--verify", "HEAD"]);
       if (!head) return undefined;
       const worktrees = listGitWorktrees(repoRoot);

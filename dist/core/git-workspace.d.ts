@@ -93,6 +93,8 @@ export interface NativeGitSubagentCleanupPolicy {
     promotionStatus?: NativeGitControllerBranchPromotionStatus;
     /** Verify that the subagent source commit is still reachable before force deletion. */
     verifySourceReachable?: boolean;
+    /** Allow cleanup of explicitly-bound (non-auto-allocated) workspaces. Defaults false. */
+    allowExplicitWorkspaceCleanup?: boolean;
 }
 export interface NativeGitSubagentBranchIntegrationRequest {
     controllerWorkspacePath: string;
