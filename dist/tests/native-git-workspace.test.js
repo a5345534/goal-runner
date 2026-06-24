@@ -1450,6 +1450,30 @@ test("submodule trusted URL matching rejects substring-only matches", () => {
         rmSync(fixture.root, { recursive: true, force: true });
     }
 });
+test("closeout full-tree submodule reverify blocks existing unpublished gitlinks", () => {
+    const fixture = createSubmoduleGitlinkFixture();
+    try {
+        git(fixture.parent, ["commit", "-m", "parent references unpublished submodule"]);
+        const result = new NativeGitWorkspaceManager({ fetch: false }).ensureSubmoduleGitlinksDurablyPublished({
+            goalId: "goal-full-tree-reverify",
+            parentWorkspacePath: fixture.parent,
+            sourceWorkspacePaths: [fixture.parent],
+            baseTreeish: "ALL",
+            targetTreeish: "HEAD",
+            phase: "closeout",
+            policy: submodulePublishPolicy({
+                durableRefPatterns: ["refs/heads/main"],
+                submodulePublishMode: "block-if-unpublished",
+            }),
+        });
+        assert.equal(result.status, "blocked");
+        assert.ok(result.changedGitlinks.some((item) => item.path === "deps/sub" && item.newSha === fixture.sha), "full-tree scan must include existing gitlink");
+        assert.match(result.blockers.map((item) => `${item.path}: ${item.reason}`).join("\n"), /deps\/sub: submodule SHA .* is not on any durable remote ref/);
+    }
+    finally {
+        rmSync(fixture.root, { recursive: true, force: true });
+    }
+});
 test("nested submodule verification blocks unavailable nested gitlinks", () => {
     const fixture = createNestedSubmoduleGitlinkFixture();
     try {

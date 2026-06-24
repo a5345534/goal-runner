@@ -1073,16 +1073,15 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
     // Closeout-time submodule publish and push gates for auto-allocated controller workspaces
     if (closeoutPolicy) {
       // Submodule re-verification on the promoted target tree.
-      // Compare the target's pre-promotion HEAD against the post-promotion merge commit
-      // to catch any submodule gitlink changes that entered via the promotion merge.
+      // Scan the full promoted tree, not just the promotion diff, so pre-existing
+      // target gitlinks are also proven durable before parent push and cleanup.
       const targetWorkspace = promotion.result?.targetWorkspacePath ?? binding.workspace;
-      const baseForReverify = promotion.result?.targetHead ?? "HEAD";
       const targetForReverify = promotion.result?.promotionCommitSha ?? "HEAD";
       const reverify = manager.ensureSubmoduleGitlinksDurablyPublished({
         goalId,
         parentWorkspacePath: targetWorkspace,
         sourceWorkspacePaths: [targetWorkspace, binding.workspace],
-        baseTreeish: baseForReverify,
+        baseTreeish: "ALL",
         targetTreeish: targetForReverify,
         phase: "closeout",
         policy: closeoutPolicy,
