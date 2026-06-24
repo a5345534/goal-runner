@@ -854,7 +854,23 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(runtime, ctx, goalId, bindi
     let promotionStatus = "notRequired";
     const manager = new NativeGitWorkspaceManager({ fetch: false });
     const isAutoAllocated = isAutoAllocatedPiControllerWorkspace(binding);
+    const closeoutPolicy = isAutoAllocated ? AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY : undefined;
     if (terminal.allComplete && terminal.integrationIssues.length === 0) {
+        if (closeoutPolicy) {
+            const pushTargetPreflight = manager.normalizePromotionTarget({ controllerWorkspacePath: binding.workspace, controllerBranch: binding.branch, targetRef: binding.promotionTargetRef }, closeoutPolicy);
+            if (!pushTargetPreflight.ok) {
+                await recordPiControllerEvent(runtime, goalId, "parentPush.preflightBlocked", {
+                    reason: pushTargetPreflight.reason,
+                });
+                await runtime.blockGoalFromControllerCloseout(goalId, `pre-promotion parent push target validation blocked: ${pushTargetPreflight.reason}`, {
+                    reason: pushTargetPreflight.reason,
+                });
+                if (options.notify !== false)
+                    safeNotify(ctx, `Goal ${goalId.slice(0, 8)} blocked before final promotion: ${pushTargetPreflight.reason}`, "warning");
+                stopPiGoalBackgroundResources(goalId);
+                return true;
+            }
+        }
         await recordPiControllerEvent(runtime, goalId, "promotion.started", {
             controllerBranch: binding.branch,
             targetRef: binding.promotionTargetRef,
@@ -886,8 +902,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(runtime, ctx, goalId, bindi
             status: promotionStatus,
         });
         // Closeout-time submodule publish and push gates for auto-allocated controller workspaces
-        if (isAutoAllocated) {
-            const closeoutPolicy = AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY;
+        if (closeoutPolicy) {
             // Submodule re-verification on the promoted target tree.
             // Compare the target's pre-promotion HEAD against the post-promotion merge commit
             // to catch any submodule gitlink changes that entered via the promotion merge.

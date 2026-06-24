@@ -802,9 +802,17 @@ export class NativeGitWorkspaceManager {
       };
     }
 
+    const allGitlinks: ChangedSubmoduleGitlink[] = [...gitlinks];
     const published: PublishedSubmoduleRef[] = [];
     const verified: VerifiedSubmoduleRef[] = [];
     const blockers: SubmodulePublishBlocker[] = [];
+
+    const appendNestedResult = (nested: NestedSubmoduleVerificationResult) => {
+      allGitlinks.push(...nested.changedGitlinks);
+      published.push(...nested.published);
+      verified.push(...nested.verified);
+      blockers.push(...nested.blockers);
+    };
 
     for (const gitlink of gitlinks) {
       if (gitlink.status === "deleted") {
@@ -831,6 +839,17 @@ export class NativeGitWorkspaceManager {
         const fetchOk = verifySubmoduleShaFromIsolatedFetch(url, existingRef, newSha);
         if (fetchOk) {
           verified.push({ path: gitlink.path, sha: newSha, canonicalUrl: url, durableRef: existingRef, isolatedFetchVerified: true });
+          if (request.policy.verifyNestedSubmodules) {
+            appendNestedResult(verifyNestedSubmoduleGitlinks({
+              goalId: request.goalId,
+              parentPath: gitlink.path,
+              canonicalUrl: url,
+              durableRef: existingRef,
+              sha: newSha,
+              sourceWorkspacePaths: request.sourceWorkspacePaths,
+              policy: request.policy,
+            }));
+          }
           continue;
         }
       }
@@ -881,6 +900,17 @@ export class NativeGitWorkspaceManager {
         alreadyContained: false,
         sourceWorkspacePath: objectSource,
       });
+      if (request.policy.verifyNestedSubmodules) {
+        appendNestedResult(verifyNestedSubmoduleGitlinks({
+          goalId: request.goalId,
+          parentPath: gitlink.path,
+          canonicalUrl: url,
+          durableRef,
+          sha: newSha,
+          sourceWorkspacePaths: request.sourceWorkspacePaths,
+          policy: request.policy,
+        }));
+      }
     }
 
     const hasBlockers = blockers.length > 0;
@@ -888,9 +918,9 @@ export class NativeGitWorkspaceManager {
       status: hasBlockers ? "blocked" : "passed",
       summary: hasBlockers
         ? `submodule publish blocked: ${blockers.map((b) => `${b.path}: ${b.reason}`).join("; ")}`
-        : `submodule publish passed: ${gitlinks.length} gitlink(s) scanned, ${verified.length} verified, ${published.length} published`,
+        : `submodule publish passed: ${allGitlinks.length} gitlink(s) scanned, ${verified.length} verified, ${published.length} published`,
       phase: request.phase,
-      changedGitlinks: gitlinks,
+      changedGitlinks: allGitlinks,
       published,
       verified,
       blockers,
@@ -1897,65 +1927,75 @@ function resolveSubmoduleCanonicalUrl(
   submodulePath: string,
   _treeish: string = "HEAD",
 ): string | undefined {
-  // Parse .gitmodules INI to find the section whose `path` matches submodulePath,
-  // then read that section's `url`. Section names in .gitmodules are
-  // submodule.<name> where <name> may differ from <path>.
   let config: string;
   try {
     config = readFileSync(join(parentWorkspacePath, ".gitmodules"), "utf8");
   } catch {
     return undefined;
   }
+  const parentRemoteUrl = safeGit(parentWorkspacePath, ["remote", "get-url", "origin"]) || undefined;
+  return resolveSubmoduleUrlFromGitmodulesContent(config, submodulePath, parentRemoteUrl);
+}
 
-  const lines = config.split(/\r?\n/);
+function resolveSubmoduleUrlFromGitmodulesContent(
+  config: string,
+  submodulePath: string,
+  parentBaseUrl?: string,
+): string | undefined {
+  // Parse .gitmodules INI to find the section whose `path` matches submodulePath,
+  // then return that section's `url`. Section names may differ from paths.
   let currentPath: string | undefined;
-  let currentSection: string | undefined;
+  let currentUrl: string | undefined;
+  let inSubmoduleSection = false;
 
-  for (const raw of lines) {
+  const flush = (): string | undefined => {
+    if (inSubmoduleSection && currentPath === submodulePath && currentUrl) {
+      return normalizeSubmoduleUrlAgainstBase(currentUrl, parentBaseUrl);
+    }
+    return undefined;
+  };
+
+  for (const raw of config.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line || line.startsWith(";") || line.startsWith("#")) continue;
 
-    // Section header: [submodule "name"]
     const sectionMatch = line.match(/^\[submodule\s+"([^"]+)"\]$/);
     if (sectionMatch) {
-      // Resolve previous section before starting new one
-      if (currentSection && currentPath === submodulePath) {
-        const key = `submodule.${currentSection}.url`;
-        const url = safeGit(parentWorkspacePath, ["config", "-f", ".gitmodules", "--get", key]);
-        if (url) return normalizeSubmoduleUrl(url, parentWorkspacePath);
-      }
-      currentSection = sectionMatch[1];
+      const resolved = flush();
+      if (resolved) return resolved;
+      inSubmoduleSection = true;
       currentPath = undefined;
+      currentUrl = undefined;
       continue;
     }
 
-    if (!currentSection) continue;
-
-    const kv = line.split(/\s*=\s*/, 2);
-    if (kv.length < 2) continue;
-    if (kv[0] === "path") currentPath = kv[1];
+    if (!inSubmoduleSection) continue;
+    const eq = line.indexOf("=");
+    if (eq === -1) continue;
+    const key = line.slice(0, eq).trim();
+    const value = line.slice(eq + 1).trim();
+    if (key === "path") currentPath = value;
+    if (key === "url") currentUrl = value;
   }
 
-  // Check last section
-  if (currentSection && currentPath === submodulePath) {
-    const key = `submodule.${currentSection}.url`;
-    const url = safeGit(parentWorkspacePath, ["config", "-f", ".gitmodules", "--get", key]);
-    if (url) return normalizeSubmoduleUrl(url, parentWorkspacePath);
-  }
-
-  return undefined;
+  return flush();
 }
 
 function normalizeSubmoduleUrl(url: string, parentWorkspacePath: string): string | undefined {
-  if (url.startsWith("./") || url.startsWith("../")) {
-    const parentRemoteUrl = safeGit(parentWorkspacePath, ["remote", "get-url", "origin"]);
-    if (!parentRemoteUrl) return undefined;
+  const parentRemoteUrl = safeGit(parentWorkspacePath, ["remote", "get-url", "origin"]) || undefined;
+  return normalizeSubmoduleUrlAgainstBase(url, parentRemoteUrl);
+}
+
+function normalizeSubmoduleUrlAgainstBase(url: string, parentBaseUrl?: string): string | undefined {
+  const trimmed = url.trim();
+  if (trimmed.startsWith("./") || trimmed.startsWith("../")) {
+    if (!parentBaseUrl) return undefined;
     // Pass the full parent URL (not stripped) to resolveRelativeUrl.
     // For "../sub.git", the first ".." removes the repo name component,
     // giving the correct sibling-repo-in-same-directory result.
-    return resolveRelativeUrl(parentRemoteUrl, url);
+    return resolveRelativeUrl(parentBaseUrl, trimmed);
   }
-  return url.trim();
+  return trimmed;
 }
 
 function resolveRelativeUrl(base: string, relative: string): string {
@@ -2007,11 +2047,30 @@ function locateSubmoduleCommitObject(
     const exists = safeGit(submoduleWorktree, ["rev-parse", "--verify", `${sha}^{commit}`]);
     if (exists) return workspacePath;
 
-    const modulesPath = resolve(findGitRepositoryRoot(workspacePath) ?? workspacePath, ".git", "modules", submodulePath);
-    const modulesExists = safeGit(modulesPath, ["rev-parse", "--verify", `${sha}^{commit}`]);
-    if (modulesExists) return modulesPath;
+    for (const modulesPath of submoduleGitDirCandidates(findGitRepositoryRoot(workspacePath) ?? workspacePath, submodulePath)) {
+      const modulesExists = safeGit(modulesPath, ["rev-parse", "--verify", `${sha}^{commit}`]);
+      if (modulesExists) return modulesPath;
+    }
   }
   return undefined;
+}
+
+function submoduleGitDirCandidates(repoRoot: string, submodulePath: string): string[] {
+  const candidates: string[] = [];
+  const add = (candidate: string) => {
+    if (!candidates.includes(candidate)) candidates.push(candidate);
+  };
+
+  add(resolve(repoRoot, ".git", "modules", submodulePath));
+
+  const parts = submodulePath.split(/[\\/]+/).filter(Boolean);
+  for (let split = 1; split < parts.length; split += 1) {
+    const prefix = parts.slice(0, split).join("/");
+    const rest = parts.slice(split).join("/");
+    add(resolve(repoRoot, ".git", "modules", prefix, "modules", rest));
+  }
+
+  return candidates;
 }
 
 function findDurableRefContainingSha(
@@ -2040,7 +2099,7 @@ function findDurableRefContainingSha(
     }
 
     for (const candidateRef of candidateRefs) {
-      const tmpDir = resolve("/tmp", `goal-durable-check-${Date.now()}`);
+      const tmpDir = resolve("/tmp", `goal-durable-check-${uniqueTempSuffix()}`);
       try {
         mkdirSync(tmpDir, { recursive: true });
         git(tmpDir, ["init", "--bare"]);
@@ -2109,7 +2168,7 @@ function verifySubmoduleShaFromIsolatedFetch(
   durableRef: string,
   sha: string,
 ): boolean {
-  const tmpDir = resolve("/tmp", `goal-submodule-fetch-${Date.now()}`);
+  const tmpDir = resolve("/tmp", `goal-submodule-fetch-${uniqueTempSuffix()}`);
   try {
     mkdirSync(tmpDir, { recursive: true });
     git(tmpDir, ["init", "--bare"]);
@@ -2124,6 +2183,183 @@ function verifySubmoduleShaFromIsolatedFetch(
   } finally {
     rmRecursiveSafe(tmpDir);
   }
+}
+
+interface NestedSubmoduleVerificationRequest {
+  goalId: string;
+  parentPath: string;
+  canonicalUrl: string;
+  durableRef: string;
+  sha: string;
+  sourceWorkspacePaths: string[];
+  policy: NativeGitCloseoutPolicy;
+  depth?: number;
+  visited?: Set<string>;
+}
+
+interface NestedSubmoduleVerificationResult {
+  changedGitlinks: ChangedSubmoduleGitlink[];
+  published: PublishedSubmoduleRef[];
+  verified: VerifiedSubmoduleRef[];
+  blockers: SubmodulePublishBlocker[];
+}
+
+function emptyNestedSubmoduleVerificationResult(): NestedSubmoduleVerificationResult {
+  return { changedGitlinks: [], published: [], verified: [], blockers: [] };
+}
+
+function verifyNestedSubmoduleGitlinks(request: NestedSubmoduleVerificationRequest): NestedSubmoduleVerificationResult {
+  if (!request.policy.verifyNestedSubmodules) return emptyNestedSubmoduleVerificationResult();
+
+  const depth = request.depth ?? 0;
+  if (depth >= 8) {
+    return {
+      changedGitlinks: [],
+      published: [],
+      verified: [],
+      blockers: [{ path: request.parentPath, sha: request.sha, reason: "nested submodule verification exceeded maximum depth" }],
+    };
+  }
+
+  const visited = request.visited ?? new Set<string>();
+  const visitKey = `${request.canonicalUrl}#${request.sha}`;
+  if (visited.has(visitKey)) return emptyNestedSubmoduleVerificationResult();
+  visited.add(visitKey);
+
+  const tmpDir = resolve("/tmp", `goal-nested-submodule-${uniqueTempSuffix()}`);
+  const result = emptyNestedSubmoduleVerificationResult();
+
+  try {
+    mkdirSync(tmpDir, { recursive: true });
+    git(tmpDir, ["init", "--bare"]);
+    git(tmpDir, ["fetch", "--no-tags", request.canonicalUrl, request.durableRef]);
+    git(tmpDir, ["cat-file", "-e", `${request.sha}^{commit}`]);
+
+    const nestedGitlinks = scanSubmoduleGitlinksInTree(tmpDir, request.sha);
+    if (nestedGitlinks.length === 0) return result;
+
+    const gitmodules = safeGit(tmpDir, ["show", `${request.sha}:.gitmodules`]);
+    for (const nested of nestedGitlinks) {
+      const nestedSha = nested.newSha;
+      const fullPath = `${request.parentPath}/${nested.path}`;
+      const fullGitlink: ChangedSubmoduleGitlink = { ...nested, path: fullPath };
+      result.changedGitlinks.push(fullGitlink);
+
+      if (!nestedSha) {
+        result.blockers.push({ path: fullPath, reason: "nested submodule gitlink has no SHA" });
+        continue;
+      }
+      if (!gitmodules) {
+        result.blockers.push({ path: fullPath, sha: nestedSha, reason: `cannot resolve canonical URL for nested submodule path ${nested.path} from .gitmodules` });
+        continue;
+      }
+
+      const nestedUrl = resolveSubmoduleUrlFromGitmodulesContent(gitmodules, nested.path, request.canonicalUrl);
+      if (!nestedUrl) {
+        result.blockers.push({ path: fullPath, sha: nestedSha, reason: `cannot resolve canonical URL for nested submodule path ${nested.path} from .gitmodules` });
+        continue;
+      }
+      fullGitlink.canonicalUrl = nestedUrl;
+
+      const existingRef = findDurableRefContainingSha(nestedUrl, nestedSha, request.policy.durableRefPatterns);
+      if (existingRef && verifySubmoduleShaFromIsolatedFetch(nestedUrl, existingRef, nestedSha)) {
+        result.verified.push({ path: fullPath, sha: nestedSha, canonicalUrl: nestedUrl, durableRef: existingRef, isolatedFetchVerified: true });
+        appendNestedVerification(result, verifyNestedSubmoduleGitlinks({
+          ...request,
+          parentPath: fullPath,
+          canonicalUrl: nestedUrl,
+          durableRef: existingRef,
+          sha: nestedSha,
+          depth: depth + 1,
+          visited,
+        }));
+        continue;
+      }
+
+      const objectSource = locateSubmoduleCommitObject(nestedSha, request.sourceWorkspacePaths, fullPath);
+      if (!objectSource) {
+        result.blockers.push({ path: fullPath, sha: nestedSha, reason: `cannot locate nested submodule commit ${shortSha(nestedSha)} in any source workspace` });
+        continue;
+      }
+
+      if (request.policy.submodulePublishMode === "verify-only" || request.policy.submodulePublishMode === "block-if-unpublished") {
+        result.blockers.push({ path: fullPath, sha: nestedSha, reason: `nested submodule SHA ${shortSha(nestedSha)} is not on any durable remote ref and publish mode is ${request.policy.submodulePublishMode}` });
+        continue;
+      }
+
+      if (!isSubmoduleUrlTrusted(nestedUrl, fullGitlink, request.policy)) {
+        result.blockers.push({ path: fullPath, sha: nestedSha, reason: `nested submodule URL ${nestedUrl} is not in trustedSubmoduleUrlPatterns; cannot publish retained ref` });
+        continue;
+      }
+
+      const pathSlug = sanitizeSlug(fullPath).slice(0, 32) || "submodule";
+      const durableRef = `refs/heads/goal-runner/retained/${request.goalId}/${pathSlug}-${shortSha(nestedSha)}`;
+      const pushOk = publishShaToRetainedRef(objectSource, fullPath, nestedUrl, nestedSha, durableRef);
+      if (!pushOk) {
+        result.blockers.push({ path: fullPath, sha: nestedSha, reason: `failed to push retained ref ${durableRef} for ${nestedUrl}` });
+        continue;
+      }
+
+      if (!verifySubmoduleShaFromIsolatedFetch(nestedUrl, durableRef, nestedSha)) {
+        result.blockers.push({ path: fullPath, sha: nestedSha, reason: `pushed retained ref ${durableRef} but cannot fetch/verify SHA ${shortSha(nestedSha)} from ${nestedUrl} via isolated fetch` });
+        continue;
+      }
+
+      result.verified.push({ path: fullPath, sha: nestedSha, canonicalUrl: nestedUrl, durableRef, isolatedFetchVerified: true });
+      result.published.push({
+        path: fullPath,
+        sha: nestedSha,
+        canonicalUrl: nestedUrl,
+        durableRef,
+        alreadyContained: false,
+        sourceWorkspacePath: objectSource,
+      });
+      appendNestedVerification(result, verifyNestedSubmoduleGitlinks({
+        ...request,
+        parentPath: fullPath,
+        canonicalUrl: nestedUrl,
+        durableRef,
+        sha: nestedSha,
+        depth: depth + 1,
+        visited,
+      }));
+    }
+  } catch (error) {
+    result.blockers.push({ path: request.parentPath, sha: request.sha, reason: `failed to inspect nested submodules: ${gitErrorMessage(error)}` });
+  } finally {
+    rmRecursiveSafe(tmpDir);
+  }
+
+  return result;
+}
+
+function appendNestedVerification(target: NestedSubmoduleVerificationResult, nested: NestedSubmoduleVerificationResult): void {
+  target.changedGitlinks.push(...nested.changedGitlinks);
+  target.published.push(...nested.published);
+  target.verified.push(...nested.verified);
+  target.blockers.push(...nested.blockers);
+}
+
+function scanSubmoduleGitlinksInTree(repoPath: string, treeish: string): ChangedSubmoduleGitlink[] {
+  const output = safeGit(repoPath, ["ls-tree", "-r", "-z", treeish]);
+  if (!output) return [];
+  const gitlinks: ChangedSubmoduleGitlink[] = [];
+  for (const entry of output.split("\0")) {
+    if (!entry.trim()) continue;
+    const tabIdx = entry.indexOf("\t");
+    if (tabIdx === -1) continue;
+    const meta = entry.slice(0, tabIdx);
+    const p = entry.slice(tabIdx + 1);
+    const parts = meta.split(/\s+/);
+    if (parts[0] !== "160000") continue;
+    const newSha = parts[2];
+    if (newSha) gitlinks.push({ path: p, status: "added", newSha });
+  }
+  return gitlinks;
+}
+
+function uniqueTempSuffix(): string {
+  return `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function normalizePromotionTargetRef(

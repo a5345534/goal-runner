@@ -10,7 +10,7 @@ import { GoalRuntime, SQLiteGoalStore } from "../core/index.js";
 function git(cwd, args) {
     return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
-async function waitForAssertion(assertion, timeoutMs = 1_500) {
+async function waitForAssertion(assertion, timeoutMs = 5_000) {
     const deadline = Date.now() + timeoutMs;
     let lastError;
     while (Date.now() < deadline) {
@@ -27,7 +27,7 @@ async function waitForAssertion(assertion, timeoutMs = 1_500) {
         throw lastError;
     assertion();
 }
-function createGitWorkspace() {
+function createGitWorkspace(options = {}) {
     const repo = mkdtempSync(join(tmpdir(), "goal-pi-orchestrate-workspace-"));
     git(repo, ["init", "-b", "main"]);
     git(repo, ["config", "user.email", "goal@example.test"]);
@@ -35,6 +35,13 @@ function createGitWorkspace() {
     writeFileSync(join(repo, "README.md"), "# fixture\n");
     git(repo, ["add", "README.md"]);
     git(repo, ["commit", "-m", "initial"]);
+    if (options.origin !== false) {
+        const remote = join(repo, ".git", "test-origin.git");
+        git(repo, ["init", "--bare", remote]);
+        git(repo, ["remote", "add", "origin", remote]);
+        git(repo, ["push", "-u", "origin", "main"]);
+        git(remote, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+    }
     return repo;
 }
 test("Pi adapter keeps model-visible goal tools Codex-compatible", async () => {

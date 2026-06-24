@@ -12,7 +12,7 @@ function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
-async function waitForAssertion(assertion: () => void, timeoutMs = 1_500): Promise<void> {
+async function waitForAssertion(assertion: () => void, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
   while (Date.now() < deadline) {
@@ -28,7 +28,7 @@ async function waitForAssertion(assertion: () => void, timeoutMs = 1_500): Promi
   assertion();
 }
 
-function createGitWorkspace(): string {
+function createGitWorkspace(options: { origin?: boolean } = {}): string {
   const repo = mkdtempSync(join(tmpdir(), "goal-pi-orchestrate-workspace-"));
   git(repo, ["init", "-b", "main"]);
   git(repo, ["config", "user.email", "goal@example.test"]);
@@ -36,6 +36,13 @@ function createGitWorkspace(): string {
   writeFileSync(join(repo, "README.md"), "# fixture\n");
   git(repo, ["add", "README.md"]);
   git(repo, ["commit", "-m", "initial"]);
+  if (options.origin !== false) {
+    const remote = join(repo, ".git", "test-origin.git");
+    git(repo, ["init", "--bare", remote]);
+    git(repo, ["remote", "add", "origin", remote]);
+    git(repo, ["push", "-u", "origin", "main"]);
+    git(remote, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+  }
   return repo;
 }
 

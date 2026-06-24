@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cleanupSubagentWorkspace, cleanupTerminalSubagentWorkspaces, createNativeGitSubagentBranchIntegrator, createNativeGitSubagentWorkspaceAllocator, findGitRepositoryRoot, GoalRuntime, MemoryGoalStore, NativeGitWorkspaceManager, slugForGoal, slugForGoalSubagent, } from "../core/index.js";
+import { AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY, cleanupSubagentWorkspace, cleanupTerminalSubagentWorkspaces, createNativeGitSubagentBranchIntegrator, createNativeGitSubagentWorkspaceAllocator, findGitRepositoryRoot, GoalRuntime, MemoryGoalStore, NativeGitWorkspaceManager, slugForGoal, slugForGoalSubagent, } from "../core/index.js";
 function git(cwd, args) {
     return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
@@ -49,6 +49,44 @@ function createSubmoduleGitlinkFixture(options = {}) {
         renameSync(submodulePath, modulesPath);
     }
     return { root, parent, remote, sha };
+}
+function createNestedSubmoduleGitlinkFixture() {
+    const root = mkdtempSync(join(tmpdir(), "goal-native-nested-submodule-"));
+    const topRemote = join(root, "top.git");
+    const nestedRemote = join(root, "nested.git");
+    const nestedWork = join(root, "nested-work");
+    const topWork = join(root, "top-work");
+    const parent = join(root, "parent");
+    git(root, ["init", "--bare", topRemote]);
+    git(root, ["init", "--bare", nestedRemote]);
+    mkdirSync(nestedWork, { recursive: true });
+    git(nestedWork, ["init", "-b", "main"]);
+    git(nestedWork, ["config", "user.email", "goal@example.test"]);
+    git(nestedWork, ["config", "user.name", "Goal Test"]);
+    writeFileSync(join(nestedWork, "nested.txt"), "not pushed\n");
+    git(nestedWork, ["add", "nested.txt"]);
+    git(nestedWork, ["commit", "-m", "nested unavailable commit"]);
+    const nestedSha = git(nestedWork, ["rev-parse", "HEAD"]);
+    mkdirSync(topWork, { recursive: true });
+    git(topWork, ["init", "-b", "main"]);
+    git(topWork, ["config", "user.email", "goal@example.test"]);
+    git(topWork, ["config", "user.name", "Goal Test"]);
+    git(topWork, ["remote", "add", "origin", topRemote]);
+    writeFileSync(join(topWork, ".gitmodules"), `[submodule "libs/nested"]\n\tpath = libs/nested\n\turl = ${nestedRemote}\n`);
+    git(topWork, ["add", ".gitmodules"]);
+    git(topWork, ["update-index", "--add", "--cacheinfo", `160000,${nestedSha},libs/nested`]);
+    git(topWork, ["commit", "-m", "top references nested"]);
+    git(topWork, ["push", "origin", "HEAD:refs/heads/main"]);
+    const topSha = git(topWork, ["rev-parse", "HEAD"]);
+    mkdirSync(parent, { recursive: true });
+    git(parent, ["init", "-b", "main"]);
+    git(parent, ["config", "user.email", "goal@example.test"]);
+    git(parent, ["config", "user.name", "Goal Test"]);
+    git(parent, ["commit", "--allow-empty", "-m", "initial"]);
+    writeFileSync(join(parent, ".gitmodules"), `[submodule "deps/top"]\n\tpath = deps/top\n\turl = ${topRemote}\n`);
+    git(parent, ["add", ".gitmodules"]);
+    git(parent, ["update-index", "--add", "--cacheinfo", `160000,${topSha},deps/top`]);
+    return { root, parent, topRemote, nestedRemote, topSha, nestedSha };
 }
 function submodulePublishPolicy(overrides = {}) {
     return {
@@ -650,6 +688,30 @@ test("native git promotion blocks diverged target before creating promotion comm
     }
     finally {
         rmSync(root, { recursive: true, force: true });
+        rmSync(repo, { recursive: true, force: true });
+    }
+});
+test("native git auto closeout preflight blocks missing parent remote before promotion", () => {
+    const repo = createRepo();
+    try {
+        const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+        const controller = manager.allocateControllerWorkspace({
+            invocationCwd: repo,
+            goalId: "goal-promote-no-remote",
+            objective: "Do not promote without parent remote",
+        });
+        writeFileSync(join(controller.worktreePath, "feature.txt"), "should not merge\n");
+        git(controller.worktreePath, ["add", "feature.txt"]);
+        git(controller.worktreePath, ["commit", "-m", "feat: controller work"]);
+        const preflight = manager.normalizePromotionTarget({ controllerWorkspacePath: controller.worktreePath, controllerBranch: controller.branch, targetRef: controller.baseRef }, AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY);
+        assert.equal(preflight.ok, false);
+        if (!preflight.ok)
+            assert.match(preflight.reason, /cannot resolve remote URL for origin/);
+        assert.equal(git(repo, ["branch", "--show-current"]), "main");
+        assert.throws(() => git(repo, ["show", "HEAD:feature.txt"]));
+        manager.cleanupWorkspace({ repoRoot: repo, worktreePath: controller.worktreePath, branch: controller.branch, force: true });
+    }
+    finally {
         rmSync(repo, { recursive: true, force: true });
     }
 });
@@ -1383,6 +1445,31 @@ test("submodule trusted URL matching rejects substring-only matches", () => {
         });
         assert.equal(result.status, "blocked");
         assert.match(result.blockers[0]?.reason ?? "", /not in trustedSubmoduleUrlPatterns/);
+    }
+    finally {
+        rmSync(fixture.root, { recursive: true, force: true });
+    }
+});
+test("nested submodule verification blocks unavailable nested gitlinks", () => {
+    const fixture = createNestedSubmoduleGitlinkFixture();
+    try {
+        const result = new NativeGitWorkspaceManager({ fetch: false }).ensureSubmoduleGitlinksDurablyPublished({
+            goalId: "goal-nested-submodule",
+            parentWorkspacePath: fixture.parent,
+            sourceWorkspacePaths: [fixture.parent],
+            baseTreeish: "HEAD",
+            targetTreeish: "INDEX",
+            phase: "integration",
+            policy: submodulePublishPolicy({
+                durableRefPatterns: ["refs/heads/main"],
+                submodulePublishMode: "block-if-unpublished",
+                verifyNestedSubmodules: true,
+            }),
+        });
+        assert.equal(result.status, "blocked");
+        assert.ok(result.verified.some((item) => item.path === "deps/top" && item.sha === fixture.topSha), "top-level submodule must be verified first");
+        assert.ok(result.changedGitlinks.some((item) => item.path === "deps/top/libs/nested" && item.newSha === fixture.nestedSha), "nested gitlink must be scanned");
+        assert.match(result.blockers.map((item) => `${item.path}: ${item.reason}`).join("\n"), /deps\/top\/libs\/nested: cannot locate nested submodule commit/);
     }
     finally {
         rmSync(fixture.root, { recursive: true, force: true });
