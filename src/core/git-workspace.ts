@@ -1285,13 +1285,15 @@ export function cleanupSubagentWorkspace(
 }
 
 function isExplicitSubagentWorkspace(subagent: GoalSubagentRecord): boolean {
-  // Auto-allocated workspaces have goal/<prefix>/ goal-scoped branches
-  // and their worktree directory contains .worktrees/
+  // Auto-allocated subagent workspaces have goal/<goal-prefix>/ goal-scoped
+  // branches and live under a .worktrees/ directory. Their directory basename is
+  // derived from the node slug and does not necessarily start with "goal-".
   const branch = subagent.branch ?? "";
   const ws = subagent.workspacePath ?? "";
   if (!ws || !branch) return true; // No workspace = nothing to cleanup
-  const isAutoBranch = branch.startsWith("goal/");
-  const isAutoPath = basename(ws).startsWith("goal-") && ws.includes(`${sep}.worktrees${sep}`);
+  const goalPrefix = sanitizeSlug(subagent.goalId).slice(0, 12);
+  const isAutoBranch = Boolean(goalPrefix) && branch.startsWith(`goal/${goalPrefix}/`);
+  const isAutoPath = ws.includes(`${sep}.worktrees${sep}`);
   return !(isAutoBranch && isAutoPath);
 }
 

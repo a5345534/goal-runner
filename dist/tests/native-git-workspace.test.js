@@ -393,6 +393,40 @@ test("native git cleanup policy removes completed subagent worktrees and preserv
         rmSync(repo, { recursive: true, force: true });
     }
 });
+test("native git cleanup removes auto subagent worktrees whose basename does not start with goal", () => {
+    const repo = createRepo();
+    try {
+        const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+        const allocation = manager.allocateSubagentWorkspace({
+            invocationCwd: repo,
+            goalId: "8331a35c-8da1-4c3a-9e08-111111111111",
+            nodeId: "implement-closeout",
+            nodeSlug: "implement-closeout",
+        });
+        assert.ok(!allocation.worktreePath.split(/[\\/]/).at(-1)?.startsWith("goal-"), `fixture should cover non-goal basename: ${allocation.worktreePath}`);
+        const subagent = {
+            goalId: "8331a35c-8da1-4c3a-9e08-111111111111",
+            nodeId: "implement-closeout",
+            subagentId: allocation.subagentId,
+            harnessAdapterId: "fake",
+            workspacePath: allocation.worktreePath,
+            branch: allocation.branch,
+            status: "complete",
+            prompts: [],
+            integrationState: "complete",
+            integrationSourceHead: git(allocation.worktreePath, ["rev-parse", "HEAD"]),
+            createdAt: "2026-06-02T00:00:00.000Z",
+            updatedAt: "2026-06-02T00:00:00.000Z",
+        };
+        const result = cleanupSubagentWorkspace(manager, subagent);
+        assert.equal(result.action, "removed");
+        assert.equal(existsSync(allocation.worktreePath), false);
+        assert.throws(() => git(repo, ["show-ref", "--verify", `refs/heads/${allocation.branch}`]));
+    }
+    finally {
+        rmSync(repo, { recursive: true, force: true });
+    }
+});
 test("native git cleanup force-deletes only after integration and promotion pass", () => {
     const repo = createRepo();
     try {
