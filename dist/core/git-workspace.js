@@ -14,7 +14,9 @@ export const AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY = {
         "refs/heads/release/*",
         "refs/heads/goal-runner/retained/*",
     ],
-    trustedSubmoduleUrlPatterns: [],
+    trustedSubmoduleUrlPatterns: [
+        "https://github.com/a5345534/*",
+    ],
     verifyNestedSubmodules: true,
     prePushCheckoutSimulation: true,
     postPushRemoteCheckoutVerification: true,
