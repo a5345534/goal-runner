@@ -337,6 +337,8 @@ test("opencode adapter /goal --dag loads the file and plans from it", async () =
             { id: "integration", objective: "Run integrated validation", after: ["attendance", "payroll"] },
         ],
     }));
+    git(workspace, ["add", "people-frappe.dag.json"]);
+    git(workspace, ["commit", "-m", "add dag"]);
     const client = makeClient();
     setOpencodeClientForTests(client);
     const launched = [];

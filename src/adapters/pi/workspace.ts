@@ -1,6 +1,7 @@
 import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { inspectWorkspacePreflight, type GitPreflightResult } from "../../core/index.js";
 import type { BranchVerificationStatus, WorkspaceStatus } from "../../core/index.js";
 
 export interface GoalWorkspaceFlags {
@@ -203,6 +204,79 @@ function requireFlagValue(tokens: string[], index: number, flag: string): string
   const value = tokens[index];
   if (!value || value.startsWith("--")) throw new Error(`${flag} requires a value`);
   return value;
+}
+
+/**
+ * Runs the Git preflight inspector on the execution workspace and enforces
+ * managed execution workspace context semantics:
+ *
+ * - **Explicit dirty execution workspaces block**: When the user explicitly
+ *   supplies `--workspace`, any uncommitted changes in that workspace
+ *   (root worktree or submodule) cause the start to be rejected.
+ * - **Runner-created controller worktrees are evaluated as the execution
+ *   context**: The preflight is always run on `binding.workspace`. For
+ *   auto-allocated workspaces this is a freshly-created worktree that
+ *   should be clean by construction.
+ * - **Unrelated invocation-checkout dirtiness does not block auto-allocated
+ *   runs**: The invocation checkout (where the user ran the command) is
+ *   never inspected by this gate. Only the execution workspace is checked.
+ *
+ * @returns `undefined` when the workspace passes preflight, or a diagnostic
+ *          string describing why the preflight gate is closed.
+ */
+export function runExecutionWorkspacePreflightGate(
+  binding: ResolvedWorkspaceBinding,
+  isExplicitWorkspace: boolean,
+): string | undefined {
+  if (!binding.workspace) return undefined;
+
+  const preflight: GitPreflightResult = inspectWorkspacePreflight(binding.workspace, {
+    recurseSubmodules: true,
+    includeUntracked: true,
+  });
+
+  if (!preflight.inGitRepo) {
+    return `execution workspace is not a Git repository: ${binding.workspace}`;
+  }
+
+  if (preflight.clean) return undefined;
+
+  // For explicit workspaces, any dirtiness blocks.
+  if (isExplicitWorkspace) {
+    const parts: string[] = [];
+    const stagedRoot = preflight.rootEntries.filter((e) => e.indexStatus !== " ");
+    const unstagedRoot = preflight.rootEntries.filter((e) => e.worktreeStatus !== " " && e.indexStatus === " ");
+    const untrackedRoot = preflight.rootEntries.filter((e) => e.worktreeStatus === "?");
+
+    if (stagedRoot.length > 0) {
+      parts.push(`${stagedRoot.length} staged root change(s): ${stagedRoot.map((e) => e.path).join(", ")}`);
+    }
+    if (unstagedRoot.length > 0) {
+      parts.push(`${unstagedRoot.length} unstaged root change(s): ${unstagedRoot.map((e) => e.path).join(", ")}`);
+    }
+    if (untrackedRoot.length > 0) {
+      parts.push(`${untrackedRoot.length} untracked root file(s): ${untrackedRoot.map((e) => e.path).join(", ")}`);
+    }
+
+    const dirtySubmodules = Object.values(preflight.submoduleStatuses).filter(
+      (s) => s.shaMismatch || s.internalDirty,
+    );
+    if (dirtySubmodules.length > 0) {
+      for (const sm of dirtySubmodules) {
+        const smParts: string[] = [];
+        if (sm.shaMismatch) smParts.push("gitlink changed");
+        if (sm.internalDirty) smParts.push(`${sm.internalEntries.length} internal dirty file(s)`);
+        parts.push(`submodule ${sm.path}: ${smParts.join(", ")}`);
+      }
+    }
+
+    return `explicit execution workspace has uncommitted changes; commit, stash, or clean before starting a goal controller here:\n${parts.join("\n")}`;
+  }
+
+  // Auto-allocated workspace should be clean by construction, but we still
+  // verify and produce a diagnostic if it isn't (e.g., a worktree collision
+  // or a pre-creation dirtiness from an unsafe ref).
+  return `auto-allocated execution workspace has unexpected uncommitted changes:\n${preflight.summary}\nWorkspace: ${binding.workspace}\nThe worktree should be clean after creation. Check for stale worktrees or dirty base refs.`;
 }
 
 export function tokenize(input: string): string[] {

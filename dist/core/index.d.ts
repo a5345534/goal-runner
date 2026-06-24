@@ -10,6 +10,7 @@ export * from "./prompts.js";
 export * from "./executor-prompt.js";
 export * from "./runtime.js";
 export * from "./git-workspace.js";
+export * from "./git-preflight.js";
 export * from "./controller-loop.js";
 export * from "./dag-planner.js";
 export * from "./dag-file.js";

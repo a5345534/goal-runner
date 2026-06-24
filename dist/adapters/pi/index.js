@@ -14,7 +14,7 @@ import { PI_GOAL_SESSION_ENTRY_TYPE, PiSessionGoalMirrorStore } from "./session-
 import { archivePiBackgroundRunnerDirs, filterPiBackgroundRunnersForSubagent, PI_BACKGROUND_RUNNER_DIR_PREFIX, PI_LEGACY_BACKGROUND_RUNNER_DIR_PREFIX, readPiBackgroundRunnerInventory, signalPiBackgroundRunners, } from "./runner-ops.js";
 import { PiHarnessSubagentAdapter } from "./subagent-adapter.js";
 import { createAuditModel, controllerAuditOptions } from "./controller-audit-model.js";
-import { parseGoalWorkspaceFlags, resolveWorkspaceBinding, tokenize, validateExecutionWorkspace, } from "./workspace.js";
+import { parseGoalWorkspaceFlags, resolveWorkspaceBinding, runExecutionWorkspacePreflightGate, tokenize, validateExecutionWorkspace, } from "./workspace.js";
 const EXTENSION_MESSAGE_TYPE = "goal-runner";
 const LEGACY_EXTENSION_MESSAGE_TYPE = "agent-goal-runtime";
 const EXTENSION_MESSAGE_TYPES = new Set([EXTENSION_MESSAGE_TYPE, LEGACY_EXTENSION_MESSAGE_TYPE]);
@@ -420,6 +420,7 @@ async function handlePiGoalCommand(runtime, ctx, args, backgroundGoalSessions, c
     if (command.kind !== "start") {
         throw new Error(`/goal ${command.kind} requires the explicit command form with optional goal-ref.`);
     }
+    const isExplicitWorkspace = Boolean(workspaceFlags.workspace);
     const binding = workspaceFlags.workspace
         ? resolveWorkspaceBinding(workspaceFlags, ctx.cwd)
         : allocatePiControllerWorkspace(ctx, command.objective, workspaceFlags.branch ?? workspaceFlags.ref);
@@ -428,6 +429,9 @@ async function handlePiGoalCommand(runtime, ctx, args, backgroundGoalSessions, c
         throw new Error(validation.message ?? "execution workspace validation failed");
     if (!validation.isGit)
         throw new Error("/goal orchestration requires a git workspace");
+    const preflightBlocked = runExecutionWorkspacePreflightGate(binding, isExplicitWorkspace);
+    if (preflightBlocked)
+        throw new Error(preflightBlocked);
     await startGoalOwnedPiSession(runtime, ctx, command, binding, validation, backgroundGoalSessions, { dagDocument, dagSourceFile, modelRouting, thinkingLevel: controllerDefaults.thinkingLevel });
 }
 function parseDagStartTokenBudget(args) {

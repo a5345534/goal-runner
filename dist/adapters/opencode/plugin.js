@@ -34,7 +34,7 @@ import { GoalRuntime, NativeGitWorkspaceManager, SQLiteGoalStore, cleanupTermina
 import { buildOpencodeCompletionEvidence, readOpencodeSessionMessages, readOpencodeTokenUsage, summariseOpencodeSession } from "./session-transcript.js";
 import { isOpencodeSessionCompactedEvent, isOpencodeSessionErrorEvent, isOpencodeSessionIdleEvent, extractOpencodeEventSessionID, OpencodeHiddenContinuationRegistry, rewriteOpencodeQueuedContinuations, startOpencodeHiddenGoalTurn, } from "./hidden-continuation.js";
 import { OpencodeHarnessSubagentAdapter, createOpencodeHarnessSubagentAdapter } from "./subagent-adapter.js";
-import { resolveWorkspaceBinding, tokenize, validateExecutionWorkspace } from "./workspace.js";
+import { resolveWorkspaceBinding, runExecutionWorkspacePreflightGate, tokenize, validateExecutionWorkspace } from "./workspace.js";
 import { isOpencodeCompletionAuditEnabled, opencodeHeuristicCompletionAudit } from "./completion-audit.js";
 import { buildOpencodeBlockedAuditEvidence } from "./blocked-audit.js";
 import { parseOpencodeGoalCommand, formatOpencodeGoalToolDescription, stripSlashPrefix, OPENCODE_GOAL_TOOL, OPENCODE_GOAL_SLASH } from "./slash-command.js";
@@ -444,6 +444,7 @@ async function runOpencodeGoalStart(ctx, input, sessionID, parsed) {
     }
     if (command.kind !== "start")
         return `/goal ${command.kind} requires the explicit command form.`;
+    const isExplicitWorkspace = Boolean(flags.workspace);
     const binding = flags.workspace
         ? resolveWorkspaceBinding(flags, ctx.activeCwd)
         : allocateOpencodeControllerWorkspace(ctx, command.objective, flags.branch ?? flags.ref);
@@ -452,6 +453,9 @@ async function runOpencodeGoalStart(ctx, input, sessionID, parsed) {
         return `/goal rejected: ${validation.message ?? "execution workspace validation failed"}`;
     if (!validation.isGit)
         return "/goal orchestration requires a git workspace";
+    const preflightBlocked = runExecutionWorkspacePreflightGate(binding, isExplicitWorkspace);
+    if (preflightBlocked)
+        return `/goal rejected: ${preflightBlocked}`;
     return startOpencodeOrchestratedGoal(ctx, input, sessionID, command, binding, validation, {
         dagDocument: dagDocument,
         dagSourceFile,

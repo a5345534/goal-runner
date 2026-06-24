@@ -234,6 +234,113 @@ It deliberately does **not** register `goal_complete`, `pause_goal`, or `abort_g
 
 For auto-allocated native-Git controller workspaces, submodule retained-ref publish trusts existing versioned submodule URLs when a gitlink is updated but the parent tree's `.gitmodules` URL for that path is unchanged. Newly added submodules or `.gitmodules` URL changes still require an operator allowlist before retained-ref publishing. Configure extra trusted URLs before starting or resuming the controller with `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_URL_PATTERNS`, using either a JSON array or comma/newline-separated patterns. Patterns require exact match unless they end in `*`, which performs prefix matching. Example: `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_URL_PATTERNS='["https://github.com/a5345534/*"]'`. Ordinary `goal/...` branches are not treated as durable refs, and a running Pi/controller process must be restarted or freshly loaded to pick up environment changes.
 
+### Workspace preflight gate
+
+Before starting a new goal controller, the adapter always runs a read-only Git
+preflight inspector on the execution workspace. The inspector scans the root
+worktree and every known submodule for uncommitted changes (staged, unstaged, and
+untracked files in the root; gitlink mismatches and internal worktree dirtiness
+in submodules). It uses **only read-only Git commands**. It never runs
+`git commit`, `git stash`, `git checkout`, `git clean`, `git reset`, or any other
+mutating repair command.
+
+When the gate finds dirtiness, it produces specific diagnostics naming each dirty
+path, its kind (staged/unstaged/untracked for root files; gitlink-changed or
+internal-dirty for submodules), and a summary. The start is then blocked and the
+diagnostic is reported to the user. The workspace is left **exactly as found** so
+the user can inspect and decide on a repair strategy. No automatic repair is
+ever attempted.
+
+**Explicit workspaces** (`--workspace <path>`) block on any uncommitted change in
+the root or any submodule. The diagnostic lists every dirty entry with path and
+kind so the user knows exactly what needs attention.
+
+**Auto-allocated workspaces** (no `--workspace` supplied) should be clean by
+construction because the controller creates a fresh worktree from a known base
+ref. If the preflight finds dirtiness in an auto-allocated workspace, the gate
+still blocks and the diagnostic suggests checking for stale worktree collisions
+or dirty base refs.
+
+The preflight inspects **only the execution workspace**. The current invocation
+directory (where the user typed `/goal`) is never checked. In-progress work
+elsewhere in the repository does not block a goal that runs in a clean
+worktree.
+
+#### Manual repair guidance
+
+The preflight gate blocks but does not repair. When a start is blocked, use
+standard Git workflows to resolve the dirtiness, then re-run `/goal`:
+
+**Root worktree changes** (staged, unstaged, or untracked files in the repository
+root):
+
+```bash
+# Option A: commit the changes
+cd <execution-workspace>
+git add -A
+git commit -m "resolve preflight: staged/unstaged/untracked changes"
+/goal --workspace <path> --branch <branch> <objective>   # retry
+
+# Option B: stash the changes (can re-apply later)
+cd <execution-workspace>
+git stash push --include-untracked --message "preflight stash"
+/goal --workspace <path> --branch <branch> <objective>   # retry
+
+# Option C: discard specific untracked or unstaged changes
+cd <execution-workspace>
+git clean -fd <untracked-path>              # remove untracked files
+git checkout -- <path>                     # discard unstaged changes
+git restore --staged <path>                # unstage staged changes
+/goal --workspace <path> --branch <branch> <objective>   # retry
+```
+
+**Submodule gitlink changes** (the parent records a different submodule commit;
+the diagnostic shows `gitlink changed`):
+
+```bash
+cd <execution-workspace>
+# Option A: commit the gitlink update as an intentional pin change
+git add <submodule-path>
+git commit -m "update submodule pin"
+
+# Option B: restore the expected submodule SHA
+git submodule update <submodule-path>
+```
+
+**Submodule internal dirtiness** (uncommitted files inside a submodule worktree;
+the diagnostic lists specific files):
+
+```bash
+cd <execution-workspace>/<submodule-path>
+# Option A: commit inside the submodule
+git add -A
+git commit -m "resolve preflight: internal changes"
+
+# Option B: stash inside the submodule
+git stash push --include-untracked --message "preflight stash"
+```
+
+#### Retryability
+
+Preflight gate blocking is not a permanent error. After the user commits,
+stashes, or cleans the offending entries, re-running the same `/goal` command
+will start the goal controller. The gate is purely a start-time cleanliness check
+and does not record any blocking state in the goal store. No special
+unblock/resume command is needed; just fix the workspace and retry.
+
+#### What the preflight gate does not do
+
+- It does **not** run any automatic Git repair (`git commit`, `git stash`,
+  `git clean`, `git checkout`, `git reset`, or any mutating subcommand).
+- It does **not** inspect the invocation directory or any workspace other than
+  the execution workspace.
+- It does **not** enforce remote submodule publish durability, remote push
+  safety, or closeout-time submodule re-verification. Those belong to the
+  closeout pipeline, which is a separate scope.
+- It does **not** block on detached HEAD (detached HEAD is reported in the
+  diagnostic summary but does not, by itself, prevent a start).
+- It does **not** inspect ignored files (`.gitignore`-excluded paths).
+
 DAG nodes can also declare a generic test-spec validation contract through `kind` and `validation` metadata. A planner can model test-spec-first work as visible `test-spec` / `test-review` / `implementation` / `audit` nodes, lock approved test artifacts by sha256, and require evidence such as `validators-ran`, `locked-artifacts-unchanged`, `implementation-diff-present`, or `audit-report-present`. Controller validation fails closed when locked artifacts change, required evidence is missing, declared validators are skipped, a high-risk `kind=implementation` node has no validation contract, or an audit report used for `audit-report-present` explicitly says violations remain. `requiredEvidence` is a closed vocabulary: unsupported labels are rejected by DAG parsing and also blocked by runtime validation if encountered in old durable state; map natural-language checks to explicit `validators`, `artifactLocks`, path policy (`allowedPaths`/`forbiddenPaths`), or `auditReportPaths` fields.
 
 Bare `/goal` shows the current/default goal's objective, status, elapsed time, token usage/budget, goal-turn count, and currently useful subcommands. `/goal status` groups the objective, workspace, session, DAG summary, DAG nodes, and subagent records into readable sections with shortened ids/paths, and reports stalled DAGs when an otherwise active goal has only terminal failed/blocked nodes. `/goal monitor` opens a live dashboard that refreshes DAG and subagent state every second, showing node/subagent status counts, runtime duration, last activity age, branch/workspace, validation, notes, and transcript tail. The monitor has separate `DAG / Subagents` and `Transcript tail` panes: press `d` or `t` to focus a pane, `↑↓` to scroll the focused pane, `PageUp`/`PageDown` for page scrolling, `Home` for top, and `End` for DAG bottom or transcript live tail. `/goal list` lists recent materialized goals from the portable registry. Selecting a goal opens the same read-only monitor and keeps lifecycle actions as explicit buttons/commands rather than free-form input into the goal session. Targeted commands resolve full or short goal ids and reject ambiguous prefixes; when the goal-ref is omitted, commands prefer the current controller session's goal, then the latest non-terminal goal, then the latest goal. The Pi status line uses compact status strings such as `🎯 active 18k/100k`, `🎯 paused`, `🎯 blocked`, `🎯 budget 100k/100k`, or `🎯 complete`.

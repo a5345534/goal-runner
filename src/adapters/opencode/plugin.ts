@@ -66,7 +66,7 @@ import {
   type OpencodeGoalContinuationMetadata,
 } from "./hidden-continuation.js";
 import { OpencodeHarnessSubagentAdapter, createOpencodeHarnessSubagentAdapter } from "./subagent-adapter.js";
-import { parseGoalWorkspaceFlags, resolveWorkspaceBinding, tokenize, validateExecutionWorkspace, type ResolvedWorkspaceBinding, type WorkspaceValidationResult } from "./workspace.js";
+import { parseGoalWorkspaceFlags, resolveWorkspaceBinding, runExecutionWorkspacePreflightGate, tokenize, validateExecutionWorkspace, type ResolvedWorkspaceBinding, type WorkspaceValidationResult } from "./workspace.js";
 import { isOpencodeCompletionAuditEnabled, opencodeHeuristicCompletionAudit } from "./completion-audit.js";
 import { buildOpencodeBlockedAuditEvidence } from "./blocked-audit.js";
 import { parseOpencodeGoalCommand, formatOpencodeGoalToolDescription, stripSlashPrefix, OPENCODE_GOAL_TOOL, OPENCODE_GOAL_SLASH, type OpencodeGoalSlashParse } from "./slash-command.js";
@@ -539,12 +539,15 @@ async function runOpencodeGoalStart(
   }
   if (command.kind !== "start") return `/goal ${command.kind} requires the explicit command form.`;
 
+  const isExplicitWorkspace = Boolean(flags.workspace);
   const binding = flags.workspace
     ? resolveWorkspaceBinding(flags, ctx.activeCwd)
     : allocateOpencodeControllerWorkspace(ctx, command.objective, flags.branch ?? flags.ref);
   const validation = validateExecutionWorkspace(binding);
   if (!validation.ok) return `/goal rejected: ${validation.message ?? "execution workspace validation failed"}`;
   if (!validation.isGit) return "/goal orchestration requires a git workspace";
+  const preflightBlocked = runExecutionWorkspacePreflightGate(binding, isExplicitWorkspace);
+  if (preflightBlocked) return `/goal rejected: ${preflightBlocked}`;
 
   return startOpencodeOrchestratedGoal(ctx, input, sessionID, command, binding, validation, {
     dagDocument: dagDocument as GoalDagFileDocument | undefined,

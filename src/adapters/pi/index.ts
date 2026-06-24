@@ -62,6 +62,7 @@ import { createAuditModel, controllerAuditOptions } from "./controller-audit-mod
 import {
   parseGoalWorkspaceFlags,
   resolveWorkspaceBinding,
+  runExecutionWorkspacePreflightGate,
   tokenize,
   validateExecutionWorkspace,
   type ResolvedWorkspaceBinding,
@@ -529,12 +530,15 @@ async function handlePiGoalCommand(
     throw new Error(`/goal ${command.kind} requires the explicit command form with optional goal-ref.`);
   }
 
+  const isExplicitWorkspace = Boolean(workspaceFlags.workspace);
   const binding = workspaceFlags.workspace
     ? resolveWorkspaceBinding(workspaceFlags, ctx.cwd)
     : allocatePiControllerWorkspace(ctx, command.objective, workspaceFlags.branch ?? workspaceFlags.ref);
   const validation = validateExecutionWorkspace(binding);
   if (!validation.ok) throw new Error(validation.message ?? "execution workspace validation failed");
   if (!validation.isGit) throw new Error("/goal orchestration requires a git workspace");
+  const preflightBlocked = runExecutionWorkspacePreflightGate(binding, isExplicitWorkspace);
+  if (preflightBlocked) throw new Error(preflightBlocked);
   await startGoalOwnedPiSession(runtime, ctx, command, binding, validation, backgroundGoalSessions, { dagDocument, dagSourceFile, modelRouting, thinkingLevel: controllerDefaults.thinkingLevel });
 }
 
