@@ -542,6 +542,34 @@ test("controller safety net blocks downstream when upstream integration fails", 
     const savedSubagent = await runtime.getGoalSubagent("goal-1", "subagent-1");
     assert.equal(savedSubagent?.integrationState, "failed");
 });
+test("controller propagates terminal dependency blockers to downstream planned nodes", async () => {
+    const { runtime } = await runtimeWithPlan([
+        { nodeId: "build", objective: "Build feature" },
+        { nodeId: "docs", objective: "Document feature", dependencyNodeIds: ["build"] },
+        { nodeId: "tests", objective: "Test docs", dependencyNodeIds: ["docs"] },
+    ]);
+    await runtime.saveGoalDagNode({
+        ...await runtime.getGoalDagNode("goal-1", "build"),
+        status: "blockedTerminal",
+        lifecyclePhase: "terminal",
+        lastValidationSummary: "controller policy blocked build",
+        updatedAt: now,
+    });
+    const adapter = new FakeSubagentAdapter();
+    const tick = await runtime.runGoalControllerTick("goal-1", {
+        adapter,
+        workspaceAllocator: ({ node }) => ({ subagentId: `subagent-${node.nodeId}`, cwd: `/repo/.worktrees/${node.slug}`, branch: `feat/${node.slug}` }),
+    });
+    assert.equal(adapter.starts.length, 0);
+    assert.equal(tick.started.length, 0);
+    assert.deepEqual(tick.blocked.map((node) => node.nodeId), ["docs", "tests"]);
+    const docs = await runtime.getGoalDagNode("goal-1", "docs");
+    const tests = await runtime.getGoalDagNode("goal-1", "tests");
+    assert.equal(docs?.status, "blocked");
+    assert.equal(tests?.status, "blocked");
+    assert.match(docs?.lastValidationSummary ?? "", /dependency build is blockedTerminal/);
+    assert.match(tests?.lastValidationSummary ?? "", /dependency docs is blocked/);
+});
 test("controller safety net skips upstream dependencies already integrated into controller", async () => {
     const { runtime } = await runtimeWithPlan([
         { nodeId: "build", objective: "Build feature" },

@@ -2764,6 +2764,8 @@ async function startReadyNodes(
   const queue = await runtime.getGoalDagReadyQueue(goalId, options.schedulingPolicy);
   result.ready = queue.ready;
   result.queueBlocked = queue.blocked;
+  const propagatedTerminalBlocks = await blockNodesWithTerminalDependencyBlockers(runtime, goalId, state, queue.blocked, result, tickStartedAt);
+  if (propagatedTerminalBlocks > 0) state = await runtime.getGoalOrchestrationState(goalId);
   const maxStarts = options.maxStartsPerTick ?? queue.ready.length;
   let started = 0;
   for (const node of queue.ready) {
@@ -2876,6 +2878,59 @@ async function startReadyNodes(
     result.started.push(subagent);
     started += 1;
   }
+}
+
+const TERMINAL_DEPENDENCY_BLOCKER_STATUSES = new Set<GoalDagNode["status"]>(["blocked", "blockedTerminal", "failed", "superseded"]);
+
+async function blockNodesWithTerminalDependencyBlockers(
+  runtime: GoalControllerRuntimePort,
+  goalId: string,
+  state: GoalOrchestrationState,
+  queueBlocked: Array<{ node: GoalDagNode; reasons: string[] }>,
+  result: GoalControllerTickResult,
+  tickStartedAt: string,
+): Promise<number> {
+  const nodesById = new Map(state.nodes.map((node) => [node.nodeId, node]));
+  const terminalBlockedNodeIds = new Set(
+    state.nodes
+      .filter((node) => TERMINAL_DEPENDENCY_BLOCKER_STATUSES.has(node.status))
+      .map((node) => node.nodeId),
+  );
+  const propagatedSummaries = new Map<string, string>();
+  let changed = 0;
+
+  for (const { node } of queueBlocked) {
+    if (TERMINAL_DEPENDENCY_BLOCKER_STATUSES.has(node.status)) continue;
+    const blockingDependencyIds = node.dependencyNodeIds.filter((dependencyId) => terminalBlockedNodeIds.has(dependencyId));
+    if (blockingDependencyIds.length === 0) continue;
+
+    const dependencySummary = blockingDependencyIds.map((dependencyId) => {
+      const dependency = nodesById.get(dependencyId);
+      const status = dependency?.status ?? "blocked";
+      const detail = propagatedSummaries.get(dependencyId) ?? dependency?.lastValidationSummary;
+      return detail ? `dependency ${dependencyId} is ${status}: ${detail}` : `dependency ${dependencyId} is ${status}`;
+    }).join("; ");
+    const summary = `dependency blocked: ${dependencySummary}`;
+    const blockedNode = withNodePatch(node, {
+      status: "blocked",
+      lifecyclePhase: "terminal",
+      lastValidationSummary: summary,
+      updatedAt: tickStartedAt,
+    });
+    await runtime.saveGoalDagNode(blockedNode);
+    await recordControllerEvent(runtime, goalId, "node.dependencyBlocked", {
+      nodeId: node.nodeId,
+      dependencyNodeIds: blockingDependencyIds,
+      summary,
+    }, tickStartedAt);
+    result.blocked.push(blockedNode);
+    nodesById.set(blockedNode.nodeId, blockedNode);
+    terminalBlockedNodeIds.add(blockedNode.nodeId);
+    propagatedSummaries.set(blockedNode.nodeId, summary);
+    changed += 1;
+  }
+
+  return changed;
 }
 
 function latestSubagentPerNode(subagents: GoalSubagentRecord[]): GoalSubagentRecord[] {
