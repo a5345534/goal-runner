@@ -944,6 +944,12 @@ async function reconcileSubagentOutcomes(runtime, goalId, options, result, tickS
             }
             continue;
         }
+        if (subagent.status === "blockedTerminal") {
+            const integrationRetried = await tryRetryBlockedIntegration(runtime, options, state, node, subagent, result, tickStartedAt);
+            if (integrationRetried)
+                continue;
+            continue;
+        }
         if (subagent.status === "failed") {
             const state = await runtime.getGoalOrchestrationState(goalId);
             const restartedInterruptedReplacement = await tryRestartInterruptedValidationCappedReplacement(runtime, options, state, node, subagent, result, tickStartedAt);
@@ -1583,7 +1589,7 @@ async function tryRetryBlockedIntegration(runtime, options, state, node, subagen
     if (subagent.integrationState !== "failed")
         return false;
     const reason = subagent.integrationError ?? subagent.integrationStatus ?? node.lastValidationSummary ?? "integration failed";
-    if (!isControllerWorkspaceDirtyIntegrationBlocker(reason))
+    if (!isRetryableIntegrationBlocker(reason))
         return false;
     const ageMs = ageSince(subagent.updatedAt, tickStartedAt);
     if (ageMs < INTEGRATION_RETRY_COOLDOWN_MS)
@@ -1605,9 +1611,13 @@ async function tryRetryBlockedIntegration(runtime, options, state, node, subagen
     await integrateOrCompleteValidatedSubagent(runtime, options, state, node, retrySubagent, result, tickStartedAt, validationSummary, undefined);
     return true;
 }
-function isControllerWorkspaceDirtyIntegrationBlocker(reason) {
+function isRetryableIntegrationBlocker(reason) {
     return (/controller workspace has uncommitted changes; cannot (?:integrate|promote) safely/i.test(reason) ||
-        /controller workspace is not inside a Git repository/i.test(reason));
+        /controller workspace is not inside a Git repository/i.test(reason) ||
+        /submodule publish blocked/i.test(reason) ||
+        /trustedSubmoduleUrlPatterns/i.test(reason) ||
+        /not on any durable remote ref/i.test(reason) ||
+        /retained ref/i.test(reason));
 }
 function latestControllerValidationPassSummary(subagent) {
     const results = subagent.controllerValidationResults ?? [];

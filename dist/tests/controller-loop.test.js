@@ -820,6 +820,90 @@ test("controller retries dirty-controller integration blockers after the control
     assert.equal(saved?.integrationState, "complete");
     assert.equal(saved?.integrationCommitSha, "def456");
 });
+test("controller retries terminal submodule publish blockers after retained ref or policy recovery", async () => {
+    const reason = "submodule publish blocked: repos/goal-runner: submodule URL https://github.com/a5345534/goal-runner.git is not in trustedSubmoduleUrlPatterns; cannot publish retained ref";
+    const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", workspaceStrategy: "native-git-worktree" }]);
+    await runtime.saveGoalDagNode({
+        ...await runtime.getGoalDagNode("goal-1", "build"),
+        status: "blockedTerminal",
+        lifecyclePhase: "terminal",
+        updatedAt: now,
+        lastValidationSummary: `blockedTerminal: recovery retries exhausted (2/2). ${reason}`,
+    });
+    await runtime.saveGoalSubagent(subagent({
+        status: "blockedTerminal",
+        workspacePath: "/repo/.worktrees/build",
+        branch: "feat/build",
+        commitSha: "abc123",
+        integrationState: "failed",
+        integrationStatus: `blockedTerminal: recovery retries exhausted (2/2). ${reason}`,
+        integrationError: reason,
+        controllerValidationResults: ["Controller validation passed (1 signal(s))."],
+        retryCount: 2,
+        lastActivityAt: now,
+        updatedAt: now,
+    }));
+    const adapter = new FakeSubagentAdapter();
+    const early = await runtime.runGoalControllerTick("goal-1", {
+        adapter,
+        now: "2026-06-02T00:00:30.000Z",
+        integrator: () => {
+            throw new Error("integrator should not run before cooldown");
+        },
+    });
+    assert.equal(early.completed.length, 0);
+    assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "blockedTerminal");
+    const retried = await runtime.runGoalControllerTick("goal-1", {
+        adapter,
+        now: "2026-06-02T00:02:00.000Z",
+        integrator: () => ({
+            status: "complete",
+            summary: "integrated after retained ref became available",
+            sourceHead: "abc123",
+            integrationCommitSha: "def456",
+        }),
+    });
+    assert.equal(retried.completed.length, 1);
+    assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "complete");
+    const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
+    assert.equal(saved?.status, "complete");
+    assert.equal(saved?.integrationState, "complete");
+    assert.equal(saved?.integrationCommitSha, "def456");
+    assert.match(saved?.integrationStatus ?? "", /integrated after retained ref became available/);
+});
+test("controller leaves non-retryable terminal blockers terminal", async () => {
+    const reason = "blockedTerminal: recovery retries exhausted (2/2). human approval required";
+    const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", workspaceStrategy: "native-git-worktree" }]);
+    await runtime.saveGoalDagNode({
+        ...await runtime.getGoalDagNode("goal-1", "build"),
+        status: "blockedTerminal",
+        lifecyclePhase: "terminal",
+        updatedAt: now,
+        lastValidationSummary: reason,
+    });
+    await runtime.saveGoalSubagent(subagent({
+        status: "blockedTerminal",
+        integrationState: "failed",
+        integrationStatus: reason,
+        integrationError: reason,
+        controllerValidationResults: ["Controller validation passed (1 signal(s))."],
+        retryCount: 2,
+        updatedAt: now,
+    }));
+    const adapter = new FakeSubagentAdapter();
+    const tick = await runtime.runGoalControllerTick("goal-1", {
+        adapter,
+        now: "2026-06-02T00:20:00.000Z",
+        integrator: () => {
+            throw new Error("integrator should not run for non-retryable blockers");
+        },
+    });
+    assert.equal(tick.completed.length, 0);
+    assert.equal(tick.followups.length, 0);
+    assert.equal(tick.blocked.length, 0);
+    assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "blockedTerminal");
+    assert.equal((await runtime.getGoalSubagent("goal-1", "subagent-1"))?.status, "blockedTerminal");
+});
 test("controller does not prompt blocked subagents for provider quota blockers", async () => {
     const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
     await runtime.saveGoalDagNode({

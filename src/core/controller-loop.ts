@@ -1251,6 +1251,12 @@ async function reconcileSubagentOutcomes(
       continue;
     }
 
+    if (subagent.status === "blockedTerminal") {
+      const integrationRetried = await tryRetryBlockedIntegration(runtime, options, state, node, subagent, result, tickStartedAt);
+      if (integrationRetried) continue;
+      continue;
+    }
+
     if (subagent.status === "failed") {
       const state = await runtime.getGoalOrchestrationState(goalId);
       const restartedInterruptedReplacement = await tryRestartInterruptedValidationCappedReplacement(runtime, options, state, node, subagent, result, tickStartedAt);
@@ -1970,7 +1976,7 @@ async function tryRetryBlockedIntegration(
   if (!options.integrator) return false;
   if (subagent.integrationState !== "failed") return false;
   const reason = subagent.integrationError ?? subagent.integrationStatus ?? node.lastValidationSummary ?? "integration failed";
-  if (!isControllerWorkspaceDirtyIntegrationBlocker(reason)) return false;
+  if (!isRetryableIntegrationBlocker(reason)) return false;
   const ageMs = ageSince(subagent.updatedAt, tickStartedAt);
   if (ageMs < INTEGRATION_RETRY_COOLDOWN_MS) return false;
 
@@ -1993,10 +1999,14 @@ async function tryRetryBlockedIntegration(
   return true;
 }
 
-function isControllerWorkspaceDirtyIntegrationBlocker(reason: string): boolean {
+function isRetryableIntegrationBlocker(reason: string): boolean {
   return (
     /controller workspace has uncommitted changes; cannot (?:integrate|promote) safely/i.test(reason) ||
-    /controller workspace is not inside a Git repository/i.test(reason)
+    /controller workspace is not inside a Git repository/i.test(reason) ||
+    /submodule publish blocked/i.test(reason) ||
+    /trustedSubmoduleUrlPatterns/i.test(reason) ||
+    /not on any durable remote ref/i.test(reason) ||
+    /retained ref/i.test(reason)
   );
 }
 
