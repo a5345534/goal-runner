@@ -1778,15 +1778,17 @@ function buildExecutionPlanCompactColumns(width: number): number[] {
 }
 
 function formatExecutionPlanStatusLabel(node: GoalDagNode | undefined, displayState: string): string {
-  if (node?.status === "superseded") return "SKIPPED";
-  if (node?.status === "failed") return "FAILED";
-  if (node?.status === "blockedTerminal" || node?.status === "blocked") return displayState === "recovering" ? "RECOVERING" : "BLOCKED";
-  if (node?.status === "complete") return "COMPLETED";
-  if (node?.status === "controllerValidating" || displayState === "validating") return "VALIDATING";
+  const nodeStatus = node?.status as string | undefined;
+  if (nodeStatus === "superseded") return "SKIPPED";
+  if (nodeStatus === "cancelled" || nodeStatus === "canceled") return "CANCELLED";
+  if (nodeStatus === "complete") return "COMPLETED";
   if (displayState === "recovering") return "RECOVERING";
-  if (node?.status === "running" || displayState === "running") return "RUNNING";
-  if (node?.status === "ready" || displayState === "ok") return "READY";
-  if (node?.status === "needsFollowup" || displayState === "needsFollowup") return "WAITING";
+  if (nodeStatus === "failed") return "FAILED";
+  if (nodeStatus === "blockedTerminal" || nodeStatus === "blocked") return "BLOCKED";
+  if (nodeStatus === "controllerValidating" || displayState === "validating") return "VALIDATING";
+  if (nodeStatus === "running" || displayState === "running") return "RUNNING";
+  if (nodeStatus === "ready" || displayState === "ok") return "READY";
+  if (nodeStatus === "needsFollowup" || displayState === "needsFollowup") return "WAITING";
   return "PENDING";
 }
 

@@ -237,6 +237,10 @@ test("goal monitor execution plan uses aligned wide-row headers and status-row i
         nodeId: "node-failed",
         slug: "失败节点",
     };
+    const failedRecoveringNode = {
+        nodeId: "node-failed-recovering",
+        slug: "失败恢复节点",
+    };
     const nodes = [
         dagNode({
             ...completeNode,
@@ -275,17 +279,25 @@ test("goal monitor execution plan uses aligned wide-row headers and status-row i
             updatedAt: "2026-05-31T00:00:22.000Z",
         }),
         dagNode({
+            ...failedRecoveringNode,
+            status: "failed",
+            modelArg: "provider-zeta/o4-mini",
+            lastValidationSummary: "terminal validation failed; retry queued",
+            lastRecoveryDecision: {
+                action: "sendPromptToSameSession",
+                reason: "simulated recovery signal",
+                at: "2026-05-31T00:00:28.000Z",
+                retryCount: 0,
+                maxRetries: 2,
+            },
+            createdAt: "2026-05-31T00:00:26.000Z",
+            updatedAt: "2026-05-31T00:00:28.000Z",
+        }),
+        dagNode({
             ...failedNode,
             status: "failed",
             modelArg: "provider-epsilon/o3-mini",
             lastValidationSummary: "terminal validation failed",
-            lastRecoveryDecision: {
-                action: "sendPromptToSameSession",
-                reason: "simulated recovery signal",
-                at: "2026-05-31T00:00:32.000Z",
-                retryCount: 0,
-                maxRetries: 2,
-            },
             createdAt: "2026-05-31T00:00:30.000Z",
             updatedAt: "2026-05-31T00:00:32.000Z",
         }),
@@ -325,8 +337,9 @@ test("goal monitor execution plan uses aligned wide-row headers and status-row i
     const running = byNode.get(runningNode.slug);
     const recovering = byNode.get(recoveringNode.slug);
     const blocked = byNode.get(blockedNode.slug);
+    const failedRecovering = byNode.get(failedRecoveringNode.slug);
     const failed = byNode.get(failedNode.slug);
-    assert.ok(complete && running && recovering && blocked && failed);
+    assert.ok(complete && running && recovering && blocked && failedRecovering && failed);
     assert.equal(complete.icon, "✓");
     assert.equal(complete.status, "COMPLETED");
     assert.equal(running.icon, "▶");
@@ -335,6 +348,8 @@ test("goal monitor execution plan uses aligned wide-row headers and status-row i
     assert.equal(recovering.status, "RECOVERING");
     assert.equal(blocked.icon, "⚠");
     assert.equal(blocked.status, "BLOCKED");
+    assert.equal(failedRecovering.icon, "↻");
+    assert.equal(failedRecovering.status, "RECOVERING");
     assert.equal(failed.icon, "✕");
     assert.equal(failed.status, "FAILED");
     const statusStarts = rowLines.map((line) => {
@@ -1447,6 +1462,19 @@ test("formatNodeDisplayState returns correct states", () => {
     // Blocked node.
     const blockedSub = subagent({ nodeId: "n1", status: "blocked" });
     assert.equal(formatNodeDisplayState(dagNode({ nodeId: "n1", status: "blocked" }), [blockedSub]), "blocked");
+    // Failed nodes recover only when an active node-specific retry/recovery signal exists.
+    assert.equal(formatNodeDisplayState(dagNode({ nodeId: "n1", status: "failed" }), []), "blocked");
+    assert.equal(formatNodeDisplayState(dagNode({
+        nodeId: "n1",
+        status: "failed",
+        lastRecoveryDecision: {
+            action: "sendPromptToSameSession",
+            reason: "retry queued",
+            at: "2026-05-31T00:00:32.000Z",
+            retryCount: 0,
+            maxRetries: 2,
+        },
+    }), []), "recovering");
     // Idle/planned node.
     assert.equal(formatNodeDisplayState(dagNode({ nodeId: "n1", status: "planned" }), []), "pending");
 });

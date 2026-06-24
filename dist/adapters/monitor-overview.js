@@ -301,7 +301,7 @@ export function formatNodeDisplayState(node, subagents) {
     const nodeSubs = subagents.filter((s) => s.nodeId === node.nodeId);
     // Terminal-ish states first.
     if (node.status === "failed") {
-        return "blocked";
+        return hasNodeRecoverySignal(node, nodeSubs) ? "recovering" : "blocked";
     }
     if (node.status === "blocked") {
         return hasNodeRecoverySignal(node, nodeSubs) ? "recovering" : "blocked";

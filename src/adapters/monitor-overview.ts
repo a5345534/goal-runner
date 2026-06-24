@@ -435,7 +435,7 @@ export function formatNodeDisplayState(
 
   // Terminal-ish states first.
   if (node.status === "failed") {
-    return "blocked";
+    return hasNodeRecoverySignal(node, nodeSubs) ? "recovering" : "blocked";
   }
   if (node.status === "blocked") {
     return hasNodeRecoverySignal(node, nodeSubs) ? "recovering" : "blocked";
