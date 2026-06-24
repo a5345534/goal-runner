@@ -1462,7 +1462,7 @@ function formatNodeMonitorModel(
   const candidates = [
     node.modelArg,
     node.preparedResources?.modelArg,
-    node.controllerModelArg,
+    (node as { controllerModelArg?: string }).controllerModelArg,
   ];
 
   const normalizedCandidates = dedupeModelCandidates(candidates, { stripProvider: options.stripProvider });
@@ -1484,11 +1484,42 @@ function dedupeModelCandidates(
   rawCandidates: Array<string | undefined>,
   options: { stripProvider?: boolean },
 ): string[] {
-  const values = rawCandidates
-    .map((candidate) => cleanModelArg(candidate, options))
-    .filter((candidate): candidate is string => Boolean(candidate));
-  const unique = new Set(values);
-  return [...unique];
+  const prepared = rawCandidates
+    .map((rawCandidate) => {
+      const normalized = cleanModelArg(rawCandidate, options);
+      if (!normalized) return undefined;
+      return {
+        normalized,
+        raw: (rawCandidate ?? "").trim(),
+      };
+    })
+    .filter((value): value is { normalized: string; raw: string } => Boolean(value));
+
+  if (prepared.length === 0) return [];
+
+  if (!options.stripProvider) {
+    const unique = new Set(prepared.map((value) => value.normalized));
+    return [...unique];
+  }
+
+  const uniquePairs = new Map<string, { normalized: string; raw: string }>();
+  const collisionCounts = new Map<string, number>();
+
+  for (const value of prepared) {
+    const dedupeKey = `${value.raw}\0${value.normalized}`;
+    if (uniquePairs.has(dedupeKey)) continue;
+    uniquePairs.set(dedupeKey, value);
+    collisionCounts.set(value.normalized, (collisionCounts.get(value.normalized) ?? 0) + 1);
+  }
+
+  const collisionIndexes = new Map<string, number>();
+  return [...uniquePairs.values()].map((value) => {
+    const count = collisionCounts.get(value.normalized) ?? 1;
+    if (count <= 1) return value.normalized;
+    const index = (collisionIndexes.get(value.normalized) ?? 0) + 1;
+    collisionIndexes.set(value.normalized, index);
+    return `${value.normalized}(${index})`;
+  });
 }
 
 function cleanModelArg(
@@ -1655,7 +1686,7 @@ function renderExecutionPlanSection(
         "NOTE",
       ], wideColumns)),
       width,
-    );
+    ));
   } else {
     const compactColumns = buildExecutionPlanCompactColumns(width);
     lines.push(truncateToWidth(

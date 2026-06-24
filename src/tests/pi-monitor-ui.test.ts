@@ -104,6 +104,28 @@ function subagent(overrides: Partial<GoalSubagentRecord> = {}): GoalSubagentReco
 
 const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 
+function parseExecutionPlanRow(line: string, header: string): {
+  icon: string;
+  nodeId: string;
+  status: string;
+  model: string;
+  time: string;
+  note: string;
+} {
+  const columns = line
+    .replace(/\x1b\[[0-9;]*m/g, "")
+    .trim()
+    .split(/\s{2,}/);
+
+  return {
+    icon: columns[0] ?? "",
+    nodeId: columns[1] ?? "",
+    status: columns[2] ?? "",
+    model: columns[3] ?? "",
+    time: columns[4] ?? "",
+    note: columns[5] ?? "",
+  };
+}
 // ── Basic controller tests ──
 
 test("goal monitor escape closes without lifecycle action", () => {
@@ -283,22 +305,178 @@ test("goal monitor starts at controller row with explicit nodeList operation", (
   assert.match(rendered, /> \[controller\].*ops: \[nodes\].*pause.*resume.*clear/);
 });
 
-test("goal monitor execution plan uses aligned wide-row columns", () => {
+test("goal monitor execution plan uses aligned wide-row headers and status-row icons", () => {
   const now = new Date("2026-05-31T00:10:00.000Z");
+  const completeNode = {
+    nodeId: "node-complete",
+    slug: "完成节点",
+  };
+  const runningNode = {
+    nodeId: "node-running",
+    slug: "运行节点",
+  };
+  const recoveringNode = {
+    nodeId: "node-recover",
+    slug: "恢复节点",
+  };
+  const blockedNode = {
+    nodeId: "node-blocked",
+    slug: "阻塞节点",
+  };
+  const failedNode = {
+    nodeId: "node-failed",
+    slug: "失败节点",
+  };
+
   const nodes: ReturnType<typeof dagNode>[] = [
     dagNode({
-      nodeId: "backend-read-apis-node",
-      slug: "backend-read-apis",
-      status: "planned",
-      lifecyclePhase: "runnerActive",
+      ...completeNode,
+      status: "complete",
+      modelArg: "provider-alpha/gpt-4o",
+      createdAt: "2026-05-31T00:00:00.000Z",
+      updatedAt: "2026-05-31T00:01:00.000Z",
+    }),
+    dagNode({
+      ...runningNode,
+      status: "running",
+      modelArg: "provider-beta/gpt-4-mini",
+      createdAt: "2026-05-31T00:00:10.000Z",
+      updatedAt: "2026-05-31T00:00:11.000Z",
+    }),
+    dagNode({
+      ...recoveringNode,
+      status: "blocked",
+      modelArg: "provider-gamma/gemini-pro",
+      createdAt: "2026-05-31T00:00:15.000Z",
+      updatedAt: "2026-05-31T00:00:16.000Z",
+      lastRecoveryDecision: {
+        action: "sendPromptToSameSession",
+        reason: "simulated recovery signal",
+        at: "2026-05-31T00:00:16.000Z",
+        retryCount: 0,
+        maxRetries: 2,
+      },
+    }),
+    dagNode({
+      ...blockedNode,
+      status: "blocked",
+      modelArg: "provider-delta/claude-3",
+      lastValidationSummary: "controller validation failed: temporary",
+      createdAt: "2026-05-31T00:00:20.000Z",
+      updatedAt: "2026-05-31T00:00:22.000Z",
+    }),
+    dagNode({
+      ...failedNode,
+      status: "failed",
+      modelArg: "provider-epsilon/o3-mini",
+      lastValidationSummary: "terminal validation failed",
+      lastRecoveryDecision: {
+        action: "sendPromptToSameSession",
+        reason: "simulated recovery signal",
+        at: "2026-05-31T00:00:32.000Z",
+        retryCount: 0,
+        maxRetries: 2,
+      },
+      createdAt: "2026-05-31T00:00:30.000Z",
+      updatedAt: "2026-05-31T00:00:32.000Z",
+    }),
+  ];
+
+  const controller = new GoalMonitorController(
+    summary("active"),
+    () => ({ lines: ["controller-tail"], entryCount: 1, messageCount: 1 }),
+    () => ({
+      nodes,
+      subagents: [
+        subagent({
+          nodeId: runningNode.nodeId,
+          subagentId: "subagent-running",
+          status: "running",
+          createdAt: "2026-05-31T00:00:10.000Z",
+          updatedAt: "2026-05-31T00:00:10.000Z",
+          lastActivityAt: "2026-05-31T00:00:10.000Z",
+        }),
+      ],
+      refreshedAt: now.toISOString(),
+    }),
+    () => now,
+  );
+
+  const rendered = controller.render(220, theme).join("\n").split("\n");
+  const execIndex = rendered.findIndex((line) => line === "EXECUTION PLAN");
+  assert.ok(execIndex >= 0, "execution plan heading exists");
+
+  const headerLine = rendered[execIndex + 1];
+  assert.match(headerLine ?? "", /ICON\s+NODE ID/);
+  assert.match(headerLine ?? "", /STATUS/);
+  assert.match(headerLine ?? "", /MODEL/);
+  assert.match(headerLine ?? "", /TIME/);
+  assert.match(headerLine ?? "", /NOTE/);
+
+  const statusStart = (headerLine ?? "").indexOf("STATUS");
+  const modelStart = (headerLine ?? "").indexOf("MODEL");
+  const timeStart = (headerLine ?? "").indexOf("TIME");
+  const noteStart = (headerLine ?? "").indexOf("NOTE");
+
+  const rowLines = rendered.slice(execIndex + 2, execIndex + 2 + nodes.length);
+  assert.equal(rowLines.length, nodes.length);
+  const rows = rowLines.map((line) => parseExecutionPlanRow(line, headerLine ?? ""));
+  const byNode = new Map(rows.map((row) => [row.nodeId, row]));
+
+  const complete = byNode.get(completeNode.slug);
+  const running = byNode.get(runningNode.slug);
+  const recovering = byNode.get(recoveringNode.slug);
+  const blocked = byNode.get(blockedNode.slug);
+  const failed = byNode.get(failedNode.slug);
+  assert.ok(complete && running && recovering && blocked && failed);
+
+  assert.equal(complete.icon, "✓");
+  assert.equal(complete.status, "complete");
+  assert.equal(running.icon, "▶");
+  assert.equal(running.status, "running");
+  assert.equal(recovering.icon, "⟳");
+  assert.equal(recovering.status, "blocked");
+  assert.equal(blocked.icon, "✖");
+  assert.equal(blocked.status, "blocked");
+  assert.equal(failed.icon, "✖");
+  assert.equal(failed.status, "failed");
+
+  const statusStarts = rowLines.map((line) => {
+    const start = line.slice(statusStart).search(/\S/);
+    return start >= 0 ? start + statusStart : -1;
+  });
+  const timeStarts = rowLines.map((line) => {
+    const start = line.slice(timeStart).search(/\S/);
+    return start >= 0 ? start + timeStart : -1;
+  });
+  const noteStarts = rowLines.map((line) => {
+    const start = line.slice(noteStart).search(/\S/);
+    return start >= 0 ? start + noteStart : -1;
+  });
+  assert.equal(new Set(statusStarts).size, 1);
+  assert.equal(new Set(timeStarts).size, 1);
+  assert.equal(new Set(noteStarts).size, 1);
+
+  for (const row of rows) {
+    assert.doesNotMatch(row.model, /\//);
+  }
+});
+
+test("goal monitor execution plan compact mode shows execution rows and model short names", () => {
+  const nodes: ReturnType<typeof dagNode>[] = [
+    dagNode({
+      nodeId: "compact-running-node",
+      slug: "compact-running-node",
+      status: "running",
+      modelArg: "provider-openai/gpt-5",
       createdAt: "2026-05-31T00:00:00.000Z",
       updatedAt: "2026-05-31T00:00:01.000Z",
     }),
     dagNode({
-      nodeId: "controller-validate-results",
-      slug: "controller-validate-results",
-      status: "running",
-      lifecyclePhase: "validating",
+      nodeId: "compact-complete-node",
+      slug: "compact-complete-node",
+      status: "complete",
+      modelArg: "provider-openai/gpt-5.3",
       createdAt: "2026-05-31T00:01:00.000Z",
       updatedAt: "2026-05-31T00:01:30.000Z",
     }),
@@ -309,22 +487,97 @@ test("goal monitor execution plan uses aligned wide-row columns", () => {
     () => ({ lines: ["controller-tail"], entryCount: 1, messageCount: 1 }),
     () => ({
       nodes,
-      subagents: [],
-      refreshedAt: now.toISOString(),
+      subagents: [
+        subagent({
+          nodeId: "compact-running-node",
+          subagentId: "subagent-compact",
+          status: "running",
+          createdAt: "2026-05-31T00:00:01.000Z",
+          updatedAt: "2026-05-31T00:00:01.000Z",
+          lastActivityAt: "2026-05-31T00:00:01.000Z",
+        }),
+      ],
+      refreshedAt: "2026-05-31T00:05:00.000Z",
     }),
-    () => now,
   );
 
-  const rendered = controller.render(150, theme).join("\n").split("\n");
+  const rendered = controller.render(90, theme).join("\n").split("\n");
   const execIndex = rendered.findIndex((line) => line === "EXECUTION PLAN");
-  assert.ok(execIndex >= 0, "execution plan heading exists");
-  const dataLines = rendered.slice(execIndex + 1, execIndex + 1 + nodes.length);
+  const rowLines = rendered.slice(execIndex + 2, execIndex + 4);
 
-  assert.equal(dataLines.length, 2);
-  const ageColumns = dataLines.map((line) => line.indexOf("age"));
-  assert.equal(ageColumns[0], ageColumns[1]);
-  assert.match(dataLines[0] ?? "", /age/);
-  assert.match(dataLines[0] ?? "", /phase/);
+  assert.equal(rowLines.filter((line) => line.trim().startsWith("▶") || line.trim().startsWith("✓")).length, 2);
+
+  const headerLine = rendered[execIndex + 1] ?? "";
+  const rows = rowLines.map((line) => parseExecutionPlanRow(line, headerLine));
+  assert.equal(rows[0]?.status, "running");
+  assert.equal(rows[1]?.status, "complete");
+  assert.equal(rows[0]?.model, "gpt-5");
+  assert.equal(rows[1]?.model, "gpt-5.3");
+});
+
+test("goal monitor execution plan strips provider prefixes and formats mixed/collision model labels", () => {
+  const nodes: ReturnType<typeof dagNode>[] = [
+    dagNode({
+      nodeId: "mixed-node",
+      slug: "mixed-node",
+      status: "running",
+      modelArg: "provider-a/g4",
+      preparedResources: {
+        modelArg: "provider-b/c3",
+      },
+      createdAt: "2026-05-31T00:00:00.000Z",
+      updatedAt: "2026-05-31T00:00:01.000Z",
+    }),
+    dagNode({
+      nodeId: "collision-node",
+      slug: "collision-node",
+      status: "running",
+      modelArg: "provider-a/x",
+      preparedResources: {
+        modelArg: "provider-b/x",
+      },
+      createdAt: "2026-05-31T00:00:10.000Z",
+      updatedAt: "2026-05-31T00:00:11.000Z",
+    }),
+  ];
+
+  const controller = new GoalMonitorController(
+    summary("active"),
+    () => ({ lines: ["controller-tail"], entryCount: 1, messageCount: 1 }),
+    () => ({
+      nodes,
+      subagents: [
+        subagent({
+          nodeId: "mixed-node",
+          subagentId: "subagent-mixed",
+          status: "running",
+          createdAt: "2026-05-31T00:00:01.000Z",
+          updatedAt: "2026-05-31T00:00:01.000Z",
+          lastActivityAt: "2026-05-31T00:00:01.000Z",
+        }),
+      ],
+      refreshedAt: "2026-05-31T00:10:00.000Z",
+    }),
+  );
+
+  const rendered = controller.render(200, theme).join("\n").split("\n");
+  const execIndex = rendered.findIndex((line) => line === "EXECUTION PLAN");
+  const headerLine = rendered[execIndex + 1] ?? "";
+  const dataRows = rendered.slice(execIndex + 2, execIndex + 4);
+  const rows = dataRows.map((line) => parseExecutionPlanRow(line, headerLine));
+
+  const mixed = rows.find((row) => row.nodeId === "mixed-node");
+  const collision = rows.find((row) => row.nodeId === "collision-node");
+  assert.ok(mixed && collision);
+
+  assert.equal(mixed.model, "mixed 2: g4,c3");
+  assert.match(collision.model, /mixed 2:/);
+  assert.doesNotMatch(collision.model, /provider-/);
+  assert.doesNotMatch(collision.model, /\//);
+  assert.match(collision.model, /x\(2\)/);
+  assert.match(collision.model, /[…]/);
+  assert.doesNotMatch(mixed.model, /\//);
+  assert.doesNotMatch(collision.model, /\//);
 });
 
 test("goal monitor controller live pane renders durable controller history events", () => {
@@ -433,13 +686,12 @@ test("goal monitor enters node list with empty live pane and node row runnerList
   controller.handleInput("\r"); // confirm controller nodeList operation.
   const rendered = controller.render(140, theme).join("\n");
 
-  assert.match(rendered, /ops: \[runners(?:\([^\)]*\))?\]/);
+  assert.match(rendered, /ops: \[runners/);
   assert.match(rendered, /LIVE: Node list mode/);
   assert.match(rendered, /selected node:/);
   assert.match(rendered, /runtime:/);
   assert.match(rendered, /phase [a-z]+/);
-  assert.match(rendered, /last /);
-  assert.match(rendered, /ops: \[runners(?:\([^\)]*\))?\]/);
+  assert.match(rendered, /ops: \[runners/);
   assert.doesNotMatch(rendered, /updated=/);
   assert.doesNotMatch(rendered, /controller-tail/);
   assert.match(rendered, /LIST: Nodes 1\/1/);
@@ -624,7 +876,7 @@ test("goal monitor back navigation returns runner list to nodes to controller sc
   assert.match(controller.render(140, theme).join("\n"), /ops: \[view\]/);
 
   controller.handleInput("b");
-  assert.match(controller.render(140, theme).join("\n"), /ops: \[runners(?:\([^\)]*\))?\]/);
+  assert.match(controller.render(140, theme).join("\n"), /ops: \[runners/);
 
   controller.handleInput("\x7f");
   assert.match(controller.render(140, theme).join("\n"), /ops: \[nodes\]/);
@@ -649,7 +901,7 @@ test("goal monitor scrolls overflowing node list after entering node scope", () 
   controller.render(140, theme);
   controller.handleInput("\r"); // nodeList
   const firstPage = controller.render(140, theme).join("\n");
-  assert.match(firstPage, /ops: \[\s*runners(?:\([^\)]*\))?\s*\]/);
+  assert.match(firstPage, /ops: \[\s*runners/);
   assert.doesNotMatch(firstPage, /Rows:/);
   assert.doesNotMatch(firstPage, /dag-node-20/);
 
@@ -1590,7 +1842,7 @@ test("Pi: actions display user-facing labels but return existing operation IDs",
   // Verify that confirmed operations still return raw IDs.
   // Controller row: first internal op is "nodeList", which navigates.
   controller.handleInput("\r"); // confirm "nodes" → enters node list
-  assert.match(controller.render(140, theme).join("\n"), /ops: \[runners(?:\([^\)]*\))?\]/);
+  assert.match(controller.render(140, theme).join("\n"), /ops: \[runners/);
 
   // Go back, select pause action (it's the first action after nodeList).
   controller.handleInput("b");
@@ -1655,7 +1907,7 @@ test("formatNodeDisplayState returns correct states", () => {
   assert.equal(formatNodeDisplayState(dagNode({ nodeId: "n1", status: "blocked" }), [blockedSub]), "blocked");
 
   // Idle/planned node.
-  assert.equal(formatNodeDisplayState(dagNode({ nodeId: "n1", status: "planned" }), []), "idle");
+  assert.equal(formatNodeDisplayState(dagNode({ nodeId: "n1", status: "planned" }), []), "pending");
 });
 
 test("formatRuntimeSummaryForOverview uses user-facing labels", () => {

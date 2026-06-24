@@ -65,8 +65,8 @@ export declare function summarizeMonitorProblem(goal: GoalSummary, nodes: GoalDa
  */
 export declare function formatRuntimeSummaryForOverview(summary: GoalMonitorRuntimeSummary): string;
 /**
- * Derive a display state for a DAG node based on its own status and
- * the status of its associated subagents.
+ * Derive a display state for a DAG node based on its own status and the
+ * status/history of its associated subagents.
  */
 export declare function formatNodeDisplayState(node: GoalDagNode, subagents: GoalSubagentRecord[]): MonitorNodeDisplayState;
 /**

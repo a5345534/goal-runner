@@ -294,13 +294,16 @@ function formatRunnerCountLabel(runners) {
 }
 // ── Node display state ──
 /**
- * Derive a display state for a DAG node based on its own status and
- * the status of its associated subagents.
+ * Derive a display state for a DAG node based on its own status and the
+ * status/history of its associated subagents.
  */
 export function formatNodeDisplayState(node, subagents) {
     const nodeSubs = subagents.filter((s) => s.nodeId === node.nodeId);
     // Terminal-ish states first.
-    if (["blocked", "failed"].includes(node.status)) {
+    if (node.status === "failed") {
+        return "blocked";
+    }
+    if (node.status === "blocked") {
         return hasNodeRecoverySignal(node, nodeSubs) ? "recovering" : "blocked";
     }
     if (node.status === "blockedTerminal") {
@@ -310,7 +313,7 @@ export function formatNodeDisplayState(node, subagents) {
         return "ok";
     // Node is complete but subagents may have residual issues.
     if (node.status === "complete") {
-        const hasResidualIssues = nodeSubs.some((s) => isUnresolvedResidualIssue(s, subagents));
+        const hasResidualIssues = nodeSubs.some((s) => isUnresolvedResidualIssue(s, nodeSubs));
         return hasResidualIssues ? "warning" : "complete";
     }
     // Validate/retry state takes priority where evidence is present.

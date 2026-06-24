@@ -101,14 +101,14 @@ function isWideDisplayChar(char) {
     const codePoint = char.codePointAt(0);
     if (codePoint === undefined)
         return false;
-    return (0x1100 <= codePoint && codePoint <= 0x115f)
+    return ((0x1100 <= codePoint && codePoint <= 0x115f)
         || (0x2e80 <= codePoint && codePoint <= 0xa4cf && codePoint !== 0x303f)
         || (0xac00 <= codePoint && codePoint <= 0xd7a3)
         || (0xf900 <= codePoint && codePoint <= 0xfaff)
         || (0xfe30 <= codePoint && codePoint <= 0xfe6f)
         || (0xff00 <= codePoint && codePoint <= 0xff60)
         || (0xffe0 <= codePoint && codePoint <= 0xffe6)
-        || (0x20000 <= codePoint && codePoint <= 0x3fffd);
+        || (0x20000 <= codePoint && codePoint <= 0x3fffd));
 }
 function deriveSessionState(goal, harness) {
     if (harness) {
@@ -1193,11 +1193,41 @@ function formatNodeMonitorModel(node, _subagents = [], options = {}) {
     return formatMonitorModel(scenario, model, options.stripProvider ? undefined : thinkingLevel);
 }
 function dedupeModelCandidates(rawCandidates, options) {
-    const values = rawCandidates
-        .map((candidate) => cleanModelArg(candidate, options))
-        .filter((candidate) => Boolean(candidate));
-    const unique = new Set(values);
-    return [...unique];
+    const prepared = rawCandidates
+        .map((rawCandidate) => {
+        const normalized = cleanModelArg(rawCandidate, options);
+        if (!normalized)
+            return undefined;
+        return {
+            normalized,
+            raw: (rawCandidate ?? "").trim(),
+        };
+    })
+        .filter((value) => Boolean(value));
+    if (prepared.length === 0)
+        return [];
+    if (!options.stripProvider) {
+        const unique = new Set(prepared.map((value) => value.normalized));
+        return [...unique];
+    }
+    const uniquePairs = new Map();
+    const collisionCounts = new Map();
+    for (const value of prepared) {
+        const dedupeKey = `${value.raw}\0${value.normalized}`;
+        if (uniquePairs.has(dedupeKey))
+            continue;
+        uniquePairs.set(dedupeKey, value);
+        collisionCounts.set(value.normalized, (collisionCounts.get(value.normalized) ?? 0) + 1);
+    }
+    const collisionIndexes = new Map();
+    return [...uniquePairs.values()].map((value) => {
+        const count = collisionCounts.get(value.normalized) ?? 1;
+        if (count <= 1)
+            return value.normalized;
+        const index = (collisionIndexes.get(value.normalized) ?? 0) + 1;
+        collisionIndexes.set(value.normalized, index);
+        return `${value.normalized}(${index})`;
+    });
 }
 function cleanModelArg(rawModel, options) {
     if (!rawModel)
@@ -1404,10 +1434,7 @@ function buildExecutionPlanWideColumns(width) {
 function buildExecutionPlanCompactColumns(width) {
     const iconWidth = 4;
     const statusWidth = 10;
-    const modelWidth = width <= 70
-        ? Math.max(8, width - iconWidth - statusWidth - 6 - Math.max(10, Math.floor((width - iconWidth - statusWidth - 6) * 0.35))
-        )
-        : 16;
+    const modelWidth = width <= 70 ? Math.max(8, width - iconWidth - statusWidth - 6 - Math.max(10, Math.floor((width - iconWidth - statusWidth - 6) * 0.35))) : 16;
     const nodeWidth = Math.max(10, width - iconWidth - statusWidth - modelWidth - 6);
     return [iconWidth, nodeWidth, statusWidth, modelWidth];
 }
