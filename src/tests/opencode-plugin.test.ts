@@ -346,6 +346,8 @@ test("opencode adapter /goal --dag loads the file and plans from it", async () =
       ],
     }),
   );
+  git(workspace, ["add", "people-frappe.dag.json"]);
+  git(workspace, ["commit", "-m", "add dag"]);
   const client = makeClient();
   setOpencodeClientForTests(client);
   const launched: OpencodeBackgroundSessionLaunchRequest[] = [];

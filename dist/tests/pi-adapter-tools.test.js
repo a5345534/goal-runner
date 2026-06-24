@@ -1394,6 +1394,8 @@ test("goal-owned /goal --dag start does not trigger foreground hidden continuati
         objective: "ship feature",
         nodes: [{ id: "node-1", objective: "Implement feature" }],
     }));
+    git(workspace, ["add", "test.dag.json"]);
+    git(workspace, ["commit", "-m", "add dag"]);
     let commandHandler;
     const handlers = new Map();
     const launched = [];

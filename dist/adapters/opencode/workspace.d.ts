@@ -1,1 +1,1 @@
-export { parseGoalWorkspaceFlags, resolveWorkspaceBinding, tokenize, validateExecutionWorkspace, type GoalWorkspaceFlags, type ResolvedWorkspaceBinding, type WorkspaceValidationResult, } from "../pi/workspace.js";
+export { parseGoalWorkspaceFlags, resolveWorkspaceBinding, tokenize, validateExecutionWorkspace, runExecutionWorkspacePreflightGate, type GoalWorkspaceFlags, type ResolvedWorkspaceBinding, type WorkspaceValidationResult, } from "../pi/workspace.js";

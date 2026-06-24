@@ -11,6 +11,7 @@ export {
   resolveWorkspaceBinding,
   tokenize,
   validateExecutionWorkspace,
+  runExecutionWorkspacePreflightGate,
   type GoalWorkspaceFlags,
   type ResolvedWorkspaceBinding,
   type WorkspaceValidationResult,
