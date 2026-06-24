@@ -14,6 +14,9 @@ import {
   GoalRuntime,
   MemoryGoalStore,
   NativeGitWorkspaceManager,
+  TRUSTED_SUBMODULE_URL_PATTERNS_ENV,
+  parseTrustedSubmoduleUrlPatterns,
+  resolveNativeGitCloseoutPolicy,
   slugForGoal,
   slugForGoalSubagent,
   type GoalDagNode,
@@ -1606,6 +1609,130 @@ test("submodule retained publish uses .git/modules object source", () => {
     assert.equal(result.published.length, 1);
     assert.match(result.published[0]!.durableRef, /^refs\/heads\/goal-runner\/retained\/goal-modules-source\/deps-sub-/);
     assert.ok(git("/tmp", ["ls-remote", "--refs", fixture.remote, "refs/heads/goal-runner/retained/*"]).includes(result.published[0]!.durableRef));
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("submodule retained publish trusts unchanged versioned URL for existing gitlinks", () => {
+  const fixture = createSubmoduleGitlinkFixture();
+  try {
+    git(fixture.parent, ["commit", "-m", "parent references submodule"]);
+    const submodulePath = join(fixture.parent, "deps", "sub");
+    writeFileSync(join(submodulePath, "sub.txt"), "updated but unpublished\n");
+    git(submodulePath, ["add", "sub.txt"]);
+    git(submodulePath, ["commit", "-m", "unpublished submodule update"]);
+    const nextSha = git(submodulePath, ["rev-parse", "HEAD"]);
+    git(fixture.parent, ["update-index", "--cacheinfo", `160000,${nextSha},deps/sub`]);
+
+    const result = new NativeGitWorkspaceManager({ fetch: false }).ensureSubmoduleGitlinksDurablyPublished({
+      goalId: "goal-versioned-url-trusted",
+      parentWorkspacePath: fixture.parent,
+      sourceWorkspacePaths: [fixture.parent],
+      baseTreeish: "HEAD",
+      targetTreeish: "INDEX",
+      phase: "integration",
+      policy: submodulePublishPolicy(),
+    });
+
+    assert.equal(result.status, "passed");
+    assert.equal(result.published.length, 1);
+    assert.equal(result.published[0]!.canonicalUrl, fixture.remote);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("submodule retained publish rejects changed gitmodules URL without trusted pattern", () => {
+  const fixture = createSubmoduleGitlinkFixture();
+  try {
+    git(fixture.parent, ["commit", "-m", "parent references submodule"]);
+    const evilRemote = join(fixture.root, "evil.git");
+    git(fixture.root, ["init", "--bare", evilRemote]);
+    writeFileSync(join(fixture.parent, ".gitmodules"), `[submodule "deps/sub"]\n\tpath = deps/sub\n\turl = ${evilRemote}\n`);
+    git(fixture.parent, ["add", ".gitmodules"]);
+
+    const submodulePath = join(fixture.parent, "deps", "sub");
+    writeFileSync(join(submodulePath, "sub.txt"), "updated but should not publish to changed URL\n");
+    git(submodulePath, ["add", "sub.txt"]);
+    git(submodulePath, ["commit", "-m", "unpublished submodule update"]);
+    const nextSha = git(submodulePath, ["rev-parse", "HEAD"]);
+    git(fixture.parent, ["update-index", "--cacheinfo", `160000,${nextSha},deps/sub`]);
+
+    const result = new NativeGitWorkspaceManager({ fetch: false }).ensureSubmoduleGitlinksDurablyPublished({
+      goalId: "goal-changed-url-untrusted",
+      parentWorkspacePath: fixture.parent,
+      sourceWorkspacePaths: [fixture.parent],
+      baseTreeish: "HEAD",
+      targetTreeish: "INDEX",
+      phase: "integration",
+      policy: submodulePublishPolicy(),
+    });
+
+    assert.equal(result.status, "blocked");
+    assert.match(result.blockers[0]?.reason ?? "", /not in trustedSubmoduleUrlPatterns/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("native git closeout policy resolves trusted submodule URL patterns from env", () => {
+  const policy = resolveNativeGitCloseoutPolicy(AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY, {
+    env: {
+      [TRUSTED_SUBMODULE_URL_PATTERNS_ENV]: "https://github.com/a5345534/*,\nssh://git@github.com/a5345534/*",
+    },
+  });
+
+  assert.deepEqual(AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY.trustedSubmoduleUrlPatterns, []);
+  assert.deepEqual(policy.trustedSubmoduleUrlPatterns, [
+    "https://github.com/a5345534/*",
+    "ssh://git@github.com/a5345534/*",
+  ]);
+  assert.deepEqual(parseTrustedSubmoduleUrlPatterns('["https://example.com/*", "https://example.com/*", ""]'), ["https://example.com/*"]);
+});
+
+test("submodule retained publish can use env-configured trusted URL patterns", () => {
+  const fixture = createSubmoduleGitlinkFixture({ modulesSource: true });
+  try {
+    const result = new NativeGitWorkspaceManager({ fetch: false }).ensureSubmoduleGitlinksDurablyPublished({
+      goalId: "goal-env-trusted-url",
+      parentWorkspacePath: fixture.parent,
+      sourceWorkspacePaths: [fixture.parent],
+      baseTreeish: "HEAD",
+      targetTreeish: "INDEX",
+      phase: "integration",
+      policy: resolveNativeGitCloseoutPolicy(submodulePublishPolicy(), {
+        env: {
+          [TRUSTED_SUBMODULE_URL_PATTERNS_ENV]: `${fixture.remote}*`,
+        },
+      }),
+    });
+
+    assert.equal(result.status, "passed");
+    assert.equal(result.published.length, 1);
+    assert.match(result.published[0]!.durableRef, /^refs\/heads\/goal-runner\/retained\/goal-env-trusted-url\/deps-sub-/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("submodule retained publish remains fail-closed without trusted URL patterns", () => {
+  const fixture = createSubmoduleGitlinkFixture();
+  try {
+    const result = new NativeGitWorkspaceManager({ fetch: false }).ensureSubmoduleGitlinksDurablyPublished({
+      goalId: "goal-empty-trusted-url",
+      parentWorkspacePath: fixture.parent,
+      sourceWorkspacePaths: [fixture.parent],
+      baseTreeish: "HEAD",
+      targetTreeish: "INDEX",
+      phase: "integration",
+      policy: submodulePublishPolicy({
+        submodulePublishMode: "publish-retained-ref-if-trusted",
+      }),
+    });
+
+    assert.equal(result.status, "blocked");
+    assert.match(result.blockers[0]?.reason ?? "", /not in trustedSubmoduleUrlPatterns/);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }

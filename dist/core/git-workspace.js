@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { requiredSubagentIntegrationTerminalSuccess } from "./integration.js";
+export const TRUSTED_SUBMODULE_URL_PATTERNS_ENV = "AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_URL_PATTERNS";
 export const AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY = {
     remoteCloseoutMode: "block-if-cannot-push",
     submodulePublishMode: "publish-retained-ref-if-trusted",
@@ -36,6 +37,44 @@ export const EXPLICIT_WORKSPACE_DEFAULT_CLOSEOUT_POLICY = {
     prePushCheckoutSimulation: false,
     postPushRemoteCheckoutVerification: false,
 };
+export function resolveNativeGitCloseoutPolicy(policy, options = {}) {
+    const configuredPatterns = options.trustedSubmoduleUrlPatterns
+        ?? parseTrustedSubmoduleUrlPatterns(options.env?.[TRUSTED_SUBMODULE_URL_PATTERNS_ENV]);
+    return {
+        ...policy,
+        durableRefPatterns: [...policy.durableRefPatterns],
+        trustedSubmoduleUrlPatterns: uniqueNonEmptyStrings([
+            ...policy.trustedSubmoduleUrlPatterns,
+            ...configuredPatterns,
+        ]),
+    };
+}
+export function parseTrustedSubmoduleUrlPatterns(value) {
+    if (!value?.trim())
+        return [];
+    const trimmed = value.trim();
+    if (trimmed.startsWith("[")) {
+        try {
+            const parsed = JSON.parse(trimmed);
+            if (Array.isArray(parsed))
+                return uniqueNonEmptyStrings(parsed.map((item) => String(item)));
+        }
+        catch {
+            // Fall through to delimiter parsing so malformed JSON remains non-fatal.
+        }
+    }
+    return uniqueNonEmptyStrings(trimmed.split(/[\n,]+/));
+}
+function uniqueNonEmptyStrings(values) {
+    const result = [];
+    for (const value of values) {
+        const trimmed = value.trim();
+        if (!trimmed || result.includes(trimmed))
+            continue;
+        result.push(trimmed);
+    }
+    return result;
+}
 export class NativeGitWorkspaceManager {
     options;
     constructor(options = {}) {
@@ -274,11 +313,11 @@ export class NativeGitWorkspaceManager {
                 baseTreeish: "HEAD",
                 targetTreeish: "INDEX",
                 phase: "integration",
-                policy: AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY,
+                policy: resolveNativeGitCloseoutPolicy(AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY),
             });
             if (publish.status === "blocked") {
                 abortMergeAndCleanPostMergeValidationArtifacts(controllerWorkspacePath);
-                return nativeGitIntegrationFailure(request, `submodule publish blocked: ${publish.summary}`, { sourceBranch, sourceRef, sourceHead }, `[SYSTEM FOLLOW-UP: SUBMODULE_PUBLISH_BLOCKED]\n${publish.summary}\n\nPush the referenced submodule SHAs to their remotes, or configure closeout policy to allow retained ref publish for trusted submodule URLs. Then retry integration.`, publish.blockers.map((b) => `${b.path}: ${b.reason}`));
+                return nativeGitIntegrationFailure(request, `submodule publish blocked: ${publish.summary}`, { sourceBranch, sourceRef, sourceHead }, `[SYSTEM FOLLOW-UP: SUBMODULE_PUBLISH_BLOCKED]\n${publish.summary}\n\nPush the referenced submodule SHAs to durable remote refs, or set ${TRUSTED_SUBMODULE_URL_PATTERNS_ENV} before starting a fresh controller process to allow retained-ref publish for trusted submodule URLs. Then retry integration.`, publish.blockers.map((b) => `${b.path}: ${b.reason}`));
             }
             const postMergeValidation = runPostMergeValidationIfNeeded(request, controllerWorkspacePath);
             if (!postMergeValidation.ok) {
@@ -473,8 +512,11 @@ export class NativeGitWorkspaceManager {
                 continue;
             }
             // URL trust check (only gates publish-retained-ref path)
-            if (!isSubmoduleUrlTrusted(url, gitlink, request.policy)) {
-                blockers.push({ path: gitlink.path, sha: newSha, reason: `submodule URL ${url} is not in trustedSubmoduleUrlPatterns; cannot publish retained ref` });
+            if (!isSubmoduleUrlTrusted(url, gitlink, request.policy, {
+                parentWorkspacePath: request.parentWorkspacePath,
+                baseTreeish: request.baseTreeish,
+            })) {
+                blockers.push({ path: gitlink.path, sha: newSha, reason: `submodule URL ${url} is not in trustedSubmoduleUrlPatterns; cannot publish retained ref. Configure ${TRUSTED_SUBMODULE_URL_PATTERNS_ENV} before starting a fresh controller process to trust retained-ref publishing for this URL.` });
                 continue;
             }
             // Publish retained ref
@@ -1404,16 +1446,26 @@ function scanChangedSubmoduleGitlinks(parentWorkspacePath, baseTreeish = "HEAD",
     }
     return gitlinks;
 }
-function resolveSubmoduleCanonicalUrl(parentWorkspacePath, submodulePath, _treeish = "HEAD") {
-    let config;
-    try {
-        config = readFileSync(join(parentWorkspacePath, ".gitmodules"), "utf8");
-    }
-    catch {
+function resolveSubmoduleCanonicalUrl(parentWorkspacePath, submodulePath, treeish = "HEAD") {
+    const config = readGitmodulesAtTreeish(parentWorkspacePath, treeish);
+    if (!config)
         return undefined;
-    }
     const parentRemoteUrl = safeGit(parentWorkspacePath, ["remote", "get-url", "origin"]) || undefined;
     return resolveSubmoduleUrlFromGitmodulesContent(config, submodulePath, parentRemoteUrl);
+}
+function readGitmodulesAtTreeish(parentWorkspacePath, treeish) {
+    if (!treeish || treeish === "WORKTREE") {
+        try {
+            return readFileSync(join(parentWorkspacePath, ".gitmodules"), "utf8");
+        }
+        catch {
+            return undefined;
+        }
+    }
+    if (treeish === "INDEX") {
+        return safeGit(parentWorkspacePath, ["show", ":.gitmodules"]) || undefined;
+    }
+    return safeGit(parentWorkspacePath, ["show", `${treeish}:.gitmodules`]) || undefined;
 }
 function resolveSubmoduleUrlFromGitmodulesContent(config, submodulePath, parentBaseUrl) {
     // Parse .gitmodules INI to find the section whose `path` matches submodulePath,
@@ -1491,19 +1543,28 @@ function resolveRelativeUrl(base, relative) {
     }
     return relative;
 }
-function isSubmoduleUrlTrusted(url, _gitlink, policy) {
-    // Empty allowlist = fail-closed: no URL is trusted to receive retained ref pushes.
-    // Note: verification of SHAs already on durable remote refs does NOT require trust
-    // (trust check only gates the publish-retained-ref path).
-    if (policy.trustedSubmoduleUrlPatterns.length === 0) {
-        return false;
+function isSubmoduleUrlTrusted(url, gitlink, policy, context) {
+    // Explicit allowlist patterns always allow retained-ref publishing for matching URLs.
+    if (policy.trustedSubmoduleUrlPatterns.some((pattern) => submoduleUrlMatchesPattern(url, pattern))) {
+        return true;
     }
-    return policy.trustedSubmoduleUrlPatterns.some((pattern) => {
-        if (pattern.endsWith("*")) {
-            return url.startsWith(pattern.slice(0, -1));
-        }
-        return url === pattern;
-    });
+    // Safe convenience path: for an existing submodule gitlink update, trust the URL
+    // already recorded in the versioned parent tree. This unblocks normal meta-repo
+    // submodule pointer updates without requiring operators to configure every
+    // existing submodule URL, while still failing closed for newly added submodules
+    // or .gitmodules URL changes.
+    if (context && gitlink.status === "modified" && context.baseTreeish && context.baseTreeish !== "ALL") {
+        const versionedUrl = resolveSubmoduleCanonicalUrl(context.parentWorkspacePath, gitlink.oldPath ?? gitlink.path, context.baseTreeish);
+        if (versionedUrl && versionedUrl === url)
+            return true;
+    }
+    return false;
+}
+function submoduleUrlMatchesPattern(url, pattern) {
+    if (pattern.endsWith("*")) {
+        return url.startsWith(pattern.slice(0, -1));
+    }
+    return url === pattern;
 }
 function locateSubmoduleCommitObject(sha, sourceWorkspacePaths, submodulePath) {
     for (const workspacePath of sourceWorkspacePaths) {
@@ -1713,7 +1774,7 @@ function verifyNestedSubmoduleGitlinks(request) {
                 continue;
             }
             if (!isSubmoduleUrlTrusted(nestedUrl, fullGitlink, request.policy)) {
-                result.blockers.push({ path: fullPath, sha: nestedSha, reason: `nested submodule URL ${nestedUrl} is not in trustedSubmoduleUrlPatterns; cannot publish retained ref` });
+                result.blockers.push({ path: fullPath, sha: nestedSha, reason: `nested submodule URL ${nestedUrl} is not in trustedSubmoduleUrlPatterns; cannot publish retained ref. Configure ${TRUSTED_SUBMODULE_URL_PATTERNS_ENV} before starting a fresh controller process to trust retained-ref publishing for this URL.` });
                 continue;
             }
             const pathSlug = sanitizeSlug(fullPath).slice(0, 32) || "submodule";

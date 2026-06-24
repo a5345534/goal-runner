@@ -22,6 +22,7 @@ import {
   parseTokenBudget,
   renderActiveGoalReminderPrompt,
   resolveControllerModelClass,
+  resolveNativeGitCloseoutPolicy,
   resolveDefaultStateRoot,
   resolveGoalModelForHarness,
   selectModelScenarioForNode,
@@ -1020,7 +1021,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
   let promotionStatus: ReturnType<NativeGitWorkspaceManager["promoteControllerBranch"]>["status"] = "notRequired";
   const manager = new NativeGitWorkspaceManager({ fetch: false });
   const isAutoAllocated = isAutoAllocatedPiControllerWorkspace(binding);
-  const closeoutPolicy = isAutoAllocated ? AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY : undefined;
+  const closeoutPolicy = isAutoAllocated ? resolveNativeGitCloseoutPolicy(AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY) : undefined;
   if (terminal.allComplete && terminal.integrationIssues.length === 0) {
     if (closeoutPolicy) {
       const pushTargetPreflight = manager.normalizePromotionTarget(

@@ -175,8 +175,15 @@ export interface NativeGitCloseoutPolicy {
     prePushCheckoutSimulation: boolean;
     postPushRemoteCheckoutVerification: boolean;
 }
+export interface NativeGitCloseoutPolicyResolutionOptions {
+    env?: NodeJS.ProcessEnv;
+    trustedSubmoduleUrlPatterns?: string[];
+}
+export declare const TRUSTED_SUBMODULE_URL_PATTERNS_ENV = "AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_URL_PATTERNS";
 export declare const AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY: NativeGitCloseoutPolicy;
 export declare const EXPLICIT_WORKSPACE_DEFAULT_CLOSEOUT_POLICY: NativeGitCloseoutPolicy;
+export declare function resolveNativeGitCloseoutPolicy(policy: NativeGitCloseoutPolicy, options?: NativeGitCloseoutPolicyResolutionOptions): NativeGitCloseoutPolicy;
+export declare function parseTrustedSubmoduleUrlPatterns(value: string | undefined): string[];
 export interface ChangedSubmoduleGitlink {
     path: string;
     status: "added" | "modified" | "deleted" | "renamed";

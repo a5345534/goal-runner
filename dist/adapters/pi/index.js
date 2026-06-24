@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY, GoalRuntime, NativeGitWorkspaceManager, SQLiteGoalStore, cleanupTerminalSubagentWorkspaces, createControllerValidationRunner, createNativeGitSubagentBranchIntegrator, createNativeGitSubagentWorkspaceAllocator, findRequiredSubagentIntegrationIssues, parseGoalCommand, parseGoalDagFileContent, parseGoalModelRoutingConfigJson, parseTokenBudget, renderActiveGoalReminderPrompt, resolveControllerModelClass, resolveDefaultStateRoot, resolveGoalModelForHarness, selectModelScenarioForNode, } from "../../core/index.js";
+import { AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY, GoalRuntime, NativeGitWorkspaceManager, SQLiteGoalStore, cleanupTerminalSubagentWorkspaces, createControllerValidationRunner, createNativeGitSubagentBranchIntegrator, createNativeGitSubagentWorkspaceAllocator, findRequiredSubagentIntegrationIssues, parseGoalCommand, parseGoalDagFileContent, parseGoalModelRoutingConfigJson, parseTokenBudget, renderActiveGoalReminderPrompt, resolveControllerModelClass, resolveNativeGitCloseoutPolicy, resolveDefaultStateRoot, resolveGoalModelForHarness, selectModelScenarioForNode, } from "../../core/index.js";
 import { launchPiRpcBackgroundGoalSession, } from "./background-session.js";
 import { GoalListController } from "./goal-list-ui.js";
 import { normalizePiModelArg } from "./model-args.js";
@@ -854,7 +854,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(runtime, ctx, goalId, bindi
     let promotionStatus = "notRequired";
     const manager = new NativeGitWorkspaceManager({ fetch: false });
     const isAutoAllocated = isAutoAllocatedPiControllerWorkspace(binding);
-    const closeoutPolicy = isAutoAllocated ? AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY : undefined;
+    const closeoutPolicy = isAutoAllocated ? resolveNativeGitCloseoutPolicy(AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY) : undefined;
     if (terminal.allComplete && terminal.integrationIssues.length === 0) {
         if (closeoutPolicy) {
             const pushTargetPreflight = manager.normalizePromotionTarget({ controllerWorkspacePath: binding.workspace, controllerBranch: binding.branch, targetRef: binding.promotionTargetRef }, closeoutPolicy);
