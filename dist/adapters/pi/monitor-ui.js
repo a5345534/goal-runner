@@ -531,7 +531,7 @@ export class GoalMonitorController {
         lines.push(...renderOverviewHeader(overview, runtimeSummary, width, isNarrow, theme));
         // ── EXECUTION PLAN (controller scope only) ──
         if (this.scope.kind === "controller") {
-            lines.push(...renderExecutionPlanSection(overview, dag, width, isNarrow, theme));
+            lines.push(...renderExecutionPlanSection(overview, dag, this.goal, runtimeSummary, width, isNarrow, theme));
         }
         // ── RECENT EVENTS (controller scope only, after execution plan) ──
         if (this.scope.kind === "controller" && overview.recentEvents.length > 0) {
@@ -1184,13 +1184,16 @@ function formatNodeMonitorModel(node, _subagents = [], options = {}) {
     if (normalizedCandidates.length === 0) {
         if (!options.stripProvider)
             return undefined;
-        const fallback = formatMissingNodeModelLabel(node.status, scenario);
-        return formatMonitorModel(undefined, fallback, thinkingLevel);
+        return formatMissingNodeModelLabel(node.status, scenario);
     }
     const model = normalizedCandidates.length === 1
         ? normalizedCandidates[0] ?? ""
-        : `mixed ${normalizedCandidates.length}: ${normalizedCandidates.slice(0, 2).join(",")}`;
-    return formatMonitorModel(scenario, model, options.stripProvider ? undefined : thinkingLevel);
+        : hasShortLabelCollision(normalizedCandidates)
+            ? normalizedCandidates.slice(0, 2).join(",")
+            : `mixed(${normalizedCandidates.length})`;
+    if (options.stripProvider)
+        return model || "-";
+    return formatMonitorModel(scenario, model, thinkingLevel);
 }
 function dedupeModelCandidates(rawCandidates, options) {
     const prepared = rawCandidates
@@ -1226,8 +1229,12 @@ function dedupeModelCandidates(rawCandidates, options) {
             return value.normalized;
         const index = (collisionIndexes.get(value.normalized) ?? 0) + 1;
         collisionIndexes.set(value.normalized, index);
-        return `${value.normalized}(${index})`;
+        return `${value.normalized}#${index}`;
     });
+}
+function hasShortLabelCollision(labels) {
+    const baseLabels = labels.map((label) => label.replace(/#\d+$/, ""));
+    return new Set(baseLabels).size < labels.length;
 }
 function cleanModelArg(rawModel, options) {
     if (!rawModel)
@@ -1246,14 +1253,12 @@ function cleanModelArg(rawModel, options) {
     return normalized;
 }
 function formatMissingNodeModelLabel(nodeStatus, scenario) {
-    let fallback = "not-applicable";
-    if (["planned", "ready", "needsFollowup", "selfReportedComplete"].includes(nodeStatus))
+    let fallback = "-";
+    if (["planned", "ready", "needsFollowup", "selfReportedComplete", "running", "controllerValidating"].includes(nodeStatus))
         fallback = "pending";
     if (["blocked", "failed", "blockedTerminal"].includes(nodeStatus))
         fallback = "blocked";
-    if (scenario)
-        return `${scenario} -> ${fallback}`;
-    return fallback;
+    return scenario && fallback === "-" ? "-" : fallback;
 }
 function formatMonitorModel(scenario, model, thinkingLevel) {
     const parts = [scenario, model, thinkingLevel ? `[${thinkingLevel}]` : undefined].filter((p) => Boolean(p));
@@ -1346,7 +1351,7 @@ function renderOverviewHeader(overview, _runtimeSummary, width, isNarrow, theme)
  * Render the Execution Plan section with node display states.
  * Uses compact fallback for narrow widths.
  */
-function renderExecutionPlanSection(overview, dag, width, isNarrow, theme) {
+function renderExecutionPlanSection(overview, dag, goal, runtimeSummary, width, isNarrow, theme) {
     const lines = [];
     lines.push(truncateToWidth(theme.fg("borderMuted", "─".repeat(Math.max(0, width))), width));
     if (overview.nodeDisplayStates.length === 0) {
@@ -1354,6 +1359,7 @@ function renderExecutionPlanSection(overview, dag, width, isNarrow, theme) {
         return lines;
     }
     lines.push(truncateToWidth(theme.fg("accent", "EXECUTION PLAN"), width));
+    lines.push(truncateToWidth(theme.fg("dim", formatExecutionPlanRunSummary(goal, runtimeSummary)), width));
     const nodeById = new Map(dag.nodes.map((node) => [node.nodeId, node]));
     const subagentsByNode = groupSubagentsByNode(dag.subagents);
     const wideColumns = isNarrow ? undefined : buildExecutionPlanWideColumns(width);
@@ -1363,8 +1369,7 @@ function renderExecutionPlanSection(overview, dag, width, isNarrow, theme) {
             "NODE ID",
             "STATUS",
             "MODEL",
-            "TIME",
-            "NOTE",
+            "TIME / NOTE",
         ], wideColumns)), width));
     }
     else {
@@ -1380,8 +1385,8 @@ function renderExecutionPlanSection(overview, dag, width, isNarrow, theme) {
         const node = nodeById.get(nds.nodeId);
         const relatedSubagents = subagentsByNode.get(nds.nodeId) ?? [];
         const model = normalizeExecutionPlanModelText(node, relatedSubagents);
-        const status = normalizeExecutionPlanStatusText(node?.status);
-        const stateChar = MONITOR_NODE_DISPLAY_STATE_CHARS[nds.displayState] ?? "?";
+        const status = formatExecutionPlanStatusLabel(node, nds.displayState);
+        const stateChar = formatExecutionPlanIcon(node, nds.displayState);
         const nodeColor = nds.displayState === "blocked" ? "error" :
             nds.displayState === "warning" ? "warning" :
                 nds.displayState === "running" || nds.displayState === "validating" || nds.displayState === "recovering"
@@ -1392,14 +1397,14 @@ function renderExecutionPlanSection(overview, dag, width, isNarrow, theme) {
         const parts = parseExecutionPlanSummary(nds.summary);
         const runTime = formatExecutionPlanTimeCell(parts.time);
         const runNote = formatExecutionPlanNoteCell(parts.note);
+        const timeNote = formatExecutionPlanTimeNoteCell(runTime, runNote);
         if (wideColumns) {
             const row = renderAlignedColumns([
                 `${stateChar}`,
                 shortenMiddle(nds.slug, wideColumns[1]),
                 shortenMiddle(status, wideColumns[2]),
                 shortenMiddle(model, wideColumns[3]),
-                runTime,
-                runNote,
+                timeNote,
             ], wideColumns);
             lines.push(truncateToWidth(theme.fg(nodeColor, row), width));
             continue;
@@ -1412,7 +1417,8 @@ function renderExecutionPlanSection(overview, dag, width, isNarrow, theme) {
             shortenMiddle(model, compactColumns[3]),
         ], compactColumns);
         lines.push(truncateToWidth(theme.fg(nodeColor, topLine), width));
-        lines.push(truncateToWidth(theme.fg(nodeColor, `  RUN ${runTime}${runNote ? ` / ${runNote}` : ""}`), width));
+        if (timeNote)
+            lines.push(truncateToWidth(theme.fg(nodeColor, `  ${timeNote}`), width));
     }
     return lines;
 }
@@ -1420,16 +1426,15 @@ function buildExecutionPlanWideColumns(width) {
     const iconWidth = 4;
     const statusWidth = 12;
     const modelWidth = 16;
-    const timeWidth = 11;
-    const noteMinWidth = 14;
+    const noteMinWidth = 20;
     const nodeMinWidth = 18;
-    const separatorWidth = 10;
-    const remaining = width - (iconWidth + statusWidth + modelWidth + timeWidth + separatorWidth);
+    const separatorWidth = 8;
+    const remaining = width - (iconWidth + statusWidth + modelWidth + separatorWidth);
     if (remaining < nodeMinWidth + noteMinWidth)
         return undefined;
-    const noteWidth = Math.max(noteMinWidth, Math.min(34, remaining - nodeMinWidth));
+    const noteWidth = Math.max(noteMinWidth, Math.min(48, remaining - nodeMinWidth));
     const nodeWidth = remaining - noteWidth;
-    return [iconWidth, nodeWidth, statusWidth, modelWidth, timeWidth, noteWidth];
+    return [iconWidth, nodeWidth, statusWidth, modelWidth, noteWidth];
 }
 function buildExecutionPlanCompactColumns(width) {
     const iconWidth = 4;
@@ -1438,24 +1443,48 @@ function buildExecutionPlanCompactColumns(width) {
     const nodeWidth = Math.max(10, width - iconWidth - statusWidth - modelWidth - 6);
     return [iconWidth, nodeWidth, statusWidth, modelWidth];
 }
-function normalizeExecutionPlanStatusText(value) {
-    if (!value)
-        return "unknown";
-    if (value === "controllerValidating")
-        return "validating";
-    if (value === "selfReportedComplete")
-        return "self-complete";
-    if (value === "needsFollowup")
-        return "follow-up";
-    if (value === "blockedTerminal")
-        return "blocked";
-    return value;
+function formatExecutionPlanStatusLabel(node, displayState) {
+    if (node?.status === "superseded")
+        return "SKIPPED";
+    if (node?.status === "failed")
+        return "FAILED";
+    if (node?.status === "blockedTerminal" || node?.status === "blocked")
+        return displayState === "recovering" ? "RECOVERING" : "BLOCKED";
+    if (node?.status === "complete")
+        return "COMPLETED";
+    if (node?.status === "controllerValidating" || displayState === "validating")
+        return "VALIDATING";
+    if (displayState === "recovering")
+        return "RECOVERING";
+    if (node?.status === "running" || displayState === "running")
+        return "RUNNING";
+    if (node?.status === "ready" || displayState === "ok")
+        return "READY";
+    if (node?.status === "needsFollowup" || displayState === "needsFollowup")
+        return "WAITING";
+    return "PENDING";
+}
+function formatExecutionPlanIcon(node, displayState) {
+    const status = formatExecutionPlanStatusLabel(node, displayState);
+    switch (status) {
+        case "PENDING": return "○";
+        case "READY": return "●";
+        case "RUNNING": return "▶";
+        case "WAITING": return "…";
+        case "VALIDATING": return "◌";
+        case "RECOVERING": return "↻";
+        case "BLOCKED": return "⚠";
+        case "COMPLETED": return displayState === "warning" ? "⚠" : "✓";
+        case "FAILED": return "✕";
+        case "SKIPPED": return "⊘";
+        case "CANCELLED": return "■";
+        default: return MONITOR_NODE_DISPLAY_STATE_CHARS[displayState] ?? "?";
+    }
 }
 function normalizeExecutionPlanModelText(node, subagents) {
     if (!node)
-        return "model ?";
-    const model = formatNodeMonitorModel(node, subagents, { stripProvider: true }) ?? "";
-    return model && model !== "-" ? model : "model ?";
+        return "-";
+    return formatNodeMonitorModel(node, subagents, { stripProvider: true }) ?? "-";
 }
 function parseExecutionPlanSummary(summary) {
     const parts = summary.split(" · ").map((part) => part.trim()).filter(Boolean);
@@ -1479,7 +1508,50 @@ function formatExecutionPlanNoteCell(value) {
         return "";
     return normalized
         .replace(/^completed\s+/i, "completed ")
+        .replace(/\b(?:controller|subagent)?\s*phase\s+recovery\b/gi, "retrying")
+        .replace(/\bphase\s+/gi, "")
         .replace(/\s+/g, " ");
+}
+function formatExecutionPlanTimeNoteCell(time, note) {
+    return [time, note].filter(Boolean).join(" / ");
+}
+function formatExecutionPlanRunSummary(goal, runtimeSummary) {
+    return [
+        "RUN",
+        `controller: ${formatControllerModelLabel(goal)}`,
+        "harness: pi",
+        `run: ${formatRunDisplayStatus(goal, runtimeSummary)}`,
+    ].join("  ");
+}
+function formatControllerModelLabel(goal) {
+    const resolved = goal.controllerModelResolution?.resolved?.model;
+    const raw = typeof resolved === "string" ? resolved : goal.controllerModelArg;
+    if (raw)
+        return cleanModelArg(raw, { stripProvider: true }) ?? raw;
+    const status = goal.controllerModelResolution?.status;
+    if (status && status !== "resolved")
+        return "blocked";
+    if (goal.controllerModelClass || goal.controllerModelScenario)
+        return "pending";
+    return "-";
+}
+function formatRunDisplayStatus(goal, runtimeSummary) {
+    if (goal.status === "complete")
+        return "COMPLETED";
+    if (goal.status === "blocked")
+        return "BLOCKED";
+    if (goal.status === "paused")
+        return "WAITING";
+    if (goal.status === "active") {
+        if (runtimeSummary.session.state === "active-turn")
+            return "RUNNING";
+        if (runtimeSummary.controllerPoll.state === "active" || runtimeSummary.controllerPoll.state === "leased")
+            return "RUNNING";
+        return "WAITING";
+    }
+    if (goal.status === "budgetLimited" || goal.status === "usageLimited")
+        return "BLOCKED";
+    return String(goal.status).toUpperCase();
 }
 /** Truncate text for narrow terminals preserving key fields. */
 function truncateNarrow(text, maxLen) {

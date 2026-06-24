@@ -521,7 +521,7 @@ test("OpenCode blocked node changes health and shows blocked state in render", (
   assert.match(joined, /n-blocked/);
 
   // Blocked node has appropriate display state.
-  assert.match(joined, /✖ n-blocked/);
+  assert.match(joined, /⚠ n-blocked/);
 });
 
 test("OpenCode fully blocked goal shows Blocked health", () => {

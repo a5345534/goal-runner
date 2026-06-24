@@ -69,16 +69,16 @@ export const MONITOR_NODE_DISPLAY_STATE_LABELS: Record<MonitorNodeDisplayState, 
 
 /** Compact single-char display state for narrow terminals. */
 export const MONITOR_NODE_DISPLAY_STATE_CHARS: Record<MonitorNodeDisplayState, string> = {
-  pending: "⏸",
+  pending: "○",
   running: "▶",
-  validating: "◐",
-  needsFollowup: "↻",
-  recovering: "⟳",
-  blocked: "✖",
+  validating: "◌",
+  needsFollowup: "…",
+  recovering: "↻",
+  blocked: "⚠",
   warning: "⚠",
   complete: "✓",
-  ok: "○",
-  idle: "⏸",
+  ok: "●",
+  idle: "○",
 };
 
 // ── Structured overview model ──

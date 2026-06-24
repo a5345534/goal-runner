@@ -29,16 +29,16 @@ export const MONITOR_NODE_DISPLAY_STATE_LABELS = {
 };
 /** Compact single-char display state for narrow terminals. */
 export const MONITOR_NODE_DISPLAY_STATE_CHARS = {
-    pending: "⏸",
+    pending: "○",
     running: "▶",
-    validating: "◐",
-    needsFollowup: "↻",
-    recovering: "⟳",
-    blocked: "✖",
+    validating: "◌",
+    needsFollowup: "…",
+    recovering: "↻",
+    blocked: "⚠",
     warning: "⚠",
     complete: "✓",
-    ok: "○",
-    idle: "⏸",
+    ok: "●",
+    idle: "○",
 };
 // ── User-facing action labels ──
 export const ACTION_DISPLAY_LABELS = {

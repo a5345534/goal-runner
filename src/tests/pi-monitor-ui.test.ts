@@ -406,19 +406,20 @@ test("goal monitor execution plan uses aligned wide-row headers and status-row i
   const execIndex = rendered.findIndex((line) => line === "EXECUTION PLAN");
   assert.ok(execIndex >= 0, "execution plan heading exists");
 
-  const headerLine = rendered[execIndex + 1];
+  const runLine = rendered[execIndex + 1] ?? "";
+  assert.match(runLine, /RUN\s+controller: gpt-5\.5\s+harness: pi\s+run: WAITING/);
+
+  const headerLine = rendered[execIndex + 2];
   assert.match(headerLine ?? "", /ICON\s+NODE ID/);
   assert.match(headerLine ?? "", /STATUS/);
   assert.match(headerLine ?? "", /MODEL/);
-  assert.match(headerLine ?? "", /TIME/);
-  assert.match(headerLine ?? "", /NOTE/);
+  assert.match(headerLine ?? "", /TIME \/ NOTE/);
 
   const statusStart = (headerLine ?? "").indexOf("STATUS");
   const modelStart = (headerLine ?? "").indexOf("MODEL");
-  const timeStart = (headerLine ?? "").indexOf("TIME");
-  const noteStart = (headerLine ?? "").indexOf("NOTE");
+  const timeStart = (headerLine ?? "").indexOf("TIME / NOTE");
 
-  const rowLines = rendered.slice(execIndex + 2, execIndex + 2 + nodes.length);
+  const rowLines = rendered.slice(execIndex + 3, execIndex + 3 + nodes.length);
   assert.equal(rowLines.length, nodes.length);
   const rows = rowLines.map((line) => parseExecutionPlanRow(line, headerLine ?? ""));
   const byNode = new Map(rows.map((row) => [row.nodeId, row]));
@@ -431,15 +432,15 @@ test("goal monitor execution plan uses aligned wide-row headers and status-row i
   assert.ok(complete && running && recovering && blocked && failed);
 
   assert.equal(complete.icon, "✓");
-  assert.equal(complete.status, "complete");
+  assert.equal(complete.status, "COMPLETED");
   assert.equal(running.icon, "▶");
-  assert.equal(running.status, "running");
-  assert.equal(recovering.icon, "⟳");
-  assert.equal(recovering.status, "blocked");
-  assert.equal(blocked.icon, "✖");
-  assert.equal(blocked.status, "blocked");
-  assert.equal(failed.icon, "✖");
-  assert.equal(failed.status, "failed");
+  assert.equal(running.status, "RUNNING");
+  assert.equal(recovering.icon, "↻");
+  assert.equal(recovering.status, "RECOVERING");
+  assert.equal(blocked.icon, "⚠");
+  assert.equal(blocked.status, "BLOCKED");
+  assert.equal(failed.icon, "✕");
+  assert.equal(failed.status, "FAILED");
 
   const statusStarts = rowLines.map((line) => {
     const start = line.slice(statusStart).search(/\S/);
@@ -449,13 +450,8 @@ test("goal monitor execution plan uses aligned wide-row headers and status-row i
     const start = line.slice(timeStart).search(/\S/);
     return start >= 0 ? start + timeStart : -1;
   });
-  const noteStarts = rowLines.map((line) => {
-    const start = line.slice(noteStart).search(/\S/);
-    return start >= 0 ? start + noteStart : -1;
-  });
   assert.equal(new Set(statusStarts).size, 1);
   assert.equal(new Set(timeStarts).size, 1);
-  assert.equal(new Set(noteStarts).size, 1);
 
   for (const row of rows) {
     assert.doesNotMatch(row.model, /\//);
@@ -501,16 +497,18 @@ test("goal monitor execution plan compact mode shows execution rows and model sh
     }),
   );
 
-  const rendered = controller.render(90, theme).join("\n").split("\n");
+  const rendered = controller.render(70, theme).join("\n").split("\n");
   const execIndex = rendered.findIndex((line) => line === "EXECUTION PLAN");
-  const rowLines = rendered.slice(execIndex + 2, execIndex + 4);
+  const headerLine = rendered[execIndex + 2] ?? "";
+  const sectionEnd = rendered.findIndex((line, index) => index > execIndex + 3 && /^─+$/.test(line));
+  const sectionLines = rendered.slice(execIndex + 3, sectionEnd >= 0 ? sectionEnd : undefined);
+  const rowLines = sectionLines.filter((line) => line.trim().startsWith("▶") || line.trim().startsWith("✓"));
 
-  assert.equal(rowLines.filter((line) => line.trim().startsWith("▶") || line.trim().startsWith("✓")).length, 2);
+  assert.equal(rowLines.length, 2);
 
-  const headerLine = rendered[execIndex + 1] ?? "";
   const rows = rowLines.map((line) => parseExecutionPlanRow(line, headerLine));
-  assert.equal(rows[0]?.status, "running");
-  assert.equal(rows[1]?.status, "complete");
+  assert.equal(rows[0]?.status, "RUNNING");
+  assert.equal(rows[1]?.status, "COMPLETED");
   assert.equal(rows[0]?.model, "gpt-5");
   assert.equal(rows[1]?.model, "gpt-5.3");
 });
@@ -562,20 +560,20 @@ test("goal monitor execution plan strips provider prefixes and formats mixed/col
 
   const rendered = controller.render(200, theme).join("\n").split("\n");
   const execIndex = rendered.findIndex((line) => line === "EXECUTION PLAN");
-  const headerLine = rendered[execIndex + 1] ?? "";
-  const dataRows = rendered.slice(execIndex + 2, execIndex + 4);
+  const headerLine = rendered[execIndex + 2] ?? "";
+  const dataRows = rendered.slice(execIndex + 3, execIndex + 5);
   const rows = dataRows.map((line) => parseExecutionPlanRow(line, headerLine));
 
   const mixed = rows.find((row) => row.nodeId === "mixed-node");
   const collision = rows.find((row) => row.nodeId === "collision-node");
   assert.ok(mixed && collision);
 
-  assert.equal(mixed.model, "mixed 2: g4,c3");
-  assert.match(collision.model, /mixed 2:/);
+  assert.equal(mixed.model, "mixed(2)");
+  assert.match(collision.model, /x#1/);
+  assert.match(collision.model, /x#2/);
   assert.doesNotMatch(collision.model, /provider-/);
   assert.doesNotMatch(collision.model, /\//);
-  assert.match(collision.model, /x\(2\)/);
-  assert.match(collision.model, /[…]/);
+  assert.doesNotMatch(collision.model, /x\(2\)/);
   assert.doesNotMatch(mixed.model, /\//);
   assert.doesNotMatch(collision.model, /\//);
 });
@@ -1962,10 +1960,14 @@ test("EXTENDED_MONITOR_HEALTH_LABELS covers all extended health values", () => {
 });
 
 test("MONITOR_NODE_DISPLAY_STATE_CHARS has symbols for all states", () => {
+  assert.equal(MONITOR_NODE_DISPLAY_STATE_CHARS["pending"], "○");
   assert.equal(MONITOR_NODE_DISPLAY_STATE_CHARS["running"], "▶");
-  assert.equal(MONITOR_NODE_DISPLAY_STATE_CHARS["idle"], "⏸");
-  assert.equal(MONITOR_NODE_DISPLAY_STATE_CHARS["blocked"], "✖");
+  assert.equal(MONITOR_NODE_DISPLAY_STATE_CHARS["idle"], "○");
+  assert.equal(MONITOR_NODE_DISPLAY_STATE_CHARS["blocked"], "⚠");
   assert.equal(MONITOR_NODE_DISPLAY_STATE_CHARS["warning"], "⚠");
+  assert.equal(MONITOR_NODE_DISPLAY_STATE_CHARS["validating"], "◌");
+  assert.equal(MONITOR_NODE_DISPLAY_STATE_CHARS["needsFollowup"], "…");
+  assert.equal(MONITOR_NODE_DISPLAY_STATE_CHARS["recovering"], "↻");
   assert.equal(MONITOR_NODE_DISPLAY_STATE_CHARS["complete"], "✓");
-  assert.equal(MONITOR_NODE_DISPLAY_STATE_CHARS["ok"], "○");
+  assert.equal(MONITOR_NODE_DISPLAY_STATE_CHARS["ok"], "●");
 });
