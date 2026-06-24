@@ -1314,7 +1314,7 @@ function renderOverviewHeader(overview, _runtimeSummary, width, isNarrow, theme)
 }
 /**
  * Render the Execution Plan section with node display states.
- * Uses single-char icons for narrow terminals.
+ * Uses compact fallback for narrow widths.
  */
 function renderExecutionPlanSection(overview, dag, width, isNarrow, theme) {
     const lines = [];
@@ -1324,50 +1324,135 @@ function renderExecutionPlanSection(overview, dag, width, isNarrow, theme) {
         return lines;
     }
     lines.push(truncateToWidth(theme.fg("accent", "EXECUTION PLAN"), width));
+    const nodeById = new Map(dag.nodes.map((node) => [node.nodeId, node]));
+    const subagentsByNode = groupSubagentsByNode(dag.subagents);
+    const wideColumns = isNarrow ? undefined : buildExecutionPlanWideColumns(width);
+    if (wideColumns) {
+        lines.push(truncateToWidth(theme.fg("dim", renderAlignedColumns([
+            "ICON",
+            "NODE ID",
+            "STATUS",
+            "MODEL",
+            "TIME",
+            "NOTE",
+        ], wideColumns)), width));
+    }
+    else {
+        const compactColumns = buildExecutionPlanCompactColumns(width);
+        lines.push(truncateToWidth(theme.fg("dim", renderAlignedColumns([
+            "ICON",
+            "NODE ID",
+            "STATUS",
+            "MODEL",
+        ], compactColumns)), width));
+    }
     for (const nds of overview.nodeDisplayStates) {
+        const node = nodeById.get(nds.nodeId);
+        const relatedSubagents = subagentsByNode.get(nds.nodeId) ?? [];
+        const model = normalizeExecutionPlanModelText(node, relatedSubagents);
+        const status = normalizeExecutionPlanStatusText(node?.status);
         const stateChar = MONITOR_NODE_DISPLAY_STATE_CHARS[nds.displayState] ?? "?";
-        const stateLabel = MONITOR_NODE_DISPLAY_STATE_LABELS[nds.displayState] ?? nds.displayState;
         const nodeColor = nds.displayState === "blocked" ? "error" :
             nds.displayState === "warning" ? "warning" :
                 nds.displayState === "running" || nds.displayState === "validating" || nds.displayState === "recovering"
-                    ? "success" :
-                    nds.displayState === "complete" ? "success" : "dim";
-        if (isNarrow) {
-            lines.push(truncateToWidth(theme.fg(nodeColor, `${stateChar} ${stateLabel}: ${nds.slug}`), width));
+                    ? "success"
+                    : nds.displayState === "complete"
+                        ? "success"
+                        : "dim";
+        const parts = parseExecutionPlanSummary(nds.summary);
+        const runTime = formatExecutionPlanTimeCell(parts.time);
+        const runNote = formatExecutionPlanNoteCell(parts.note);
+        if (wideColumns) {
+            const row = renderAlignedColumns([
+                `${stateChar}`,
+                shortenMiddle(nds.slug, wideColumns[1]),
+                shortenMiddle(status, wideColumns[2]),
+                shortenMiddle(model, wideColumns[3]),
+                runTime,
+                runNote,
+            ], wideColumns);
+            lines.push(truncateToWidth(theme.fg(nodeColor, row), width));
             continue;
         }
-        const parts = parseExecutionPlanSummary(nds.summary);
-        const row = renderAlignedColumns([
+        const compactColumns = buildExecutionPlanCompactColumns(width);
+        const topLine = renderAlignedColumns([
             `${stateChar}`,
-            shortenMiddle(nds.slug, 30),
-            formatExecutionPlanTimeCell(parts.time),
-            formatExecutionPlanNoteCell(parts.note),
-        ], [2, 30, 14, 34]);
-        lines.push(truncateToWidth(theme.fg(nodeColor, row), width));
+            shortenMiddle(nds.slug, compactColumns[1]),
+            shortenMiddle(status, compactColumns[2]),
+            shortenMiddle(model, compactColumns[3]),
+        ], compactColumns);
+        lines.push(truncateToWidth(theme.fg(nodeColor, topLine), width));
+        lines.push(truncateToWidth(theme.fg(nodeColor, `  RUN ${runTime}${runNote ? ` / ${runNote}` : ""}`), width));
     }
     return lines;
 }
+function buildExecutionPlanWideColumns(width) {
+    const iconWidth = 4;
+    const statusWidth = 12;
+    const modelWidth = 16;
+    const timeWidth = 11;
+    const noteMinWidth = 14;
+    const nodeMinWidth = 18;
+    const separatorWidth = 10;
+    const remaining = width - (iconWidth + statusWidth + modelWidth + timeWidth + separatorWidth);
+    if (remaining < nodeMinWidth + noteMinWidth)
+        return undefined;
+    const noteWidth = Math.max(noteMinWidth, Math.min(34, remaining - nodeMinWidth));
+    const nodeWidth = remaining - noteWidth;
+    return [iconWidth, nodeWidth, statusWidth, modelWidth, timeWidth, noteWidth];
+}
+function buildExecutionPlanCompactColumns(width) {
+    const iconWidth = 4;
+    const statusWidth = 10;
+    const modelWidth = width <= 70
+        ? Math.max(8, width - iconWidth - statusWidth - 6 - Math.max(10, Math.floor((width - iconWidth - statusWidth - 6) * 0.35))
+        )
+        : 16;
+    const nodeWidth = Math.max(10, width - iconWidth - statusWidth - modelWidth - 6);
+    return [iconWidth, nodeWidth, statusWidth, modelWidth];
+}
+function normalizeExecutionPlanStatusText(value) {
+    if (!value)
+        return "unknown";
+    if (value === "controllerValidating")
+        return "validating";
+    if (value === "selfReportedComplete")
+        return "self-complete";
+    if (value === "needsFollowup")
+        return "follow-up";
+    if (value === "blockedTerminal")
+        return "blocked";
+    return value;
+}
+function normalizeExecutionPlanModelText(node, subagents) {
+    if (!node)
+        return "model ?";
+    const model = formatNodeMonitorModel(node, subagents, { stripProvider: true }) ?? "";
+    return model && model !== "-" ? model : "model ?";
+}
 function parseExecutionPlanSummary(summary) {
-    const parts = summary.split(" · ").filter(Boolean);
+    const parts = summary.split(" · ").map((part) => part.trim()).filter(Boolean);
     const time = parts[0] ?? "";
-    const note = parts.slice(1).join(" · ");
+    const noteParts = parts
+        .slice(1)
+        .map((part) => part.trim().replace(/^phase\s+/i, ""))
+        .filter(Boolean);
+    const note = noteParts.join(" · ");
     return { time, note };
 }
 function formatExecutionPlanTimeCell(value) {
-    const normalized = value.trim();
+    const normalized = value.trim().replace(/\s+/g, " ");
     if (!normalized)
-        return "time ?";
-    return `time ${normalized.replace(/\s+for\s+/gi, " ")}`;
+        return "runtime ?";
+    return normalized.replace(/\s+for\s+/gi, " ");
 }
 function formatExecutionPlanNoteCell(value) {
     const normalized = value.trim().replace(/\s+/g, " ");
     if (!normalized)
-        return "note pending";
-    const compact = normalized
+        return "";
+    return normalized
         .replace(/^completed\s+/i, "completed ")
-        .replace(/^last\s+/i, "")
         .replace(/\s+/g, " ");
-    return `note ${compact}`;
 }
 /** Truncate text for narrow terminals preserving key fields. */
 function truncateNarrow(text, maxLen) {
