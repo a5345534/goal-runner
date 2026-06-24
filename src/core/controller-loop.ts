@@ -2123,6 +2123,64 @@ function isValidationFollowupCappedSummary(summary: string): boolean {
   return /repeated identical controller validation failure/i.test(summary) && /follow-ups are capped/i.test(summary);
 }
 
+function isControllerActionRequiredValidationCap(node: GoalDagNode, subagent: GoalSubagentRecord, summary: string): boolean {
+  const allowedPaths = node.validation?.allowedPaths ?? [];
+  if (hasAllowedPathParentPolicyConflict(allowedPaths, summary)) return true;
+  if (/missing evidence:\s*implementation-diff-present/i.test(summary)) {
+    return (subagent.controllerValidationResults ?? []).some((result) => hasAllowedPathParentPolicyConflict(allowedPaths, result));
+  }
+  return false;
+}
+
+function hasAllowedPathParentPolicyConflict(allowedPaths: string[], validationText: string): boolean {
+  if (allowedPaths.length === 0 || !/changed files outside allowed paths/i.test(validationText)) return false;
+  const outsidePaths = extractChangedFilesOutsideAllowedPaths(validationText);
+  return outsidePaths.some((outsidePath) => allowedPaths.some((allowedPath) => isParentRepoPath(outsidePath, allowedPath)));
+}
+
+function extractChangedFilesOutsideAllowedPaths(validationText: string): string[] {
+  const paths: string[] = [];
+  const pattern = /changed files outside allowed paths:\s*([^\n]+)/gi;
+  for (const match of validationText.matchAll(pattern)) {
+    const rawSegment = match[1]
+      ?.replace(/\brepeated identical controller validation failure\b.*$/i, "")
+      .replace(/\bautomatic same-session follow-ups\b.*$/i, "")
+      .trim();
+    if (!rawSegment) continue;
+    for (const value of rawSegment.split(/[;,]/)) {
+      const normalized = normalizeRepoPath(value);
+      if (normalized) paths.push(normalized);
+    }
+  }
+  return paths;
+}
+
+function isParentRepoPath(parentPath: string, childPattern: string): boolean {
+  const parent = normalizeRepoPath(parentPath);
+  const child = staticRepoPathPrefix(childPattern);
+  return Boolean(parent && child && child.startsWith(`${parent}/`));
+}
+
+function staticRepoPathPrefix(pattern: string): string | undefined {
+  const normalized = normalizeRepoPath(pattern);
+  if (!normalized) return undefined;
+  const globIndex = normalized.search(/[*?[\]{}]/);
+  return (globIndex >= 0 ? normalized.slice(0, globIndex) : normalized).replace(/\/+$/u, "") || undefined;
+}
+
+function normalizeRepoPath(value: string): string | undefined {
+  const normalized = value
+    .trim()
+    .replace(/^`|`$/g, "")
+    .replace(/^["']|["']$/g, "")
+    .replace(/^[.][/\\]/, "")
+    .replace(/[).,]+$/g, "")
+    .replace(/\\/g, "/")
+    .replace(/\/+/g, "/")
+    .replace(/\/+$/u, "");
+  return normalized.length > 0 ? normalized : undefined;
+}
+
 function canRestartOnSameResources(node: GoalDagNode, subagent: GoalSubagentRecord): boolean {
   return Boolean(node.preparedResources?.workspacePath || node.preparedResources?.branch || node.preparedResources?.ref || subagent.workspacePath || subagent.branch || subagent.ref);
 }
@@ -2137,6 +2195,16 @@ async function tryStartValidationCappedReplacement(
   tickStartedAt: string,
   summary: string,
 ): Promise<boolean> {
+  if (isControllerActionRequiredValidationCap(node, subagent, summary)) {
+    await recordControllerEvent(runtime, node.goalId, "validation.replacementSuppressed", {
+      nodeId: node.nodeId,
+      subagentId: subagent.subagentId,
+      summary,
+      reason: "controller-action-required",
+    }, tickStartedAt);
+    return false;
+  }
+
   const maxRetries = options.maxAutoRetries ?? MAX_AUTO_RETRIES_DEFAULT;
   const replacementCount = validationCappedReplacementCount(state, node.nodeId);
   const replacementAttempt = replacementCount + 1;
@@ -2187,6 +2255,16 @@ async function tryRestartInterruptedValidationCappedReplacement(
   const replacementAttempt = replacementCount + 1;
   if (replacementCount >= maxRetries) return false;
   const reason = previousDecision.reason ?? subagent.integrationStatus ?? node.lastValidationSummary ?? "validation follow-up cap replacement was interrupted";
+  if (isControllerActionRequiredValidationCap(node, subagent, reason)) {
+    await recordControllerEvent(runtime, node.goalId, "validation.replacementSuppressed", {
+      nodeId: node.nodeId,
+      subagentId: subagent.subagentId,
+      summary: reason,
+      reason: "controller-action-required",
+      interruptedReplacementRestart: true,
+    }, tickStartedAt);
+    return false;
+  }
   const decision: GoalRecoveryDecisionRecord = {
     ...previousDecision,
     at: tickStartedAt,

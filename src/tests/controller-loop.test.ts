@@ -729,6 +729,83 @@ test("controller starts a replacement session after validation follow-up cap whe
   assert.equal(replacement?.retryCount, 1);
 });
 
+test("controller blocks controller-action-required validation caps instead of replacing the subagent", async () => {
+  const policySummary = "Controller validation failed: policy failures: changed files outside allowed paths: repos/goal-runner";
+  const { runtime } = await runtimeWithPlan([{
+    nodeId: "build",
+    objective: "Build feature",
+    validation: {
+      allowedPaths: [
+        "repos/goal-runner/src/adapters/pi/monitor-ui.ts",
+        "repos/goal-runner/dist/adapters/pi/monitor-ui.*",
+      ],
+    },
+  }]);
+  await runtime.saveGoalDagNode({ ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode), status: "running", updatedAt: now });
+  await runtime.saveGoalSubagent(subagent({
+    workspacePath: "/repo/.worktrees/build",
+    branch: "feat/build",
+    retryCount: 2,
+    controllerValidationResults: [policySummary, policySummary],
+  }));
+  const adapter = new FakeSubagentAdapter();
+  adapter.states.set("subagent-1", { status: "selfReportedComplete", selfReportedResult: "done", lastActivityAt: "2026-06-02T00:01:00.000Z" });
+
+  const tick = await runtime.runGoalControllerTick("goal-1", {
+    adapter,
+    validator: () => ({ status: "failed", summary: policySummary, followupPrompt: "Fix path policy failure" }),
+  });
+
+  assert.equal(tick.started.length, 0);
+  assert.equal(adapter.starts.length, 0);
+  assert.equal(adapter.prompts.length, 0);
+  assert.equal(tick.blocked.length, 1);
+  assert.match(tick.blocked[0]?.lastValidationSummary ?? "", /changed files outside allowed paths: repos\/goal-runner/);
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "blocked");
+  const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
+  assert.equal(saved?.status, "blocked");
+  assert.match(saved?.integrationStatus ?? "", /repeated identical controller validation failure/);
+});
+
+test("controller blocks missing-diff caps after submodule path-policy conflicts instead of replacing the subagent", async () => {
+  const policySummary = "Controller validation failed: policy failures: changed files outside allowed paths: repos/goal-runner";
+  const missingDiffSummary = "Controller validation failed: missing evidence: implementation-diff-present";
+  const { runtime } = await runtimeWithPlan([{
+    nodeId: "build",
+    objective: "Build feature",
+    validation: {
+      allowedPaths: [
+        "repos/goal-runner/src/adapters/pi/monitor-ui.ts",
+        "repos/goal-runner/dist/adapters/pi/monitor-ui.*",
+      ],
+    },
+  }]);
+  await runtime.saveGoalDagNode({ ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode), status: "running", updatedAt: now });
+  await runtime.saveGoalSubagent(subagent({
+    workspacePath: "/repo/.worktrees/build",
+    branch: "feat/build",
+    retryCount: 2,
+    controllerValidationResults: [policySummary, missingDiffSummary, missingDiffSummary],
+  }));
+  const adapter = new FakeSubagentAdapter();
+  adapter.states.set("subagent-1", { status: "selfReportedComplete", selfReportedResult: "done", lastActivityAt: "2026-06-02T00:01:00.000Z" });
+
+  const tick = await runtime.runGoalControllerTick("goal-1", {
+    adapter,
+    validator: () => ({ status: "failed", summary: missingDiffSummary, followupPrompt: "Restore implementation diff evidence" }),
+  });
+
+  assert.equal(tick.started.length, 0);
+  assert.equal(adapter.starts.length, 0);
+  assert.equal(adapter.prompts.length, 0);
+  assert.equal(tick.blocked.length, 1);
+  assert.match(tick.blocked[0]?.lastValidationSummary ?? "", /missing evidence: implementation-diff-present/);
+  assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "blocked");
+  const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
+  assert.equal(saved?.status, "blocked");
+  assert.match(saved?.integrationStatus ?? "", /repeated identical controller validation failure/);
+});
+
 test("controller restarts interrupted validation-cap replacement attempts", async () => {
   const cappedSummary = "Controller validation failed: missing outputs: dist/app.js repeated identical controller validation failure (1821 occurrences); automatic same-session follow-ups are capped at 2";
   const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", expectedOutputs: ["dist/app.js"] }]);
