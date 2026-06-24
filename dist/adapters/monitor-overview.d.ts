@@ -10,7 +10,7 @@ import type { GoalMonitorRuntimeSummary, MonitorHealth } from "./pi/monitor-ui.j
 export type { GoalMonitorRuntimeSummary, MonitorHealth, } from "./pi/monitor-ui.js";
 export type ExtendedMonitorHealth = MonitorHealth | "Complete" | "Complete with warnings" | "Running";
 export declare const EXTENDED_MONITOR_HEALTH_LABELS: Record<ExtendedMonitorHealth, string>;
-export type MonitorNodeDisplayState = "running" | "idle" | "blocked" | "warning" | "complete" | "ok";
+export type MonitorNodeDisplayState = "pending" | "running" | "validating" | "needsFollowup" | "recovering" | "blocked" | "warning" | "complete" | "ok" | "idle";
 export declare const MONITOR_NODE_DISPLAY_STATE_LABELS: Record<MonitorNodeDisplayState, string>;
 /** Compact single-char display state for narrow terminals. */
 export declare const MONITOR_NODE_DISPLAY_STATE_CHARS: Record<MonitorNodeDisplayState, string>;

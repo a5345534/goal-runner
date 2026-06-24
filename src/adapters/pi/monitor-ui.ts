@@ -191,16 +191,63 @@ function renderAlignedColumns(values: string[], widths: number[]): string {
       const width = widths[index] ?? 0;
       if (!value) return "";
       if (width <= 0) return value;
-      return fitColumn(value, width);
+      return renderCellWidthAware(value, width);
     })
     .join("  ")
     .trimEnd();
 }
 
-function fitColumn(value: string, width: number): string {
-  if (value.length <= width) return value.padEnd(width, " ");
-  if (width <= 1) return value.slice(0, width);
-  return `${value.slice(0, width - 1)}…`;
+function renderCellWidthAware(value: string, width: number): string {
+  const truncated = truncateDisplayWidth(value, width);
+  return padDisplayWidth(truncated, width);
+}
+
+function truncateDisplayWidth(value: string, width: number): string {
+  if (width <= 0) return "";
+  if (displayWidth(value) <= width) return value;
+  if (width === 1) return value.slice(0, 1);
+  const ellipsis = "…";
+  const targetWidth = width - displayWidth(ellipsis);
+  if (targetWidth <= 0) return value.slice(0, width);
+
+  let used = 0;
+  const parts: string[] = [];
+  for (const chunk of value) {
+    const chunkWidth = displayWidth(chunk);
+    if (used + chunkWidth > targetWidth) break;
+    parts.push(chunk);
+    used += chunkWidth;
+  }
+
+  return `${parts.join("")}${ellipsis}`;
+}
+
+function padDisplayWidth(value: string, width: number): string {
+  const pad = Math.max(0, width - displayWidth(value));
+  return value + " ".repeat(pad);
+}
+
+function displayWidth(value: string): number {
+  let width = 0;
+  for (const char of Array.from(value)) {
+    width += isWideDisplayChar(char) ? 2 : 1;
+  }
+  return width;
+}
+
+function isWideDisplayChar(char: string): boolean {
+  const codePoint = char.codePointAt(0);
+  if (codePoint === undefined) return false;
+  return (
+    (0x1100 <= codePoint && codePoint <= 0x115f)
+    || (0x2e80 <= codePoint && codePoint <= 0xa4cf && codePoint !== 0x303f)
+    || (0xac00 <= codePoint && codePoint <= 0xd7a3)
+    || (0xf900 <= codePoint && codePoint <= 0xfaff)
+    || (0xfe30 <= codePoint && codePoint <= 0xfe6f)
+    || (0xff00 <= codePoint && codePoint <= 0xff60)
+    || (0xffe0 <= codePoint && codePoint <= 0xffe6)
+    || (0x20000 <= codePoint && codePoint <= 0x3fffd)
+  );
 }
 
 function deriveSessionState(
@@ -1197,7 +1244,7 @@ function renderNodeListRow(
   const summary = durationSummary ?? buildNodeDurationSummary(node, subagents, [], now);
   const workers = subagents.length;
   const phaseLabel = summary.phaseLabel ?? `phase ${node.lifecyclePhase ?? node.status}`;
-  const model = formatNodeMonitorModel(node);
+  const model = formatNodeMonitorModel(node, subagents, { stripProvider: true });
   const lastText = formatDurationWithoutAgo(summary.lastLabel);
   return renderAlignedColumns([
     `${index + 1}.`,
@@ -1208,7 +1255,7 @@ function renderNodeListRow(
     `last ${lastText}`,
     `${workers} runner${workers === 1 ? "" : "s"}`,
     model ? `model=${model}` : "",
-  ], [3, 30, 9, 9, 16, 10, 9, 16]);
+  ], [3, 30, 9, 9, 16, 10, 9, 18]);
 }
 
 function renderRunnerListRow(
@@ -1405,12 +1452,69 @@ function formatMonitorTokens(goal: GoalSummary): string {
   return goal.tokenBudget === undefined ? formatCompactNumber(goal.tokensUsed) : `${formatCompactNumber(goal.tokensUsed)}/${formatCompactNumber(goal.tokenBudget)}`;
 }
 
-function formatNodeMonitorModel(node: GoalDagNode): string | undefined {
+function formatNodeMonitorModel(
+  node: GoalDagNode,
+  _subagents: GoalSubagentRecord[] = [],
+  options: { stripProvider?: boolean } = {},
+): string | undefined {
   const scenario = node.preparedResources?.modelScenario ?? node.modelScenario;
-  const model = node.preparedResources?.modelArg ?? node.modelArg;
   const thinkingLevel = node.preparedResources?.thinkingLevel ?? node.thinkingLevel;
-  const rendered = formatMonitorModel(scenario, model, thinkingLevel);
-  return rendered === "-" ? undefined : rendered;
+  const candidates = [
+    node.modelArg,
+    node.preparedResources?.modelArg,
+    node.controllerModelArg,
+  ];
+
+  const normalizedCandidates = dedupeModelCandidates(candidates, { stripProvider: options.stripProvider });
+
+  if (normalizedCandidates.length === 0) {
+    if (!options.stripProvider) return undefined;
+    const fallback = formatMissingNodeModelLabel(node.status, scenario);
+    return formatMonitorModel(undefined, fallback, thinkingLevel);
+  }
+
+  const model = normalizedCandidates.length === 1
+    ? normalizedCandidates[0] ?? ""
+    : `mixed ${normalizedCandidates.length}: ${normalizedCandidates.slice(0, 2).join(",")}`;
+
+  return formatMonitorModel(scenario, model, options.stripProvider ? undefined : thinkingLevel);
+}
+
+function dedupeModelCandidates(
+  rawCandidates: Array<string | undefined>,
+  options: { stripProvider?: boolean },
+): string[] {
+  const values = rawCandidates
+    .map((candidate) => cleanModelArg(candidate, options))
+    .filter((candidate): candidate is string => Boolean(candidate));
+  const unique = new Set(values);
+  return [...unique];
+}
+
+function cleanModelArg(
+  rawModel: string | undefined,
+  options: { stripProvider?: boolean },
+): string | undefined {
+  if (!rawModel) return undefined;
+  const normalized = rawModel.trim();
+  if (!normalized) return undefined;
+  if (!options.stripProvider) return normalized;
+  const firstSlash = normalized.indexOf("/");
+  if (firstSlash >= 0 && firstSlash < normalized.length - 1) return normalized.slice(firstSlash + 1);
+  const firstColon = normalized.indexOf(":");
+  if (firstColon >= 0 && firstColon < normalized.length - 1) return normalized.slice(firstColon + 1);
+  return normalized;
+}
+
+function formatMissingNodeModelLabel(
+  nodeStatus: GoalDagNode["status"],
+  scenario: string | undefined,
+): string {
+  let fallback = "not-applicable";
+  if (["planned", "ready", "needsFollowup", "selfReportedComplete"].includes(nodeStatus)) fallback = "pending";
+  if (["blocked", "failed", "blockedTerminal"].includes(nodeStatus)) fallback = "blocked";
+  if (scenario) return `${scenario} -> ${fallback}`;
+  return fallback;
 }
 
 function formatMonitorModel(scenario: string | undefined, model: string | undefined, thinkingLevel?: string): string {
@@ -1538,14 +1642,15 @@ function renderExecutionPlanSection(
 
   for (const nds of overview.nodeDisplayStates) {
     const stateChar = MONITOR_NODE_DISPLAY_STATE_CHARS[nds.displayState] ?? "?";
+    const stateLabel = MONITOR_NODE_DISPLAY_STATE_LABELS[nds.displayState] ?? nds.displayState;
     const nodeColor =
       nds.displayState === "blocked" ? "error" :
       nds.displayState === "warning" ? "warning" :
-      nds.displayState === "running" ? "success" :
+      nds.displayState === "running" || nds.displayState === "validating" || nds.displayState === "recovering" ? "success" :
       nds.displayState === "complete" ? "success" : "dim";
 
     if (isNarrow) {
-      lines.push(truncateToWidth(theme.fg(nodeColor, `${stateChar} ${nds.slug}`), width));
+      lines.push(truncateToWidth(theme.fg(nodeColor, `${stateChar} ${stateLabel}: ${nds.slug}`), width));
       continue;
     }
 
@@ -1553,23 +1658,36 @@ function renderExecutionPlanSection(
     const row = renderAlignedColumns([
       `${stateChar}`,
       shortenMiddle(nds.slug, 30),
-      parts.runtime,
-      parts.phase,
-      parts.last,
-    ], [2, 30, 14, 28, 14]);
+      formatExecutionPlanTimeCell(parts.time),
+      formatExecutionPlanNoteCell(parts.note),
+    ], [2, 30, 14, 34]);
     lines.push(truncateToWidth(theme.fg(nodeColor, row), width));
   }
 
   return lines;
 }
 
-function parseExecutionPlanSummary(summary: string): { runtime: string; phase: string; last: string } {
+function parseExecutionPlanSummary(summary: string): { time: string; note: string } {
   const parts = summary.split(" · ").filter(Boolean);
-  return {
-    runtime: parts[0] ?? "",
-    phase: parts[1] ?? "",
-    last: parts.slice(2).join(" · "),
-  };
+  const time = parts[0] ?? "";
+  const note = parts.slice(1).join(" · ");
+  return { time, note };
+}
+
+function formatExecutionPlanTimeCell(value: string): string {
+  const normalized = value.trim();
+  if (!normalized) return "time ?";
+  return `time ${normalized.replace(/\s+for\s+/gi, " ")}`;
+}
+
+function formatExecutionPlanNoteCell(value: string): string {
+  const normalized = value.trim().replace(/\s+/g, " ");
+  if (!normalized) return "note pending";
+  const compact = normalized
+    .replace(/^completed\s+/i, "completed ")
+    .replace(/^last\s+/i, "")
+    .replace(/\s+/g, " ");
+  return `note ${compact}`;
 }
 
 /** Truncate text for narrow terminals preserving key fields. */

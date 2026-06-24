@@ -42,30 +42,43 @@ export const EXTENDED_MONITOR_HEALTH_LABELS: Record<ExtendedMonitorHealth, strin
 // ── Node display state ──
 
 export type MonitorNodeDisplayState =
+  | "pending"
   | "running"
-  | "idle"
+  | "validating"
+  | "needsFollowup"
+  | "recovering"
   | "blocked"
   | "warning"
   | "complete"
-  | "ok";
+  | "ok"
+  // Compatibility alias kept for historical callers that still emit "idle".
+  | "idle";
 
 export const MONITOR_NODE_DISPLAY_STATE_LABELS: Record<MonitorNodeDisplayState, string> = {
+  pending: "pending",
   running: "running",
-  idle: "idle",
+  validating: "validating",
+  needsFollowup: "follow-up",
+  recovering: "recovering",
   blocked: "blocked",
   warning: "warning",
   complete: "complete",
   ok: "ok",
+  idle: "pending",
 };
 
 /** Compact single-char display state for narrow terminals. */
 export const MONITOR_NODE_DISPLAY_STATE_CHARS: Record<MonitorNodeDisplayState, string> = {
+  pending: "⏸",
   running: "▶",
-  idle: "⏸",
+  validating: "◐",
+  needsFollowup: "↻",
+  recovering: "⟳",
   blocked: "✖",
   warning: "⚠",
   complete: "✓",
   ok: "○",
+  idle: "⏸",
 };
 
 // ── Structured overview model ──
@@ -411,8 +424,8 @@ function formatRunnerCountLabel(runners: GoalMonitorRuntimeSummary["runners"]): 
 // ── Node display state ──
 
 /**
- * Derive a display state for a DAG node based on its own status and
- * the status of its associated subagents.
+ * Derive a display state for a DAG node based on its own status and the
+ * status/history of its associated subagents.
  */
 export function formatNodeDisplayState(
   node: GoalDagNode,
@@ -420,30 +433,69 @@ export function formatNodeDisplayState(
 ): MonitorNodeDisplayState {
   const nodeSubs = subagents.filter((s) => s.nodeId === node.nodeId);
 
-  // Terminal states first.
-  if (["blocked", "failed"].includes(node.status)) return "blocked";
-  if (node.status === "blockedTerminal") return "complete";
+  // Terminal-ish states first.
+  if (["blocked", "failed"].includes(node.status)) {
+    return hasNodeRecoverySignal(node, nodeSubs) ? "recovering" : "blocked";
+  }
+  if (node.status === "blockedTerminal") {
+    return hasNodeRecoverySignal(node, nodeSubs) ? "recovering" : "blocked";
+  }
   if (node.status === "superseded") return "ok";
 
   // Node is complete but subagents may have residual issues.
   if (node.status === "complete") {
-    const hasResidualIssues = nodeSubs.some(
-      (s) => isUnresolvedResidualIssue(s, subagents),
-    );
+    const hasResidualIssues = nodeSubs.some((s) => isUnresolvedResidualIssue(s, nodeSubs));
     return hasResidualIssues ? "warning" : "complete";
   }
 
-  // Running.
-  if (["running", "controllerValidating"].includes(node.status)) return "running";
-  if (nodeSubs.some((s) => s.status === "running")) return "running";
+  // Validate/retry state takes priority where evidence is present.
+  if (hasNodeRecoverySignal(node, nodeSubs)) return "recovering";
 
-  // Ready but not yet started.
-  if (["ready", "planned"].includes(node.status)) return "idle";
+  // Explicit validator loop.
+  if (node.status === "controllerValidating") return "validating";
+  if (node.lifecyclePhase === "validating") return "validating";
 
-  // Self-reported but waiting on controller.
-  if (["selfReportedComplete", "needsFollowup"].includes(node.status)) return "idle";
+  // Running / execution active.
+  if (node.status === "running") return "running";
+  if (nodeSubs.some((subagent) => subagent.status === "running")) return "running";
 
-  return "ok";
+  // Follow-up.
+  if (node.status === "needsFollowup") return "needsFollowup";
+  if (nodeSubs.some((subagent) => subagent.status === "needsFollowup")) return "needsFollowup";
+
+  // Planned / pending.
+  if (node.status === "planned") return "pending";
+  if (["ready", "selfReportedComplete"].includes(node.status)) return "pending";
+
+  return nodeSubs.length > 0 ? "ok" : "pending";
+}
+
+function hasNodeRecoverySignal(node: GoalDagNode, subagents: GoalSubagentRecord[]): boolean {
+  if (isActiveRecoveryDecision(node.lastRecoveryDecision)) return true;
+  if (containsRecoveryHint(node.lastValidationSummary)) return true;
+
+  return subagents.some((subagent) => {
+    if (subagent.lastRecoveryDecision && isActiveRecoveryDecision(subagent.lastRecoveryDecision)) return true;
+    if (containsRecoveryHint(subagent.integrationStatus)) return true;
+    if (containsRecoveryHint(subagent.selfReportedResult)) return true;
+    if (containsRecoveryHint(subagent.integrationError)) return true;
+    if (subagent.retryCount && subagent.retryCount > 0 && subagent.status !== "complete") return true;
+    return false;
+  });
+}
+
+function isActiveRecoveryDecision(decision: GoalDagNode["lastRecoveryDecision"] | GoalSubagentRecord["lastRecoveryDecision"]): boolean {
+  if (!decision?.action) return false;
+  if (["askUser", "markNodeBlocked"].includes(decision.action)) return false;
+  if (typeof decision.maxRetries === "number" && typeof decision.retryCount === "number") {
+    return decision.retryCount < decision.maxRetries;
+  }
+  return true;
+}
+
+function containsRecoveryHint(value: string | undefined): boolean {
+  if (!value) return false;
+  return /\b(recovery|retry|recovered|replacing|resurrect|relaunch|prompt|stale|blocked-node|context overflow)\b/i.test(value);
 }
 
 // ── Recent events filtering ──

@@ -16,21 +16,29 @@ export const EXTENDED_MONITOR_HEALTH_LABELS = {
     Running: "Running",
 };
 export const MONITOR_NODE_DISPLAY_STATE_LABELS = {
+    pending: "pending",
     running: "running",
-    idle: "idle",
+    validating: "validating",
+    needsFollowup: "follow-up",
+    recovering: "recovering",
     blocked: "blocked",
     warning: "warning",
     complete: "complete",
     ok: "ok",
+    idle: "pending",
 };
 /** Compact single-char display state for narrow terminals. */
 export const MONITOR_NODE_DISPLAY_STATE_CHARS = {
+    pending: "⏸",
     running: "▶",
-    idle: "⏸",
+    validating: "◐",
+    needsFollowup: "↻",
+    recovering: "⟳",
     blocked: "✖",
     warning: "⚠",
     complete: "✓",
     ok: "○",
+    idle: "⏸",
 };
 // ── User-facing action labels ──
 export const ACTION_DISPLAY_LABELS = {
@@ -291,11 +299,13 @@ function formatRunnerCountLabel(runners) {
  */
 export function formatNodeDisplayState(node, subagents) {
     const nodeSubs = subagents.filter((s) => s.nodeId === node.nodeId);
-    // Terminal states first.
-    if (["blocked", "failed"].includes(node.status))
-        return "blocked";
-    if (node.status === "blockedTerminal")
-        return "complete";
+    // Terminal-ish states first.
+    if (["blocked", "failed"].includes(node.status)) {
+        return hasNodeRecoverySignal(node, nodeSubs) ? "recovering" : "blocked";
+    }
+    if (node.status === "blockedTerminal") {
+        return hasNodeRecoverySignal(node, nodeSubs) ? "recovering" : "blocked";
+    }
     if (node.status === "superseded")
         return "ok";
     // Node is complete but subagents may have residual issues.
@@ -303,18 +313,64 @@ export function formatNodeDisplayState(node, subagents) {
         const hasResidualIssues = nodeSubs.some((s) => isUnresolvedResidualIssue(s, subagents));
         return hasResidualIssues ? "warning" : "complete";
     }
-    // Running.
-    if (["running", "controllerValidating"].includes(node.status))
+    // Validate/retry state takes priority where evidence is present.
+    if (hasNodeRecoverySignal(node, nodeSubs))
+        return "recovering";
+    // Explicit validator loop.
+    if (node.status === "controllerValidating")
+        return "validating";
+    if (node.lifecyclePhase === "validating")
+        return "validating";
+    // Running / execution active.
+    if (node.status === "running")
         return "running";
-    if (nodeSubs.some((s) => s.status === "running"))
+    if (nodeSubs.some((subagent) => subagent.status === "running"))
         return "running";
-    // Ready but not yet started.
-    if (["ready", "planned"].includes(node.status))
-        return "idle";
-    // Self-reported but waiting on controller.
-    if (["selfReportedComplete", "needsFollowup"].includes(node.status))
-        return "idle";
-    return "ok";
+    // Follow-up.
+    if (node.status === "needsFollowup")
+        return "needsFollowup";
+    if (nodeSubs.some((subagent) => subagent.status === "needsFollowup"))
+        return "needsFollowup";
+    // Planned / pending.
+    if (node.status === "planned")
+        return "pending";
+    if (["ready", "selfReportedComplete"].includes(node.status))
+        return "pending";
+    return nodeSubs.length > 0 ? "ok" : "pending";
+}
+function hasNodeRecoverySignal(node, subagents) {
+    if (isActiveRecoveryDecision(node.lastRecoveryDecision))
+        return true;
+    if (containsRecoveryHint(node.lastValidationSummary))
+        return true;
+    return subagents.some((subagent) => {
+        if (subagent.lastRecoveryDecision && isActiveRecoveryDecision(subagent.lastRecoveryDecision))
+            return true;
+        if (containsRecoveryHint(subagent.integrationStatus))
+            return true;
+        if (containsRecoveryHint(subagent.selfReportedResult))
+            return true;
+        if (containsRecoveryHint(subagent.integrationError))
+            return true;
+        if (subagent.retryCount && subagent.retryCount > 0 && subagent.status !== "complete")
+            return true;
+        return false;
+    });
+}
+function isActiveRecoveryDecision(decision) {
+    if (!decision?.action)
+        return false;
+    if (["askUser", "markNodeBlocked"].includes(decision.action))
+        return false;
+    if (typeof decision.maxRetries === "number" && typeof decision.retryCount === "number") {
+        return decision.retryCount < decision.maxRetries;
+    }
+    return true;
+}
+function containsRecoveryHint(value) {
+    if (!value)
+        return false;
+    return /\b(recovery|retry|recovered|replacing|resurrect|relaunch|prompt|stale|blocked-node|context overflow)\b/i.test(value);
 }
 // ── Recent events filtering ──
 // Events considered "meaningful" for the overview — these are the ones users
