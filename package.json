@@ -25,6 +25,7 @@
     "./opencode/model-routing": "./dist/adapters/opencode/model-routing.js",
     "./opencode/monitor": "./dist/adapters/opencode/monitor-ui.js",
     "./opencode/closeout": "./dist/adapters/opencode/closeout.js",
+    "./choice-action": "./dist/adapters/choice-action.js",
     "./catalogs/bindings/pi.json": "./catalogs/bindings/pi.json",
     "./catalogs/bindings/opencode.json": "./catalogs/bindings/opencode.json"
   },
@@ -92,6 +93,6 @@
     "node": ">=22.5.0"
   },
   "dependencies": {
-    "goal-contract": "github:a5345534/goal-contract#bcb7668a2ee4128660dd80ca6a92828da8f56540"
+    "goal-contract": "github:a5345534/goal-contract#e24aa3f977879d6602a55b50af112f44150c34eb"
   }
 }
