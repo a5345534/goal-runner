@@ -34,8 +34,17 @@ export class PiHarnessSubagentAdapter {
     async startSession(request) {
         const launch = launchRequestForStart(request, this.modelArg);
         const handle = await this.launcher(launch);
-        this.rememberHandle(request.subagentId, handle);
-        await handle.sendPrompt(renderPiSubagentInitialPrompt(request));
+        try {
+            await handle.sendPrompt(renderPiSubagentInitialPrompt(request));
+            this.rememberHandle(request.subagentId, handle);
+        }
+        catch (error) {
+            try {
+                handle.stop();
+            }
+            catch { /* best-effort cleanup after failed prompt dispatch */ }
+            throw error;
+        }
         return {
             sessionId: handle.sessionId,
             sessionFile: handle.sessionFile,
@@ -49,7 +58,13 @@ export class PiHarnessSubagentAdapter {
     }
     async sendPrompt(request) {
         const handle = await this.launchForExistingSubagent(request.subagent);
-        await handle.sendPrompt(request.prompt);
+        try {
+            await handle.sendPrompt(request.prompt);
+        }
+        catch (error) {
+            this.stopExistingHandle(request.subagent);
+            throw error;
+        }
     }
     getSessionState(request) {
         const handle = this.handles.get(keyForSubagent(request.subagent));

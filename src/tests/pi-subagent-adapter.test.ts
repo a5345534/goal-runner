@@ -111,6 +111,33 @@ test("Pi harness subagent adapter starts a detached Pi session and sends the ini
   assert.match(prompts[0] ?? "", /create attendance doctypes/);
 });
 
+test("Pi harness subagent adapter rejects and stops the handle when initial prompt dispatch fails", async () => {
+  const stopped: string[] = [];
+  const launcher = async (): Promise<BackgroundGoalSessionHandle> => ({
+    sessionId: "failed-session",
+    sessionFile: "/sessions/failed-session.jsonl",
+    setSessionName: async () => undefined,
+    sendPrompt: async () => {
+      throw new Error("detached background Pi runner stopped before creating session file");
+    },
+    stop: () => stopped.push("failed-session"),
+  });
+  const adapter = new PiHarnessSubagentAdapter({ launcher, now: () => new Date(now) });
+
+  await assert.rejects(
+    adapter.startSession({
+      goalId: "goal-1",
+      node: node(),
+      subagentId: "subagent-1",
+      cwd: "/repo/.worktrees/attendance",
+      initialPrompt: "initial",
+    }),
+    /stopped before creating session file/,
+  );
+
+  assert.deepEqual(stopped, ["failed-session"]);
+});
+
 test("Pi harness subagent adapter honors controller-prepared resources", async () => {
   const { launcher, launches } = fakeLauncher();
   const adapter = new PiHarnessSubagentAdapter({ launcher, modelArg: "fallback/model", now: () => new Date(now) });

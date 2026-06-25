@@ -28,6 +28,7 @@ export interface BackgroundGoalSessionHandle {
 export type BackgroundGoalSessionLauncher = (request: BackgroundGoalSessionLaunchRequest) => Promise<BackgroundGoalSessionHandle>;
 
 const BACKGROUND_SESSION_START_TIMEOUT_MS = 60_000;
+const BACKGROUND_PROMPT_ACCEPT_TIMEOUT_MS = 30_000;
 
 export async function launchPiRpcBackgroundGoalSession(request: BackgroundGoalSessionLaunchRequest): Promise<BackgroundGoalSessionHandle> {
   const runId = randomUUID();
@@ -35,6 +36,7 @@ export async function launchPiRpcBackgroundGoalSession(request: BackgroundGoalSe
   const configPath = path.join(runDir, "config.json");
   const readyPath = path.join(runDir, "ready.json");
   const commandPath = path.join(runDir, "command.json");
+  const commandAckPath = path.join(runDir, "command-ack.json");
   const logPath = path.join(runDir, "runner.log");
   const runnerPath = fileURLToPath(new URL("./background-runner.js", import.meta.url));
   if (!request.sessionId && !request.sessionFile) throw new Error("Background goal session launch requires a session id or session file");
@@ -50,6 +52,7 @@ export async function launchPiRpcBackgroundGoalSession(request: BackgroundGoalSe
     cliPath: process.argv[1] ?? "pi",
     readyPath,
     commandPath,
+    commandAckPath,
     logPath,
   };
   fs.writeFileSync(configPath, JSON.stringify(config), "utf8");
@@ -84,7 +87,18 @@ export async function launchPiRpcBackgroundGoalSession(request: BackgroundGoalSe
         pendingSessionName = name;
       },
       sendPrompt: async (prompt: string) => {
-        fs.writeFileSync(commandPath, JSON.stringify({ sessionName: pendingSessionName, prompt }), "utf8");
+        const commandId = randomUUID();
+        try { fs.rmSync(commandAckPath, { force: true }); } catch { /* best-effort stale ack cleanup */ }
+        fs.writeFileSync(commandPath, JSON.stringify({ commandId, sessionName: pendingSessionName, prompt }), "utf8");
+        await waitForBackgroundPromptAccepted({
+          commandAckPath,
+          commandId,
+          sessionFile: ready.sessionFile,
+          logPath,
+          runnerPid: ready.runnerPid,
+          childPid: ready.childPid,
+          timeoutMs: BACKGROUND_PROMPT_ACCEPT_TIMEOUT_MS,
+        });
       },
       isAlive: () => isPidAlive(ready.runnerPid),
       stop: () => stopDetachedProcessGroup(ready.runnerPid),
@@ -95,7 +109,7 @@ export async function launchPiRpcBackgroundGoalSession(request: BackgroundGoalSe
   }
 }
 
-async function waitForBackgroundRunnerReady(readyPath: string, logPath: string, timeoutMs: number): Promise<{ sessionFile: string; sessionId: string; runnerPid?: number }> {
+async function waitForBackgroundRunnerReady(readyPath: string, logPath: string, timeoutMs: number): Promise<{ sessionFile: string; sessionId: string; runnerPid?: number; childPid?: number }> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -105,6 +119,7 @@ async function waitForBackgroundRunnerReady(readyPath: string, logPath: string, 
           sessionFile: parsed.sessionFile,
           sessionId: parsed.sessionId,
           runnerPid: typeof parsed.runnerPid === "number" ? parsed.runnerPid : undefined,
+          childPid: typeof parsed.childPid === "number" ? parsed.childPid : undefined,
         };
       }
     } catch {
@@ -113,6 +128,56 @@ async function waitForBackgroundRunnerReady(readyPath: string, logPath: string, 
     await sleep(100);
   }
   throw new Error(`Timed out waiting for detached background Pi session to start${readLogTail(logPath)}`);
+}
+
+interface BackgroundPromptAcceptedRequest {
+  commandAckPath: string;
+  commandId: string;
+  sessionFile: string;
+  logPath: string;
+  runnerPid?: number;
+  childPid?: number;
+  timeoutMs: number;
+}
+
+async function waitForBackgroundPromptAccepted(request: BackgroundPromptAcceptedRequest): Promise<void> {
+  const deadline = Date.now() + request.timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(request.commandAckPath, "utf8")) as Record<string, unknown>;
+      if (parsed.commandId === request.commandId && parsed.ok === true) {
+        if (sessionFileExists(request.sessionFile)) return;
+        throw new Error(`Detached background Pi session reported prompt accepted but session file is missing: ${request.sessionFile}${readLogTail(request.logPath)}`);
+      }
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        // Ack is being written; retry.
+      } else if (error instanceof Error && !isMissingFileError(error)) {
+        throw error;
+      }
+    }
+
+    const runnerAlive = isPidAlive(request.runnerPid);
+    const childAlive = isPidAlive(request.childPid);
+    if (!runnerAlive && !childAlive && !sessionFileExists(request.sessionFile)) {
+      throw new Error(`Detached background Pi runner stopped before creating session file: ${request.sessionFile}${readLogTail(request.logPath)}`);
+    }
+    await sleep(100);
+  }
+  throw new Error(`Timed out waiting for detached background Pi session to accept prompt and create session file: ${request.sessionFile}${readLogTail(request.logPath)}`);
+}
+
+function sessionFileExists(sessionFile: string): boolean {
+  try {
+    const stats = fs.statSync(sessionFile);
+    return stats.isFile() && stats.size > 0;
+  } catch {
+    return false;
+  }
+}
+
+function isMissingFileError(error: Error): boolean {
+  return (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
 function stopDetachedProcessGroup(pid: number | undefined): void {

@@ -14,6 +14,7 @@ interface RunnerConfig {
   cliPath: string;
   readyPath: string;
   commandPath: string;
+  commandAckPath: string;
   logPath: string;
 }
 
@@ -150,12 +151,13 @@ function isTerminalGoalStateEvent(event: Record<string, unknown>): boolean {
   return typeof goal?.status === "string" && TERMINAL_GOAL_STATUSES.has(goal.status);
 }
 
-async function waitForCommand(): Promise<{ sessionName?: string; prompt: string }> {
+async function waitForCommand(): Promise<{ commandId: string; sessionName?: string; prompt: string }> {
   for (;;) {
     try {
       const parsed = JSON.parse(fs.readFileSync(config.commandPath, "utf8")) as Record<string, unknown>;
-      if (typeof parsed.prompt === "string") {
+      if (typeof parsed.commandId === "string" && typeof parsed.prompt === "string") {
         return {
+          commandId: parsed.commandId,
           sessionName: typeof parsed.sessionName === "string" ? parsed.sessionName : undefined,
           prompt: parsed.prompt,
         };
@@ -165,6 +167,24 @@ async function waitForCommand(): Promise<{ sessionName?: string; prompt: string 
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
+}
+
+async function waitForSessionFile(sessionFile: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const stats = fs.statSync(sessionFile);
+      if (stats.isFile() && stats.size > 0) return;
+    } catch {
+      // Session file not created yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Pi RPC child accepted prompt but did not create session file: ${sessionFile}`);
+}
+
+function writeCommandAck(commandId: string, payload: Record<string, unknown>): void {
+  fs.writeFileSync(config.commandAckPath, JSON.stringify({ commandId, ...payload }), "utf8");
 }
 
 function shutdown(client: RpcClient): void {
@@ -201,6 +221,8 @@ async function main(): Promise<void> {
   const command = await waitForCommand();
   if (command.sessionName) await client.request("set_session_name", { name: command.sessionName });
   await client.request("prompt", { message: command.prompt });
+  await waitForSessionFile(sessionFile, 10_000);
+  writeCommandAck(command.commandId, { ok: true, sessionFile, sessionId });
   log("Initial goal prompt accepted by background Pi RPC session");
 
   await new Promise(() => undefined);
