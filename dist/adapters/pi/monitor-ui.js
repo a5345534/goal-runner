@@ -1427,13 +1427,16 @@ function buildExecutionPlanWideColumns(width) {
     const statusWidth = 12;
     const modelWidth = 16;
     const noteMinWidth = 20;
+    const noteMaxWidth = 48;
     const nodeMinWidth = 18;
+    const nodeMaxWidth = 42;
     const separatorWidth = 8;
     const remaining = width - (iconWidth + statusWidth + modelWidth + separatorWidth);
     if (remaining < nodeMinWidth + noteMinWidth)
         return undefined;
-    const noteWidth = Math.max(noteMinWidth, Math.min(48, remaining - nodeMinWidth));
-    const nodeWidth = remaining - noteWidth;
+    const preferredNodeWidth = Math.min(nodeMaxWidth, Math.max(nodeMinWidth, Math.floor(width * 0.28)));
+    const nodeWidth = Math.min(preferredNodeWidth, remaining - noteMinWidth);
+    const noteWidth = Math.max(noteMinWidth, Math.min(noteMaxWidth, remaining - nodeWidth));
     return [iconWidth, nodeWidth, statusWidth, modelWidth, noteWidth];
 }
 function buildExecutionPlanCompactColumns(width) {

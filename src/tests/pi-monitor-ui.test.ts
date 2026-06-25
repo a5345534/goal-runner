@@ -430,6 +430,9 @@ test("goal monitor execution plan uses aligned wide-row headers and status-row i
   const statusStart = (headerLine ?? "").indexOf("STATUS");
   const modelStart = (headerLine ?? "").indexOf("MODEL");
   const timeStart = (headerLine ?? "").indexOf("TIME / NOTE");
+  assert.ok(statusStart > 0 && statusStart <= 64, `STATUS column should stay near the node column, got ${statusStart}`);
+  assert.ok(modelStart > statusStart && modelStart <= 80, `MODEL column should stay compact, got ${modelStart}`);
+  assert.ok(timeStart > modelStart && timeStart <= 104, `TIME / NOTE column should stay compact, got ${timeStart}`);
 
   const rowLines = rendered.slice(execIndex + 3, execIndex + 3 + nodes.length);
   assert.equal(rowLines.length, nodes.length);
