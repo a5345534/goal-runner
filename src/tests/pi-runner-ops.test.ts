@@ -89,6 +89,28 @@ test("readPiBackgroundRunnerInventory recognizes legacy tmp runner dirs", () => 
   }
 });
 
+test("readPiBackgroundRunnerInventory does not attach stale same-id runner dirs without goal-scoped evidence", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-runner-stale-same-id-"));
+  try {
+    const runnerDir = join(dir, "goal-runner-bg-stale");
+    mkdirSync(runnerDir);
+    writeFileSync(join(runnerDir, "config.json"), JSON.stringify({
+      cwd: "/repo/.worktrees/goal-old/.worktrees/build-node",
+      sessionFile: "/sessions/old-goal/subagent-build-node-1.jsonl",
+      sessionName: "subagent subagent-build-node-1: build-node",
+    }));
+
+    const records = readPiBackgroundRunnerInventory("goal-abcdef12", [subagent({
+      sessionFile: "/sessions/new-goal/subagent-build-node-1.jsonl",
+      workspacePath: "/repo/.worktrees/goal-new/.worktrees/build-node",
+    })], { tmpRoot: dir });
+
+    assert.equal(records.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("readPiBackgroundRunnerInventory can match goal-owned controller runners by workspace root", () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-runner-workspace-inventory-"));
   try {

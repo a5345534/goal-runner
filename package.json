@@ -93,6 +93,6 @@
     "node": ">=22.5.0"
   },
   "dependencies": {
-    "goal-contract": "github:a5345534/goal-contract#e24aa3f977879d6602a55b50af112f44150c34eb"
+    "goal-contract": "github:a5345534/goal-contract#bae53ae5eed99705209822d10681330a80e827df"
   }
 }

@@ -133,12 +133,6 @@ function isCrossDeviceRenameError(error) {
 }
 function matchSubagent(goalId, subagents, candidate) {
     const goalSubagents = subagents.filter((subagent) => subagent.goalId === goalId);
-    const parsedSubagentId = parseSubagentId(candidate.sessionName);
-    if (parsedSubagentId) {
-        const parsedMatch = goalSubagents.find((subagent) => subagent.subagentId === parsedSubagentId);
-        if (parsedMatch)
-            return parsedMatch;
-    }
     if (candidate.sessionFile) {
         const sessionFileMatch = goalSubagents.find((subagent) => subagent.sessionFile === candidate.sessionFile);
         if (sessionFileMatch)
@@ -154,7 +148,25 @@ function matchSubagent(goalId, subagents, candidate) {
         if (sessionIdMatches.length === 1)
             return sessionIdMatches[0];
     }
+    // Subagent ids are intentionally stable across goal retries/DAG runs (for
+    // example "subagent-decide-contract-names").  A stale tmp runner from an
+    // older goal can therefore have the same sessionName-derived subagent id as
+    // the current goal.  Treat the parsed id as an identity hint only when some
+    // goal-scoped evidence corroborates it; otherwise inventory would attach old
+    // dead runner dirs to fresh goals.
+    const parsedSubagentId = parseSubagentId(candidate.sessionName);
+    if (parsedSubagentId && candidateMentionsGoal(candidate, goalId)) {
+        const parsedMatch = goalSubagents.find((subagent) => subagent.subagentId === parsedSubagentId);
+        if (parsedMatch)
+            return parsedMatch;
+    }
     return undefined;
+}
+function candidateMentionsGoal(candidate, goalId) {
+    return pathMentionsGoal(candidate.cwd, goalId)
+        || pathMentionsGoal(candidate.sessionFile, goalId)
+        || pathMentionsGoal(candidate.sessionName, goalId)
+        || pathMentionsGoal(candidate.sessionId, goalId);
 }
 function parseSubagentId(sessionName) {
     return sessionName?.match(/\bsubagent\s+([^:\s]+)(?::|\s|$)/)?.[1];

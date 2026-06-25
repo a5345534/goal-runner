@@ -111,6 +111,15 @@ test("goal monitor row operations remain confirmable from live focus", () => {
     controller.handleInput("v");
     assert.deepEqual(controller.handleInput("\r"), { kind: "action", action: "pause" });
 });
+test("goal monitor can refresh the displayed goal summary to terminal state", () => {
+    const controller = new GoalMonitorController(summary("active"), () => ({ lines: ["tail"], entryCount: 1, messageCount: 1 }), () => ({ nodes: [dagNode({ status: "complete" })], subagents: [], refreshedAt: "2026-05-31T00:05:00.000Z" }));
+    assert.match(controller.render(120, theme).join("\n"), /Goal abcdef12 · active/);
+    controller.updateGoal(summary("complete"));
+    const rendered = controller.render(120, theme).join("\n");
+    assert.match(rendered, /Goal abcdef12 · complete/);
+    assert.doesNotMatch(rendered, /status=active/);
+    assert.deepEqual(controller.actions, ["clear", "close"]);
+});
 test("goal monitor reads transcript lines without mutating session file", () => {
     const dir = mkdtempSync(join(tmpdir(), "goal-monitor-"));
     const sessionFile = join(dir, "session.jsonl");

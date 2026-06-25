@@ -485,7 +485,8 @@ function buildSubagentFollowupPrompt(node: GoalDagNode, subagent: GoalSubagentRe
 }
 
 function buildExplicitOutcomeMarkerPrompt(node: GoalDagNode, subagent: GoalSubagentRecord): string {
-  const previous = subagent.selfReportedResult ? `\n\nPrevious assistant outcome text (untrusted transcript evidence):\n${truncateForPrompt(subagent.selfReportedResult, 4000)}` : "";
+  const previousOutcomeText = subagent.selfReportedResult ?? subagent.lastAdapterObservation?.summary;
+  const previous = previousOutcomeText ? `\n\nPrevious assistant outcome text (untrusted transcript evidence):\n${truncateForPrompt(previousOutcomeText, 4000)}` : "";
   return [
     OUTCOME_MARKER_FOLLOWUP_TAG,
     `Your latest assistant message for node "${node.nodeId}" looked like an outcome report but did not include the required marker.`,

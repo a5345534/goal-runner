@@ -1091,8 +1091,11 @@ test("controller asks idle subagents with terminal text but missing outcome mark
     assert.match(adapter.prompts[0]?.prompt ?? "", /EXPLICIT_OUTCOME_MARKER/);
     assert.match(adapter.prompts[0]?.prompt ?? "", /SUBAGENT_RESULT/);
     assert.match(adapter.prompts[0]?.prompt ?? "", /SUBAGENT_BLOCKED/);
+    assert.match(adapter.prompts[0]?.prompt ?? "", /Implemented files and verification passed, but no marker/);
     assert.equal((await runtime.getGoalDagNode("goal-1", "build"))?.status, "running");
-    assert.equal((await runtime.getGoalSubagent("goal-1", "subagent-1"))?.status, "running");
+    const stored = await runtime.getGoalSubagent("goal-1", "subagent-1");
+    assert.equal(stored?.status, "running");
+    assert.equal(stored?.selfReportedResult, undefined);
 });
 test("controller sends stale subagent continuation prompt for stale needs-followup sessions", async () => {
     const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);

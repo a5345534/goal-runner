@@ -237,11 +237,14 @@ export async function syncGoalSubagentState(
   const controllerValidationResults = state.validationSignals?.length
     ? [...(subagent.controllerValidationResults ?? []), ...state.validationSignals]
     : subagent.controllerValidationResults;
+  const selfReportedResult = state.selfReportedResult && (nextStatus === "selfReportedComplete" || nextStatus === "blocked")
+    ? state.selfReportedResult
+    : subagent.selfReportedResult;
   return {
     ...subagent,
     status: nextStatus,
     lastActivityAt: state.lastActivityAt ?? now,
-    selfReportedResult: state.selfReportedResult ?? subagent.selfReportedResult,
+    selfReportedResult,
     controllerValidationResults,
     integrationStatus: state.error,
     lastAdapterObservation: observation,

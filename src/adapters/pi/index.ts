@@ -39,6 +39,7 @@ import {
   type GoalSummary,
   type GoalToolResult,
   type HiddenGoalTurnRequest,
+  type NativeGitSubmoduleCheckoutSyncResult,
 } from "../../core/index.js";
 import {
   launchPiRpcBackgroundGoalSession,
@@ -1069,6 +1070,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
   });
 
   let promotionStatus: ReturnType<NativeGitWorkspaceManager["promoteControllerBranch"]>["status"] = "notRequired";
+  let promotionResult: ReturnType<NativeGitWorkspaceManager["promoteControllerBranch"]> | undefined;
   const manager = new NativeGitWorkspaceManager({ fetch: false });
   const isAutoAllocated = isAutoAllocatedPiControllerWorkspace(binding);
   const closeoutPolicy = isAutoAllocated ? resolveNativeGitCloseoutPolicy(AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY, { env: process.env }) : undefined;
@@ -1097,7 +1099,8 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
       workspace: binding.workspace,
     });
     const promotion = promotePiControllerBranchIfRequired(manager, binding);
-    promotionStatus = promotion.result?.status ?? "notRequired";
+    promotionResult = promotion.result;
+    promotionStatus = promotionResult?.status ?? "notRequired";
     if (!promotion.ok) {
       await recordPiControllerEvent(runtime, goalId, "promotion.blocked", {
         summary: promotion.summary,
@@ -1265,7 +1268,12 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
       reason: finalization.reason,
     });
     if (finalization.status === "complete") {
+      const submoduleCheckoutSync = syncPromotedTargetSubmoduleCheckoutsIfSafe(manager, binding, promotionResult);
+      if (submoduleCheckoutSync?.status === "blocked" && options.notify !== false) {
+        safeNotify(ctx, `Goal ${goalId.slice(0, 8)} completed but target submodule checkout sync was skipped: ${submoduleCheckoutSync.summary}`, "warning");
+      }
       const cleanup = cleanupTerminalSubagentWorkspaces(manager, state, {
+        force: isAutoAllocated,
         verifySourceReachable: isAutoAllocated,
         promotionStatus,
       } as Parameters<typeof cleanupTerminalSubagentWorkspaces>[2]);
@@ -1283,10 +1291,13 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
       if (controllerCleanupError && options.notify !== false) {
         safeNotify(ctx, `Goal ${goalId.slice(0, 8)} completed but controller workspace cleanup failed: ${controllerCleanupError}`, "warning");
       }
+      const runnerArchive = archiveStoppedPiGoalBackgroundRunnerDirs(goalId, { state, workspaceRoot: binding.workspace });
       await recordPiControllerEvent(runtime, goalId, "cleanup.finished", {
         subagentCleanupErrors: cleanupErrors.length,
         subagentCleanup: summarizePiCleanupResults(cleanup),
         controllerCleanupError,
+        submoduleCheckoutSync: summarizeSubmoduleCheckoutSync(submoduleCheckoutSync),
+        runnerArchive,
       });
     }
     stopPiGoalBackgroundResources(goalId, { state, workspaceRoot: binding.workspace });
@@ -1315,6 +1326,48 @@ function summarizePiCleanupResults(results: ReturnType<typeof cleanupTerminalSub
     }
   }
   return { total: results.length, byAction, errors };
+}
+
+function syncPromotedTargetSubmoduleCheckoutsIfSafe(
+  manager: NativeGitWorkspaceManager,
+  binding: ResolvedWorkspaceBinding,
+  promotion: ReturnType<NativeGitWorkspaceManager["promoteControllerBranch"]> | undefined,
+): NativeGitSubmoduleCheckoutSyncResult | undefined {
+  if (!isAutoAllocatedPiControllerWorkspace(binding)) return undefined;
+  const targetWorkspacePath = promotion?.targetWorkspacePath;
+  if (!targetWorkspacePath) return undefined;
+  return manager.syncSubmoduleWorktreesToHeadPins({ targetWorkspacePath, recursive: true });
+}
+
+function summarizeSubmoduleCheckoutSync(result: NativeGitSubmoduleCheckoutSyncResult | undefined): Record<string, unknown> | undefined {
+  if (!result) return undefined;
+  return {
+    status: result.status,
+    summary: result.summary,
+    targetWorkspacePath: result.targetWorkspacePath,
+    changedPaths: result.changedPaths,
+    updatedPaths: result.updatedPaths,
+    blockers: result.blockers,
+  };
+}
+
+function archiveStoppedPiGoalBackgroundRunnerDirs(
+  goalId: string,
+  options: { state?: GoalOrchestrationState; workspaceRoot?: string; sessionFile?: string } = {},
+): Record<string, unknown> | undefined {
+  const records = readPiBackgroundRunnerInventory(goalId, options.state?.subagents ?? [], {
+    workspaceRoots: options.workspaceRoot ? [options.workspaceRoot] : undefined,
+    sessionFiles: options.sessionFile ? [options.sessionFile] : undefined,
+  }).filter((record) => !record.runnerAlive && !record.childAlive);
+  if (records.length === 0) return undefined;
+  const result = archivePiBackgroundRunnerDirs(records);
+  return {
+    matched: result.matched,
+    archived: result.archived,
+    skippedLive: result.skippedLive,
+    archiveDir: result.archiveDir,
+    messages: result.messages,
+  };
 }
 
 function assessPiDagTerminalState(state: GoalOrchestrationState): {
@@ -1747,13 +1800,16 @@ async function pickGoalMonitorAction(runtime: GoalRuntime, ctx: ExtensionCommand
     return undefined;
   }
 
-  let dagSnapshot = await readGoalMonitorDagSnapshot(runtime, goal);
+  let currentGoal = goal;
+  let dagSnapshot = await readGoalMonitorDagSnapshot(runtime, currentGoal);
   return ctx.ui.custom((tui: { requestRender(): void }, theme: { fg(color: string, text: string): string; bold?(text: string): string }, _keybindings: unknown, done: (result: GoalMonitorSelection | undefined) => void) => {
-    const controller = new GoalMonitorController(goal, undefined, () => dagSnapshot);
+    const controller = new GoalMonitorController(currentGoal, undefined, () => dagSnapshot);
     const refresh = setInterval(() => {
-      void readGoalMonitorDagSnapshot(runtime, goal)
+      void refreshGoalMonitorState(runtime, currentGoal)
         .then((snapshot) => {
-          dagSnapshot = snapshot;
+          currentGoal = snapshot.goal;
+          controller.updateGoal(currentGoal);
+          dagSnapshot = snapshot.dag;
           tui.requestRender();
         })
         .catch(() => tui.requestRender());
@@ -1831,6 +1887,12 @@ async function runGoalMonitorRunnerOperation(
   if (!ok) return;
   const result = archivePiBackgroundRunnerDirs(matches);
   ctx.ui.notify(`Runner archive complete for ${subagentId}: archived ${result.archived}/${result.matched}, skipped live ${result.skippedLive}.`, "info");
+}
+
+async function refreshGoalMonitorState(runtime: GoalRuntime, previousGoal: GoalSummary): Promise<{ goal: GoalSummary; dag: GoalMonitorDagSnapshot }> {
+  const latestGoal = (await runtime.listGoalSummaries()).find((summary) => summary.goalId === previousGoal.goalId) ?? previousGoal;
+  const dag = await readGoalMonitorDagSnapshot(runtime, latestGoal);
+  return { goal: latestGoal, dag };
 }
 
 async function readGoalMonitorDagSnapshot(runtime: GoalRuntime, goal: Pick<GoalSummary, "goalId" | "sessionKey">): Promise<GoalMonitorDagSnapshot> {

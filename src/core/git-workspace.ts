@@ -396,6 +396,21 @@ export interface NativeGitRecursiveCheckoutVerificationResult {
   error?: string;
 }
 
+export interface NativeGitSubmoduleCheckoutSyncRequest {
+  targetWorkspacePath: string;
+  recursive?: boolean;
+}
+
+export interface NativeGitSubmoduleCheckoutSyncResult {
+  status: "passed" | "blocked" | "skipped";
+  summary: string;
+  targetWorkspacePath: string;
+  changedPaths: string[];
+  updatedPaths: string[];
+  blockers: Array<{ path: string; reason: string }>;
+  error?: string;
+}
+
 export class NativeGitWorkspaceManager {
   private readonly options: Required<Omit<NativeGitWorkspaceManagerOptions, "worktreeRoot" | "defaultBaseRef">> & Pick<NativeGitWorkspaceManagerOptions, "worktreeRoot" | "defaultBaseRef">;
 
@@ -579,6 +594,92 @@ export class NativeGitWorkspaceManager {
     }
 
     return { reachabilityVerified };
+  }
+
+  syncSubmoduleWorktreesToHeadPins(request: NativeGitSubmoduleCheckoutSyncRequest): NativeGitSubmoduleCheckoutSyncResult {
+    const targetWorkspacePath = resolve(request.targetWorkspacePath);
+    const repoRoot = findGitRepositoryRoot(targetWorkspacePath);
+    if (!repoRoot) {
+      return nativeGitSubmoduleCheckoutSyncBlocked(request, `target workspace is not inside a Git repository: ${targetWorkspacePath}`);
+    }
+
+    const changedPaths = listChangedSubmoduleCheckoutPaths(targetWorkspacePath, { recursive: request.recursive ?? true });
+    if (changedPaths.length === 0) {
+      return {
+        status: "skipped",
+        summary: "submodule checkout sync skipped: no submodule checkout mismatches detected",
+        targetWorkspacePath,
+        changedPaths: [],
+        updatedPaths: [],
+        blockers: [],
+      };
+    }
+
+    const blockers: Array<{ path: string; reason: string }> = [];
+    const rootDirty = gitStatusPorcelain(targetWorkspacePath, { ignoreWorktreeRoot: true });
+    for (const line of rootDirty.split(/\r?\n/).filter((item) => item.trim())) {
+      const dirtyPath = statusPath(line);
+      if (!pathTouchesAny(dirtyPath, changedPaths)) blockers.push({ path: dirtyPath, reason: `unrelated dirty root worktree status: ${line}` });
+    }
+
+    for (const submodulePath of changedPaths) {
+      const fullPath = resolve(targetWorkspacePath, submodulePath);
+      if (!existsSync(fullPath)) continue; // uninitialized submodule; git submodule update --init is safe.
+      if (!findGitRepositoryRoot(fullPath)) {
+        blockers.push({ path: submodulePath, reason: "submodule path exists but is not a Git repository" });
+        continue;
+      }
+      const dirty = gitStatusPorcelain(fullPath);
+      if (dirty) blockers.push({ path: submodulePath, reason: `submodule worktree has uncommitted changes; refusing checkout update:\n${dirty}` });
+    }
+
+    if (blockers.length > 0) {
+      return {
+        status: "blocked",
+        summary: `submodule checkout sync blocked: ${blockers.map((b) => `${b.path}: ${b.reason}`).join("; ")}`,
+        targetWorkspacePath,
+        changedPaths,
+        updatedPaths: [],
+        blockers,
+      };
+    }
+
+    const updatePaths = topmostPaths(changedPaths);
+    try {
+      git(targetWorkspacePath, ["submodule", "update", "--init", "--recursive", "--", ...updatePaths]);
+    } catch (error) {
+      const message = gitErrorMessage(error);
+      return {
+        status: "blocked",
+        summary: `submodule checkout sync blocked: git submodule update failed: ${message}`,
+        targetWorkspacePath,
+        changedPaths,
+        updatedPaths: [],
+        blockers: updatePaths.map((path) => ({ path, reason: message })),
+        error: message,
+      };
+    }
+
+    const remaining = listChangedSubmoduleCheckoutPaths(targetWorkspacePath, { recursive: request.recursive ?? true });
+    if (remaining.length > 0) {
+      return {
+        status: "blocked",
+        summary: `submodule checkout sync incomplete: ${remaining.join(", ")} still differs from recorded gitlinks`,
+        targetWorkspacePath,
+        changedPaths,
+        updatedPaths: updatePaths.filter((item) => !remaining.some((remainingPath) => pathsTouch(item, remainingPath))),
+        blockers: remaining.map((path) => ({ path, reason: "still differs from recorded gitlink after update" })),
+      };
+    }
+
+    return {
+      status: "passed",
+      summary: `submodule checkout sync passed: updated ${updatePaths.length} submodule checkout(s) to recorded gitlinks`,
+      targetWorkspacePath,
+      changedPaths,
+      updatedPaths: updatePaths,
+      blockers: [],
+    };
   }
 
   integrateSubagentBranch(request: NativeGitSubagentBranchIntegrationRequest): NativeGitSubagentBranchIntegrationResult {
@@ -1951,6 +2052,21 @@ function nativeGitPromotionBlocked(
   };
 }
 
+function nativeGitSubmoduleCheckoutSyncBlocked(
+  request: NativeGitSubmoduleCheckoutSyncRequest,
+  reason: string,
+): NativeGitSubmoduleCheckoutSyncResult {
+  return {
+    status: "blocked",
+    summary: `submodule checkout sync blocked: ${reason}`,
+    targetWorkspacePath: resolve(request.targetWorkspacePath),
+    changedPaths: [],
+    updatedPaths: [],
+    blockers: [{ path: request.targetWorkspacePath, reason }],
+    error: reason,
+  };
+}
+
 function gitStatusPorcelain(cwd: string, options: { ignoreWorktreeRoot?: boolean } = {}): string {
   const output = safeGit(cwd, ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"]);
   if (!options.ignoreWorktreeRoot) return output;
@@ -1961,9 +2077,56 @@ function gitStatusPorcelain(cwd: string, options: { ignoreWorktreeRoot?: boolean
 }
 
 function statusPath(line: string): string {
-  const raw = line.length > 3 ? line.slice(3).trim() : line.trim();
+  const rawLine = line.trimEnd();
+  const raw = rawLine.length > 3 && rawLine[2] === " "
+    ? rawLine.slice(3).trim()
+    : rawLine.length > 2 && rawLine[1] === " "
+      ? rawLine.slice(2).trim()
+      : rawLine.trim();
   const renamed = raw.includes(" -> ") ? raw.split(" -> ").at(-1) ?? raw : raw;
   return renamed.replace(/^"|"$/g, "");
+}
+
+function listChangedSubmoduleCheckoutPaths(cwd: string, options: { recursive: boolean }): string[] {
+  const args = ["submodule", "status", ...(options.recursive ? ["--recursive"] : [])];
+  const output = safeGit(cwd, args);
+  if (!output.trim()) return [];
+  const paths: string[] = [];
+  for (const line of output.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const prefix = line[0];
+    if (prefix !== "+" && prefix !== "-") continue;
+    const match = line.slice(1).trim().match(/^[0-9a-fA-F]+\s+(\S+)/);
+    const submodulePath = match?.[1];
+    if (submodulePath && !paths.includes(submodulePath)) paths.push(submodulePath);
+  }
+  return paths.sort();
+}
+
+function pathTouchesAny(candidate: string, paths: string[]): boolean {
+  return paths.some((item) => pathsTouch(candidate, item));
+}
+
+function pathsTouch(left: string, right: string): boolean {
+  const normalizedLeft = normalizeGitPath(left);
+  const normalizedRight = normalizeGitPath(right);
+  return normalizedLeft === normalizedRight
+    || normalizedLeft.startsWith(`${normalizedRight}/`)
+    || normalizedRight.startsWith(`${normalizedLeft}/`);
+}
+
+function topmostPaths(paths: string[]): string[] {
+  const sorted = [...paths].sort((left, right) => normalizeGitPath(left).localeCompare(normalizeGitPath(right)));
+  const topmost: string[] = [];
+  for (const item of sorted) {
+    if (topmost.some((parent) => pathsTouch(parent, item) && normalizeGitPath(item).startsWith(`${normalizeGitPath(parent)}/`))) continue;
+    topmost.push(item);
+  }
+  return topmost;
+}
+
+function normalizeGitPath(value: string): string {
+  return value.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/g, "");
 }
 
 function gitIsAncestor(cwd: string, ancestor: string, descendant: string): boolean {

@@ -275,6 +275,22 @@ export interface NativeGitRecursiveCheckoutVerificationResult {
     mode: "pre-push-local-commit" | "post-push-remote-branch";
     error?: string;
 }
+export interface NativeGitSubmoduleCheckoutSyncRequest {
+    targetWorkspacePath: string;
+    recursive?: boolean;
+}
+export interface NativeGitSubmoduleCheckoutSyncResult {
+    status: "passed" | "blocked" | "skipped";
+    summary: string;
+    targetWorkspacePath: string;
+    changedPaths: string[];
+    updatedPaths: string[];
+    blockers: Array<{
+        path: string;
+        reason: string;
+    }>;
+    error?: string;
+}
 export declare class NativeGitWorkspaceManager {
     private readonly options;
     constructor(options?: NativeGitWorkspaceManagerOptions);
@@ -282,6 +298,7 @@ export declare class NativeGitWorkspaceManager {
     allocateSubagentWorkspace(request: NativeGitSubagentWorkspaceAllocationRequest): NativeGitSubagentWorkspaceAllocation;
     private ensureBoundSubagentWorkspace;
     cleanupWorkspace(request: NativeGitWorkspaceCleanupRequest): NativeGitWorkspaceCleanupWorkspaceResult;
+    syncSubmoduleWorktreesToHeadPins(request: NativeGitSubmoduleCheckoutSyncRequest): NativeGitSubmoduleCheckoutSyncResult;
     integrateSubagentBranch(request: NativeGitSubagentBranchIntegrationRequest): NativeGitSubagentBranchIntegrationResult;
     promoteControllerBranch(request: NativeGitControllerBranchPromotionRequest): NativeGitControllerBranchPromotionResult;
     ensureSubmoduleGitlinksDurablyPublished(request: NativeGitSubmodulePublishRequest): NativeGitSubmodulePublishResult;

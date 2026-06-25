@@ -517,11 +517,15 @@ export class GoalMonitorController {
   private lastSelectedOperations: GoalMonitorRowOperation[] = [];
 
   constructor(
-    private readonly goal: GoalSummary,
+    private goal: GoalSummary,
     private readonly readTranscript: () => GoalTranscriptSnapshot = () => readControllerTranscript(this.goal.sessionFile),
     private readonly readDagSnapshot: () => GoalMonitorDagSnapshot = () => ({ nodes: [], subagents: [] }),
     private readonly now: () => Date = () => new Date(),
   ) {}
+
+  updateGoal(goal: GoalSummary): void {
+    this.goal = goal;
+  }
 
   get actions(): GoalMonitorAction[] {
     return controllerActions(this.goal);

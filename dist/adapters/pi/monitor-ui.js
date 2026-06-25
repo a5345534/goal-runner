@@ -328,6 +328,9 @@ export class GoalMonitorController {
         this.readDagSnapshot = readDagSnapshot;
         this.now = now;
     }
+    updateGoal(goal) {
+        this.goal = goal;
+    }
     get actions() {
         return controllerActions(this.goal);
     }

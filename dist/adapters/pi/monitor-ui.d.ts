@@ -87,7 +87,7 @@ export declare function deriveMonitorHealth(summary: GoalMonitorRuntimeSummary, 
     nextAction: string;
 };
 export declare class GoalMonitorController {
-    private readonly goal;
+    private goal;
     private readonly readTranscript;
     private readonly readDagSnapshot;
     private readonly now;
@@ -104,6 +104,7 @@ export declare class GoalMonitorController {
     private lastListItems;
     private lastSelectedOperations;
     constructor(goal: GoalSummary, readTranscript?: () => GoalTranscriptSnapshot, readDagSnapshot?: () => GoalMonitorDagSnapshot, now?: () => Date);
+    updateGoal(goal: GoalSummary): void;
     get actions(): GoalMonitorAction[];
     handleInput(data: string): GoalMonitorSelection | undefined;
     private activePageSize;

@@ -8,6 +8,9 @@ import { AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY, cleanupSubagentWorkspace, clean
 function git(cwd, args) {
     return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
+function gitWithFileProtocol(cwd, args) {
+    return execFileSync("git", ["-c", "protocol.file.allow=always", ...args], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+}
 function createRepo() {
     const repo = mkdtempSync(join(tmpdir(), "goal-native-git-"));
     git(repo, ["init", "-b", "main"]);
@@ -119,6 +122,68 @@ function integrationNode(overrides = {}) {
         ...overrides,
     };
 }
+function createCheckoutMismatchSubmoduleFixture() {
+    const root = mkdtempSync(join(tmpdir(), "goal-native-submodule-sync-"));
+    const source = join(root, "sub-source");
+    const parent = join(root, "parent");
+    const submodulePath = join(parent, "deps", "sub");
+    mkdirSync(source, { recursive: true });
+    git(source, ["init", "-b", "main"]);
+    git(source, ["config", "user.email", "goal@example.test"]);
+    git(source, ["config", "user.name", "Goal Test"]);
+    writeFileSync(join(source, "sub.txt"), "v1\n");
+    git(source, ["add", "sub.txt"]);
+    git(source, ["commit", "-m", "sub v1"]);
+    mkdirSync(parent, { recursive: true });
+    git(parent, ["init", "-b", "main"]);
+    git(parent, ["config", "user.email", "goal@example.test"]);
+    git(parent, ["config", "user.name", "Goal Test"]);
+    git(parent, ["config", "protocol.file.allow", "always"]);
+    git(parent, ["commit", "--allow-empty", "-m", "initial"]);
+    gitWithFileProtocol(parent, ["submodule", "add", source, "deps/sub"]);
+    git(parent, ["commit", "-m", "add submodule"]);
+    writeFileSync(join(source, "sub.txt"), "v2\n");
+    git(source, ["add", "sub.txt"]);
+    git(source, ["commit", "-m", "sub v2"]);
+    const nextSha = git(source, ["rev-parse", "HEAD"]);
+    // Keep the test focused on checkout safety, not Git's file:// transport
+    // policy: production sync must not relax protocol.file.allow, so make the
+    // target object available in the submodule object store ahead of time.
+    gitWithFileProtocol(submodulePath, ["fetch", "origin", "main"]);
+    git(parent, ["update-index", "--cacheinfo", `160000,${nextSha},deps/sub`]);
+    git(parent, ["commit", "-m", "pin submodule v2"]);
+    return { root, parent, submodulePath, nextSha };
+}
+test("native git submodule checkout sync updates clean mismatched submodule worktrees", () => {
+    const { root, parent, submodulePath, nextSha } = createCheckoutMismatchSubmoduleFixture();
+    try {
+        const manager = new NativeGitWorkspaceManager({ fetch: false });
+        assert.match(git(parent, ["submodule", "status"]), /^\+/);
+        const result = manager.syncSubmoduleWorktreesToHeadPins({ targetWorkspacePath: parent });
+        assert.equal(result.status, "passed");
+        assert.deepEqual(result.updatedPaths, ["deps/sub"]);
+        assert.equal(git(submodulePath, ["rev-parse", "HEAD"]), nextSha);
+        assert.equal(git(parent, ["status", "--porcelain=v1", "--ignore-submodules=none"]), "");
+    }
+    finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+test("native git submodule checkout sync blocks when a mismatched submodule is dirty", () => {
+    const { root, parent, submodulePath } = createCheckoutMismatchSubmoduleFixture();
+    try {
+        writeFileSync(join(submodulePath, "local.txt"), "local change\n");
+        const before = git(submodulePath, ["rev-parse", "HEAD"]);
+        const manager = new NativeGitWorkspaceManager({ fetch: false });
+        const result = manager.syncSubmoduleWorktreesToHeadPins({ targetWorkspacePath: parent });
+        assert.equal(result.status, "blocked");
+        assert.match(result.summary, /uncommitted changes/);
+        assert.equal(git(submodulePath, ["rev-parse", "HEAD"]), before);
+    }
+    finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
 test("native git manager auto-allocates a controller worktree and branch", () => {
     const repo = createRepo();
     try {
