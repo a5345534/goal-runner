@@ -172,14 +172,133 @@ function scopePolicyFailures(request) {
     if (allowed.length === 0 && forbidden.length === 0)
         return [];
     const changed = changedPaths(request);
-    const forbiddenHits = changed.filter((path) => matchesAnyPathPolicy(path, forbidden));
-    const allowedMisses = allowed.length > 0
-        ? changed.filter((path) => !forbiddenHits.includes(path) && !matchesAnyPathPolicy(path, allowed))
-        : [];
+    const forbiddenHits = [];
+    const allowedMisses = [];
+    const submoduleFailures = [];
+    for (const path of changed) {
+        const submoduleResult = validateChangedSubmoduleGitlinkPath(request, path, allowed, forbidden);
+        if (submoduleResult.kind === "validated") {
+            for (const mappedPath of submoduleResult.mappedPaths) {
+                if (matchesAnyPathPolicy(mappedPath, forbidden))
+                    forbiddenHits.push(mappedPath);
+                else if (allowed.length > 0 && !matchesAnyPathPolicy(mappedPath, allowed))
+                    allowedMisses.push(mappedPath);
+            }
+            continue;
+        }
+        if (submoduleResult.kind === "failed") {
+            submoduleFailures.push(...submoduleResult.failures);
+            continue;
+        }
+        if (matchesAnyPathPolicy(path, forbidden))
+            forbiddenHits.push(path);
+        else if (allowed.length > 0 && !matchesAnyPathPolicy(path, allowed))
+            allowedMisses.push(path);
+    }
     return [
-        allowedMisses.length > 0 ? `changed files outside allowed paths: ${allowedMisses.join(", ")}` : undefined,
-        forbiddenHits.length > 0 ? `changed files touched forbidden paths: ${forbiddenHits.join(", ")}` : undefined,
+        allowedMisses.length > 0 ? `changed files outside allowed paths: ${dedupe(allowedMisses).join(", ")}` : undefined,
+        forbiddenHits.length > 0 ? `changed files touched forbidden paths: ${dedupe(forbiddenHits).join(", ")}` : undefined,
+        ...dedupe(submoduleFailures),
     ].filter((item) => Boolean(item));
+}
+function validateChangedSubmoduleGitlinkPath(request, path, allowed, forbidden) {
+    const cwd = request.subagent.workspacePath;
+    const root = normalizeWorkspacePath(path);
+    if (!cwd || !root || !pathPolicyMentionsSubmoduleRoot(root, [...allowed, ...forbidden]))
+        return { kind: "not-submodule" };
+    const entries = submoduleGitlinkDiffEntries(request, root);
+    if (entries.length === 0)
+        return { kind: "not-submodule" };
+    const mappedPaths = new Set();
+    const failures = [];
+    for (const entry of entries) {
+        if (!isFullGitSha(entry.oldSha) || !isFullGitSha(entry.newSha)) {
+            failures.push(submoduleGitlinkFailure(root, `${entry.source} did not provide full old/new revisions`));
+            continue;
+        }
+        if (isZeroGitSha(entry.oldSha) || isZeroGitSha(entry.newSha)) {
+            failures.push(submoduleGitlinkFailure(root, `${entry.source} has an all-zero revision`));
+            continue;
+        }
+        const diff = safeExecResult("git", ["diff", "--name-status", "-z", `${entry.oldSha}..${entry.newSha}`], resolve(cwd, root));
+        if (!diff.ok) {
+            failures.push(submoduleGitlinkFailure(root, `${entry.source} internal diff failed${diff.error ? `: ${diff.error}` : ""}`));
+            continue;
+        }
+        addNameStatusPaths(diff.output, (internalPath) => {
+            const normalizedInternal = internalPath ? normalizeWorkspacePath(internalPath) : "";
+            if (normalizedInternal)
+                mappedPaths.add(`${root}/${normalizedInternal}`);
+        });
+    }
+    return failures.length > 0 ? { kind: "failed", failures } : { kind: "validated", mappedPaths: [...mappedPaths] };
+}
+function pathPolicyMentionsSubmoduleRoot(root, patterns) {
+    return patterns.some((pattern) => {
+        const prefix = staticPolicyPathPrefix(pattern);
+        return prefix === root || Boolean(prefix?.startsWith(`${root}/`));
+    });
+}
+function staticPolicyPathPrefix(pattern) {
+    const normalized = normalizeWorkspacePath(pattern);
+    if (!normalized)
+        return undefined;
+    const globIndex = normalized.search(/[*?[\]{}]/);
+    return (globIndex >= 0 ? normalized.slice(0, globIndex) : normalized).replace(/\/+$/u, "") || undefined;
+}
+function submoduleGitlinkDiffEntries(request, root) {
+    const cwd = request.subagent.workspacePath;
+    if (!cwd)
+        return [];
+    const entries = [];
+    const addEntries = (output, source) => addRawSubmoduleGitlinkEntries(output, root, source, entries);
+    const baseRef = diffBaseRefForChangedPaths(request);
+    if (baseRef)
+        addEntries(safeExec("git", ["diff", "--raw", "--abbrev=40", "-z", `${baseRef}...HEAD`, "--", root], cwd), `diff ${baseRef}...HEAD`);
+    addEntries(safeExec("git", ["diff", "--cached", "--raw", "--abbrev=40", "-z", "--", root], cwd), "cached diff");
+    addEntries(safeExec("git", ["diff", "--raw", "--abbrev=40", "-z", "--", root], cwd), "working tree diff");
+    return dedupeSubmoduleEntries(entries);
+}
+function addRawSubmoduleGitlinkEntries(output, root, source, entries) {
+    const parts = nulSplit(output);
+    for (let index = 0; index < parts.length;) {
+        const metadata = parts[index++] ?? "";
+        if (!metadata.startsWith(":"))
+            continue;
+        const [oldMode, newMode, oldSha, newSha, status = ""] = metadata.slice(1).split(/\s+/);
+        const oldPath = parts[index++] ?? "";
+        const statusCode = status[0];
+        const newPath = statusCode === "R" || statusCode === "C" ? parts[index++] ?? "" : oldPath;
+        if (oldMode !== "160000" && newMode !== "160000")
+            continue;
+        const normalizedOld = normalizeWorkspacePath(oldPath);
+        const normalizedNew = normalizeWorkspacePath(newPath);
+        if (normalizedOld !== root && normalizedNew !== root)
+            continue;
+        entries.push({ root, oldSha: oldSha ?? "", newSha: newSha ?? "", source });
+    }
+}
+function dedupeSubmoduleEntries(entries) {
+    const seen = new Set();
+    return entries.filter((entry) => {
+        const key = `${entry.root}\0${entry.oldSha}\0${entry.newSha}`;
+        if (seen.has(key))
+            return false;
+        seen.add(key);
+        return true;
+    });
+}
+function submoduleGitlinkFailure(root, reason) {
+    return `changed submodule gitlink ${root} cannot be validated against allowedPaths/forbiddenPaths because ${reason}`;
+}
+function isFullGitSha(value) {
+    return /^[0-9a-f]{40}$/i.test(value);
+}
+function isZeroGitSha(value) {
+    return /^0{40}$/.test(value);
+}
+function dedupe(values) {
+    return [...new Set(values)];
 }
 function matchesAnyPathPolicy(path, patterns) {
     return patterns.some((pattern) => matchesPathPolicy(path, pattern));
@@ -372,6 +491,16 @@ function safeExec(command, args, cwd) {
     }
     catch {
         return "";
+    }
+}
+function safeExecResult(command, args, cwd) {
+    try {
+        return { ok: true, output: execFileSync(command, args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }) };
+    }
+    catch (error) {
+        const record = error;
+        const stderr = toText(record.stderr).trim();
+        return { ok: false, output: "", error: stderr || record.message || String(error) };
     }
 }
 function truncate(value, maxChars = 4_000) {

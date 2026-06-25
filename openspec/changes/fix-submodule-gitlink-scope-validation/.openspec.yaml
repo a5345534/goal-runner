@@ -1,0 +1,4 @@
+name: fix-submodule-gitlink-scope-validation
+created: 2026-06-25
+status: draft
+valueGateStatus: pass

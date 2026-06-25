@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1.0",
+  "changeName": "fix-submodule-gitlink-scope-validation",
+  "generatedAt": "2026-06-25T05:33:24.647339+00:00",
+  "sources": [
+    {
+      "path": "proposal.md",
+      "kind": "proposal",
+      "sha256": "0a6f215b05a967c8e8e32f55aaf59d9755cfa67bf0d326a242768ceb49b0b901"
+    },
+    {
+      "path": "design.md",
+      "kind": "design",
+      "sha256": "a6f1354492ae30bbb981f2a2c3b77eda7b19d5671fc23743993904cac6a07030"
+    },
+    {
+      "path": "tasks.md",
+      "kind": "tasks",
+      "sha256": "d6590cf64ba0584e2c21b41ba979de4dbcbdb256cd655a42359adf67be570e07"
+    },
+    {
+      "path": "specs/goal-runner-controller-validation/spec.md",
+      "kind": "spec-delta",
+      "sha256": "32b73bd6839eeeb05055c4fb03d2377c4d9508131721469008db67bfe1dfcff0"
+    }
+  ]
+}

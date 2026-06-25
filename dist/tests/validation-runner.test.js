@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createControllerValidationRunner, runControllerValidation } from "../core/index.js";
 const now = "2026-06-02T00:00:00.000Z";
 function initGitWorkspace(dir) {
@@ -14,6 +14,30 @@ function initGitWorkspace(dir) {
     writeFileSync(join(dir, "README.md"), "base\n");
     execFileSync("git", ["add", "README.md"], { cwd: dir });
     execFileSync("git", ["commit", "-m", "base"], { cwd: dir, stdio: "ignore" });
+}
+function initSubmoduleValidationWorkspace(prefix) {
+    const root = mkdtempSync(join(tmpdir(), prefix));
+    const source = join(root, "source");
+    const parent = join(root, "parent");
+    mkdirSync(source, { recursive: true });
+    mkdirSync(parent, { recursive: true });
+    initGitWorkspace(source);
+    initGitWorkspace(parent);
+    execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", source, "aos-core"], { cwd: parent, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: join(parent, "aos-core") });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: join(parent, "aos-core") });
+    execFileSync("git", ["add", ".gitmodules", "aos-core"], { cwd: parent });
+    execFileSync("git", ["commit", "-m", "add submodule"], { cwd: parent, stdio: "ignore" });
+    return { parent, submodule: join(parent, "aos-core") };
+}
+function commitSubmoduleChange(parent, submodule, relativePath, content) {
+    const fullPath = join(submodule, relativePath);
+    mkdirSync(dirname(fullPath), { recursive: true });
+    writeFileSync(fullPath, content);
+    execFileSync("git", ["add", relativePath], { cwd: submodule });
+    execFileSync("git", ["commit", "-m", `change ${relativePath}`], { cwd: submodule, stdio: "ignore" });
+    execFileSync("git", ["add", "aos-core"], { cwd: parent });
+    execFileSync("git", ["commit", "-m", "bump aos-core"], { cwd: parent, stdio: "ignore" });
 }
 function request(overrides = {}) {
     return {
@@ -264,6 +288,84 @@ test("controller validation runner enforces validation scope for committed nativ
     }
     finally {
         rmSync(dir, { recursive: true, force: true });
+    }
+});
+test("controller validation runner accepts changed submodule gitlink when internal diff maps to allowed paths", () => {
+    const { parent, submodule } = initSubmoduleValidationWorkspace("goal-validation-submodule-allowed-");
+    try {
+        commitSubmoduleChange(parent, submodule, "packages/runtime-ports/src/index.ts", "export const ok = true;\n");
+        const result = runControllerValidation(request({
+            node: {
+                ...request().node,
+                workspace: { baseRef: "HEAD~1" },
+                validation: { allowedPaths: ["aos-core/packages/runtime-ports/**"] },
+            },
+            subagent: { ...request().subagent, workspacePath: parent },
+        }));
+        assert.equal(result.status, "passed");
+        assert.match(result.validationSignals?.join("\n") ?? "", /scope policy passed/);
+    }
+    finally {
+        rmSync(dirname(parent), { recursive: true, force: true });
+    }
+});
+test("controller validation runner rejects changed submodule gitlink when internal diff is outside allowed paths", () => {
+    const { parent, submodule } = initSubmoduleValidationWorkspace("goal-validation-submodule-outside-");
+    try {
+        commitSubmoduleChange(parent, submodule, "packages/domain-adapters/src/index.ts", "export const adapter = true;\n");
+        const result = runControllerValidation(request({
+            node: {
+                ...request().node,
+                workspace: { baseRef: "HEAD~1" },
+                validation: { allowedPaths: ["aos-core/packages/runtime-ports/**"] },
+            },
+            subagent: { ...request().subagent, workspacePath: parent },
+        }));
+        assert.equal(result.status, "failed");
+        assert.match(result.summary ?? "", /changed files outside allowed paths: aos-core\/packages\/domain-adapters\/src\/index\.ts/);
+        assert.doesNotMatch(result.summary ?? "", /changed files outside allowed paths: aos-core(,|$|;)/);
+    }
+    finally {
+        rmSync(dirname(parent), { recursive: true, force: true });
+    }
+});
+test("controller validation runner applies forbidden paths to mapped submodule internal diff", () => {
+    const { parent, submodule } = initSubmoduleValidationWorkspace("goal-validation-submodule-forbidden-");
+    try {
+        commitSubmoduleChange(parent, submodule, "apps/api/src/main.ts", "export const forbidden = true;\n");
+        const result = runControllerValidation(request({
+            node: {
+                ...request().node,
+                workspace: { baseRef: "HEAD~1" },
+                validation: { allowedPaths: ["aos-core/packages/**", "aos-core/apps/**"], forbiddenPaths: ["aos-core/apps/**"] },
+            },
+            subagent: { ...request().subagent, workspacePath: parent },
+        }));
+        assert.equal(result.status, "failed");
+        assert.match(result.summary ?? "", /changed files touched forbidden paths: aos-core\/apps\/api\/src\/main\.ts/);
+    }
+    finally {
+        rmSync(dirname(parent), { recursive: true, force: true });
+    }
+});
+test("controller validation runner fails closed when changed submodule gitlink diff cannot be inspected", () => {
+    const { parent, submodule } = initSubmoduleValidationWorkspace("goal-validation-submodule-missing-");
+    try {
+        commitSubmoduleChange(parent, submodule, "packages/runtime-ports/src/index.ts", "export const ok = true;\n");
+        rmSync(submodule, { recursive: true, force: true });
+        const result = runControllerValidation(request({
+            node: {
+                ...request().node,
+                workspace: { baseRef: "HEAD~1" },
+                validation: { allowedPaths: ["aos-core/packages/runtime-ports/**"] },
+            },
+            subagent: { ...request().subagent, workspacePath: parent },
+        }));
+        assert.equal(result.status, "failed");
+        assert.match(result.summary ?? "", /changed submodule gitlink aos-core cannot be validated/);
+    }
+    finally {
+        rmSync(dirname(parent), { recursive: true, force: true });
     }
 });
 test("controller validation runner treats rename sources as touched paths", () => {
