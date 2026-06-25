@@ -10,7 +10,9 @@ export interface BackgroundGoalSessionHandle {
     sessionFile: string;
     sessionId: string;
     setSessionName(name: string): Promise<void>;
-    sendPrompt(prompt: string): Promise<void>;
+    sendPrompt(prompt: string, options?: {
+        requireSessionFile?: boolean;
+    }): Promise<void>;
     /** True while the detached background runner process is still alive. */
     isAlive?(): boolean;
     stop(): void;

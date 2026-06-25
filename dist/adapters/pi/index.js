@@ -537,7 +537,7 @@ async function handOffGoalToDetachedControllerForOneShotMode(runtime, ctx, goal,
         sessionId: background.sessionId,
         sessionFile: background.sessionFile,
     });
-    await background.sendPrompt(renderDetachedControllerResumeCommand(goal));
+    await background.sendPrompt(renderDetachedControllerResumeCommand(goal), { requireSessionFile: false });
 }
 async function launchDetachedGoalControllerResumeSession(goal, resumed, controllerDefaults) {
     const labelObjective = resumed.objective.length <= 64 ? resumed.objective : `${resumed.objective.slice(0, 61)}...`;
@@ -1909,7 +1909,7 @@ async function resumeTargetGoal(runtime, ctx, goal, controllerDefaults = {}) {
         }
         const background = await launchDetachedGoalControllerResumeSession(goal, resumed, controllerDefaults);
         backgroundGoalSessions.set(resumed.goalId, background);
-        await background.sendPrompt(renderDetachedControllerResumeCommand(resumed));
+        await background.sendPrompt(renderDetachedControllerResumeCommand(resumed), { requireSessionFile: false });
         ctx.ui.notify(`Goal ${resumed.goalId.slice(0, 8)} resumed in detached controller session. Use /goal monitor ${resumed.goalId.slice(0, 8)} to inspect it.`, "info");
         return;
     }

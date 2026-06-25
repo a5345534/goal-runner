@@ -151,7 +151,7 @@ function isTerminalGoalStateEvent(event: Record<string, unknown>): boolean {
   return typeof goal?.status === "string" && TERMINAL_GOAL_STATUSES.has(goal.status);
 }
 
-async function waitForCommand(): Promise<{ commandId: string; sessionName?: string; prompt: string }> {
+async function waitForCommand(): Promise<{ commandId: string; sessionName?: string; prompt: string; requireSessionFile: boolean }> {
   for (;;) {
     try {
       const parsed = JSON.parse(fs.readFileSync(config.commandPath, "utf8")) as Record<string, unknown>;
@@ -160,6 +160,7 @@ async function waitForCommand(): Promise<{ commandId: string; sessionName?: stri
           commandId: parsed.commandId,
           sessionName: typeof parsed.sessionName === "string" ? parsed.sessionName : undefined,
           prompt: parsed.prompt,
+          requireSessionFile: parsed.requireSessionFile !== false,
         };
       }
     } catch {
@@ -221,8 +222,8 @@ async function main(): Promise<void> {
   const command = await waitForCommand();
   if (command.sessionName) await client.request("set_session_name", { name: command.sessionName });
   await client.request("prompt", { message: command.prompt });
-  await waitForSessionFile(sessionFile, 10_000);
-  writeCommandAck(command.commandId, { ok: true, sessionFile, sessionId });
+  if (command.requireSessionFile) await waitForSessionFile(sessionFile, 10_000);
+  writeCommandAck(command.commandId, { ok: true, sessionFile, sessionId, sessionFileRequired: command.requireSessionFile });
   log("Initial goal prompt accepted by background Pi RPC session");
 
   await new Promise(() => undefined);

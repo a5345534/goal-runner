@@ -1508,6 +1508,7 @@ test("goal-owned /goal --dag in print mode hands off to detached controller and 
   const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
   const launched: Array<{ sessionId?: string; sessionFile?: string; sessionName: string }> = [];
   const prompts: string[] = [];
+  const promptOptions: Array<{ requireSessionFile?: boolean } | undefined> = [];
   const stopped: string[] = [];
 
   setPiBackgroundGoalSessionLauncherForTests(async (request) => {
@@ -1520,8 +1521,9 @@ test("goal-owned /goal --dag in print mode hands off to detached controller and 
       sessionFile,
       sessionId,
       setSessionName: async () => undefined,
-      sendPrompt: async (prompt: string) => {
+      sendPrompt: async (prompt: string, options?: { requireSessionFile?: boolean }) => {
         prompts.push(prompt);
+        promptOptions.push(options);
         writeFileSync(sessionFile, JSON.stringify({
           type: "message",
           timestamp: new Date().toISOString(),
@@ -1580,6 +1582,7 @@ test("goal-owned /goal --dag in print mode hands off to detached controller and 
     assert.equal(launched.length, 2, "controller and first subagent runners should launch");
     assert.match(prompts[0] ?? "", /SUBAGENT_RESULT/);
     assert.match(prompts.at(-1) ?? "", /^\/goal resume [0-9a-f-]{36}$/);
+    assert.equal(promptOptions.at(-1)?.requireSessionFile, false, "controller handoff is an extension command and must not require a transcript write before staying alive");
 
     for (const handler of handlers.get("session_shutdown") ?? []) await handler({ type: "session_shutdown", reason: "quit" });
     assert.deepEqual(stopped, [], "print-mode foreground shutdown must not stop detached goal runners");

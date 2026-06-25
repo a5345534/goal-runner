@@ -19,7 +19,7 @@ export interface BackgroundGoalSessionHandle {
   sessionFile: string;
   sessionId: string;
   setSessionName(name: string): Promise<void>;
-  sendPrompt(prompt: string): Promise<void>;
+  sendPrompt(prompt: string, options?: { requireSessionFile?: boolean }): Promise<void>;
   /** True while the detached background runner process is still alive. */
   isAlive?(): boolean;
   stop(): void;
@@ -86,14 +86,16 @@ export async function launchPiRpcBackgroundGoalSession(request: BackgroundGoalSe
       setSessionName: async (name: string) => {
         pendingSessionName = name;
       },
-      sendPrompt: async (prompt: string) => {
+      sendPrompt: async (prompt: string, options: { requireSessionFile?: boolean } = {}) => {
         const commandId = randomUUID();
+        const requireSessionFile = options.requireSessionFile !== false;
         try { fs.rmSync(commandAckPath, { force: true }); } catch { /* best-effort stale ack cleanup */ }
-        fs.writeFileSync(commandPath, JSON.stringify({ commandId, sessionName: pendingSessionName, prompt }), "utf8");
+        fs.writeFileSync(commandPath, JSON.stringify({ commandId, sessionName: pendingSessionName, prompt, requireSessionFile }), "utf8");
         await waitForBackgroundPromptAccepted({
           commandAckPath,
           commandId,
           sessionFile: ready.sessionFile,
+          requireSessionFile,
           logPath,
           runnerPid: ready.runnerPid,
           childPid: ready.childPid,
@@ -134,6 +136,7 @@ interface BackgroundPromptAcceptedRequest {
   commandAckPath: string;
   commandId: string;
   sessionFile: string;
+  requireSessionFile: boolean;
   logPath: string;
   runnerPid?: number;
   childPid?: number;
@@ -146,7 +149,7 @@ async function waitForBackgroundPromptAccepted(request: BackgroundPromptAccepted
     try {
       const parsed = JSON.parse(fs.readFileSync(request.commandAckPath, "utf8")) as Record<string, unknown>;
       if (parsed.commandId === request.commandId && parsed.ok === true) {
-        if (sessionFileExists(request.sessionFile)) return;
+        if (!request.requireSessionFile || sessionFileExists(request.sessionFile)) return;
         throw new Error(`Detached background Pi session reported prompt accepted but session file is missing: ${request.sessionFile}${readLogTail(request.logPath)}`);
       }
     } catch (error) {
@@ -159,8 +162,8 @@ async function waitForBackgroundPromptAccepted(request: BackgroundPromptAccepted
 
     const runnerAlive = isPidAlive(request.runnerPid);
     const childAlive = isPidAlive(request.childPid);
-    if (!runnerAlive && !childAlive && !sessionFileExists(request.sessionFile)) {
-      throw new Error(`Detached background Pi runner stopped before creating session file: ${request.sessionFile}${readLogTail(request.logPath)}`);
+    if (!runnerAlive && !childAlive && (!request.requireSessionFile || !sessionFileExists(request.sessionFile))) {
+      throw new Error(`Detached background Pi runner stopped before accepting prompt${request.requireSessionFile ? ` and creating session file: ${request.sessionFile}` : ""}${readLogTail(request.logPath)}`);
     }
     await sleep(100);
   }

@@ -63,17 +63,19 @@ export async function launchPiRpcBackgroundGoalSession(request) {
             setSessionName: async (name) => {
                 pendingSessionName = name;
             },
-            sendPrompt: async (prompt) => {
+            sendPrompt: async (prompt, options = {}) => {
                 const commandId = randomUUID();
+                const requireSessionFile = options.requireSessionFile !== false;
                 try {
                     fs.rmSync(commandAckPath, { force: true });
                 }
                 catch { /* best-effort stale ack cleanup */ }
-                fs.writeFileSync(commandPath, JSON.stringify({ commandId, sessionName: pendingSessionName, prompt }), "utf8");
+                fs.writeFileSync(commandPath, JSON.stringify({ commandId, sessionName: pendingSessionName, prompt, requireSessionFile }), "utf8");
                 await waitForBackgroundPromptAccepted({
                     commandAckPath,
                     commandId,
                     sessionFile: ready.sessionFile,
+                    requireSessionFile,
                     logPath,
                     runnerPid: ready.runnerPid,
                     childPid: ready.childPid,
@@ -116,7 +118,7 @@ async function waitForBackgroundPromptAccepted(request) {
         try {
             const parsed = JSON.parse(fs.readFileSync(request.commandAckPath, "utf8"));
             if (parsed.commandId === request.commandId && parsed.ok === true) {
-                if (sessionFileExists(request.sessionFile))
+                if (!request.requireSessionFile || sessionFileExists(request.sessionFile))
                     return;
                 throw new Error(`Detached background Pi session reported prompt accepted but session file is missing: ${request.sessionFile}${readLogTail(request.logPath)}`);
             }
@@ -131,8 +133,8 @@ async function waitForBackgroundPromptAccepted(request) {
         }
         const runnerAlive = isPidAlive(request.runnerPid);
         const childAlive = isPidAlive(request.childPid);
-        if (!runnerAlive && !childAlive && !sessionFileExists(request.sessionFile)) {
-            throw new Error(`Detached background Pi runner stopped before creating session file: ${request.sessionFile}${readLogTail(request.logPath)}`);
+        if (!runnerAlive && !childAlive && (!request.requireSessionFile || !sessionFileExists(request.sessionFile))) {
+            throw new Error(`Detached background Pi runner stopped before accepting prompt${request.requireSessionFile ? ` and creating session file: ${request.sessionFile}` : ""}${readLogTail(request.logPath)}`);
         }
         await sleep(100);
     }
