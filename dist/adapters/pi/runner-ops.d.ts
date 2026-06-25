@@ -33,6 +33,8 @@ export declare const PI_BACKGROUND_RUNNER_DIR_PREFIX = "goal-runner-bg-";
 export declare const PI_LEGACY_BACKGROUND_RUNNER_DIR_PREFIX = "agent-goal-runtime-bg-";
 export declare function readPiBackgroundRunnerInventory(goalId: string, subagents: GoalSubagentRecord[], options?: {
     tmpRoot?: string;
+    workspaceRoots?: string[];
+    sessionFiles?: string[];
 }): PiBackgroundRunnerRecord[];
 export declare function signalPiBackgroundRunners(records: PiBackgroundRunnerRecord[], operation: "stop" | "kill"): PiBackgroundRunnerOperationResult;
 export declare function archivePiBackgroundRunnerDirs(records: PiBackgroundRunnerRecord[], options?: {

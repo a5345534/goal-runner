@@ -67,7 +67,7 @@ function isPiBackgroundRunnerDirName(entry: string): boolean {
 export function readPiBackgroundRunnerInventory(
   goalId: string,
   subagents: GoalSubagentRecord[],
-  options: { tmpRoot?: string } = {},
+  options: { tmpRoot?: string; workspaceRoots?: string[]; sessionFiles?: string[] } = {},
 ): PiBackgroundRunnerRecord[] {
   const tmpRoot = options.tmpRoot ?? os.tmpdir();
   let entries: string[];
@@ -93,7 +93,9 @@ export function readPiBackgroundRunnerInventory(
       cwd: config.cwd,
       sessionId,
     });
-    if (!match && !pathMentionsGoal(config.cwd, goalId) && !pathMentionsGoal(sessionFile, goalId) && !pathMentionsGoal(config.sessionName, goalId)) continue;
+    const workspaceMatch = pathWithinAnyRoot(config.cwd, options.workspaceRoots ?? []);
+    const sessionFileMatch = Boolean(sessionFile && (options.sessionFiles ?? []).includes(sessionFile));
+    if (!match && !workspaceMatch && !sessionFileMatch && !pathMentionsGoal(config.cwd, goalId) && !pathMentionsGoal(sessionFile, goalId) && !pathMentionsGoal(config.sessionName, goalId)) continue;
     const runnerPid = numberOrUndefined(ready.runnerPid);
     const childPid = numberOrUndefined(ready.childPid);
     records.push({
@@ -115,7 +117,7 @@ export function readPiBackgroundRunnerInventory(
       childAlive: isPidAlive(childPid),
       subagentId: match?.subagentId ?? parseSubagentId(config.sessionName),
       nodeId: match?.nodeId,
-      goalId: match?.goalId ?? (pathMentionsGoal(config.cwd, goalId) || pathMentionsGoal(sessionFile, goalId) ? goalId : undefined),
+      goalId: match?.goalId ?? (workspaceMatch || sessionFileMatch || pathMentionsGoal(config.cwd, goalId) || pathMentionsGoal(sessionFile, goalId) ? goalId : undefined),
     });
   }
   return records.sort((left, right) => left.runnerDir.localeCompare(right.runnerDir));
@@ -224,7 +226,17 @@ function parseSubagentId(sessionName: string | undefined): string | undefined {
 
 function pathMentionsGoal(value: string | undefined, goalId: string): boolean {
   if (!value) return false;
-  return value.includes(goalId) || value.includes(goalId.slice(0, 8));
+  return value.includes(goalId) || value.includes(goalId.slice(0, 8)) || value.includes(goalId.slice(0, 12));
+}
+
+function pathWithinAnyRoot(value: string | undefined, roots: string[]): boolean {
+  if (!value) return false;
+  const normalizedValue = path.resolve(value);
+  return roots.some((root) => {
+    if (!root) return false;
+    const normalizedRoot = path.resolve(root);
+    return normalizedValue === normalizedRoot || normalizedValue.startsWith(`${normalizedRoot}${path.sep}`);
+  });
 }
 
 function readJson<T>(file: string | undefined): T | undefined {

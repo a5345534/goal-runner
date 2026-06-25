@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PI_BACKGROUND_RUNNER_DIR_PREFIX } from "./runner-ops.js";
 const BACKGROUND_SESSION_START_TIMEOUT_MS = 60_000;
-const BACKGROUND_PROMPT_ACCEPT_TIMEOUT_MS = 30_000;
+const BACKGROUND_PROMPT_ACCEPT_TIMEOUT_MS = 75_000;
 export async function launchPiRpcBackgroundGoalSession(request) {
     const runId = randomUUID();
     const runDir = fs.mkdtempSync(path.join(os.tmpdir(), PI_BACKGROUND_RUNNER_DIR_PREFIX));

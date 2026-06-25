@@ -28,7 +28,7 @@ export interface BackgroundGoalSessionHandle {
 export type BackgroundGoalSessionLauncher = (request: BackgroundGoalSessionLaunchRequest) => Promise<BackgroundGoalSessionHandle>;
 
 const BACKGROUND_SESSION_START_TIMEOUT_MS = 60_000;
-const BACKGROUND_PROMPT_ACCEPT_TIMEOUT_MS = 30_000;
+const BACKGROUND_PROMPT_ACCEPT_TIMEOUT_MS = 75_000;
 
 export async function launchPiRpcBackgroundGoalSession(request: BackgroundGoalSessionLaunchRequest): Promise<BackgroundGoalSessionHandle> {
   const runId = randomUUID();

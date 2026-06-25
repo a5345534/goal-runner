@@ -203,7 +203,7 @@ async function main() {
         await client.request("set_session_name", { name: command.sessionName });
     await client.request("prompt", { message: command.prompt });
     if (command.requireSessionFile)
-        await waitForSessionFile(sessionFile, 10_000);
+        await waitForSessionFile(sessionFile, 60_000);
     writeCommandAck(command.commandId, { ok: true, sessionFile, sessionId, sessionFileRequired: command.requireSessionFile });
     log("Initial goal prompt accepted by background Pi RPC session");
     await new Promise(() => undefined);

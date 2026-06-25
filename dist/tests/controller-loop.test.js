@@ -129,7 +129,61 @@ test("controller runner launch timeouts remain recoverable through stale runner-
     const saved = await runtime.getGoalDagNode("goal-1", "build");
     assert.equal(saved?.status, "running");
     assert.equal(saved?.lifecyclePhase, "runnerStarting");
-    assert.match(saved?.lastValidationSummary ?? "", /runner launch timed out/);
+    assert.match(saved?.lastValidationSummary ?? "", /runner launch failed; stale runner-start recovery will retry/);
+});
+test("controller keeps missing-transcript launch failures recoverable instead of terminal-blocking dependents", async () => {
+    class MissingTranscriptStartAdapter extends FakeSubagentAdapter {
+        fail = true;
+        startSession(request) {
+            this.starts.push(request);
+            if (this.fail)
+                throw new Error("Detached background Pi runner stopped before accepting prompt and creating session file: /sessions/missing.jsonl: Pi RPC child accepted prompt but did not create session file");
+            return {
+                sessionId: `session-${request.subagentId}`,
+                sessionFile: `/sessions/${request.subagentId}.jsonl`,
+                workspacePath: request.cwd,
+                branch: request.branch,
+                status: "running",
+                lastActivityAt: now,
+            };
+        }
+    }
+    const { runtime } = await runtimeWithPlan([
+        { nodeId: "first", objective: "First node" },
+        { nodeId: "second", objective: "Second node", dependencyNodeIds: ["first"] },
+    ]);
+    const adapter = new MissingTranscriptStartAdapter();
+    const firstTick = await runtime.runGoalControllerTick("goal-1", {
+        adapter,
+        staleStateThresholdMs: 10 * 60_000,
+        workspaceAllocator: ({ node }) => ({ subagentId: `subagent-${node.nodeId}`, cwd: `/repo/.worktrees/${node.slug}`, branch: `feat/${node.slug}` }),
+    });
+    assert.equal(firstTick.blocked.length, 0);
+    assert.equal(firstTick.started.length, 0);
+    assert.equal(adapter.starts.length, 1);
+    const first = await runtime.getGoalDagNode("goal-1", "first");
+    const second = await runtime.getGoalDagNode("goal-1", "second");
+    assert.equal(first?.status, "running");
+    assert.equal(first?.lifecyclePhase, "runnerStarting");
+    assert.match(first?.lastValidationSummary ?? "", /did not create session file/);
+    assert.equal(second?.status, "planned");
+    const earlyRetry = await runtime.runGoalControllerTick("goal-1", {
+        adapter,
+        now: "2026-06-02T00:05:00.000Z",
+        staleStateThresholdMs: 10 * 60_000,
+    });
+    assert.equal(earlyRetry.started.length, 0);
+    assert.equal(adapter.starts.length, 1);
+    adapter.fail = false;
+    const retried = await runtime.runGoalControllerTick("goal-1", {
+        adapter,
+        now: "2026-06-02T00:11:00.000Z",
+        staleStateThresholdMs: 10 * 60_000,
+    });
+    assert.equal(retried.started.length, 1);
+    assert.equal(adapter.starts.length, 2);
+    assert.equal((await runtime.getGoalDagNode("goal-1", "first"))?.lifecyclePhase, "runnerActive");
+    assert.equal((await runtime.getGoalSubagent("goal-1", "subagent-first"))?.status, "running");
 });
 test("controller tick durably records lifecycle phases before adapter start", async () => {
     const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
@@ -569,6 +623,7 @@ test("controller propagates terminal dependency blockers to downstream planned n
     assert.equal(tests?.status, "blocked");
     assert.match(docs?.lastValidationSummary ?? "", /dependency build is blockedTerminal/);
     assert.match(tests?.lastValidationSummary ?? "", /dependency docs is blocked/);
+    assert.doesNotMatch(tests?.lastValidationSummary ?? "", /controller policy blocked build.*controller policy blocked build/s);
 });
 test("controller safety net skips upstream dependencies already integrated into controller", async () => {
     const { runtime } = await runtimeWithPlan([

@@ -201,7 +201,7 @@ const MAX_AUTO_RETRIES_DEFAULT = 2;
 const MAX_VALIDATION_FOLLOWUPS_FOR_SAME_FAILURE = 2;
 const DEFAULT_STALE_CONTROLLER_STATE_MS = 10 * 60_000;
 const DEFAULT_SUBAGENT_PROMPT_DISPATCH_TIMEOUT_MS = 60_000;
-const DEFAULT_SUBAGENT_RUNNER_LAUNCH_TIMEOUT_MS = 60_000;
+const DEFAULT_SUBAGENT_RUNNER_LAUNCH_TIMEOUT_MS = 90_000;
 const INTEGRATION_RETRY_COOLDOWN_MS = 60_000;
 const RECOVERY_BLOCKED_LEDGER_COOLDOWN_MS = 5 * 60_000;
 const recoveryBlockedLedgerCooldown = new Map<string, number>();
@@ -222,6 +222,7 @@ class ControllerActionTimeoutError extends Error {
 const TRANSIENT_ERROR_PATTERNS = [
   /server_error/i,
   /timeout/i,
+  /timed out/i,
   /rate.?limit/i,
   /too many requests/i,
   /service unavailable/i,
@@ -268,6 +269,9 @@ const MISSING_SESSION_ERROR_PATTERNS = [
   /no sessionFile to resume/i,
   /missing .*session/i,
   /session .*missing/i,
+  /did not create session file/i,
+  /stopped before .*session file/i,
+  /no usable session transcript/i,
 ];
 
 const TERMINATED_ERROR_PATTERNS = [
@@ -342,6 +346,67 @@ function isMissingSessionTerminalError(message: string): boolean {
 
 function isTerminatedSessionError(message: string): boolean {
   return TERMINATED_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+function isRecoverableRunnerLaunchError(message: string): boolean {
+  return isMissingSessionTerminalError(message) || isTerminatedSessionError(message) || isTransientError(message);
+}
+
+function runnerLaunchFailureCount(resources: GoalNodePreparedResources | undefined): number {
+  const value = resources?.metadata?.runnerLaunchFailureCount;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+function withRunnerLaunchFailureMetadata(resources: GoalNodePreparedResources | undefined, errorMessage: string, attempt: number, tickStartedAt: string): GoalNodePreparedResources | undefined {
+  if (!resources) return undefined;
+  return {
+    ...resources,
+    metadata: {
+      ...(resources.metadata ?? {}),
+      runnerLaunchFailureCount: attempt,
+      lastRunnerLaunchFailure: truncateForPrompt(errorMessage, 1000),
+      lastRunnerLaunchFailureAt: tickStartedAt,
+    },
+    updatedAt: tickStartedAt,
+  };
+}
+
+async function keepRunnerLaunchFailureRecoverable(
+  runtime: GoalControllerRuntimePort,
+  node: GoalDagNode,
+  errorMessage: string,
+  result: GoalControllerTickResult,
+  tickStartedAt: string,
+  event: string,
+  maxAutoRetries: number | undefined,
+  details: Record<string, unknown> = {},
+): Promise<boolean> {
+  const maxRetries = maxAutoRetries ?? MAX_AUTO_RETRIES_DEFAULT;
+  const maxAttempts = maxRetries + 1;
+  const attempt = runnerLaunchFailureCount(node.preparedResources) + 1;
+  if (!isRecoverableRunnerLaunchError(errorMessage) || attempt >= maxAttempts) return false;
+
+  const preparedResources = withRunnerLaunchFailureMetadata(node.preparedResources, errorMessage, attempt, tickStartedAt);
+  const summary = `runner launch failed; stale runner-start recovery will retry after threshold (attempt ${attempt}/${maxAttempts}): ${truncateForPrompt(errorMessage, 2000)}`;
+  const pendingNode = withNodePatch(node, {
+    status: "running",
+    lifecyclePhase: "runnerStarting",
+    preparedResources,
+    lastValidationSummary: summary,
+    updatedAt: tickStartedAt,
+  });
+  await runtime.saveGoalDagNode(pendingNode);
+  await recordControllerEvent(runtime, node.goalId, event, {
+    nodeId: node.nodeId,
+    subagentId: preparedResources?.subagentId,
+    recoverable: true,
+    attempt,
+    maxAttempts,
+    summary,
+    error: errorMessage,
+    ...details,
+  }, tickStartedAt);
+  return true;
 }
 
 function buildRecoveryPrompt(node: GoalDagNode, errorMessage: string, retryCount: number, maxRetries: number): string {
@@ -1431,7 +1496,7 @@ async function reconcileStaleRunnerStartingNodes(
     const retryableBlockedRunnerStart = isRetryableStaleRunnerStartingBlock(node);
     const retryableInitialAllocationBlock = isRetryableInitialWorkspaceAllocationBlock(node);
     if (!runnerStarting && !runnerPreparing && !retryableBlockedRunnerStart && !retryableInitialAllocationBlock) continue;
-    if (state.subagents.some((subagent) => subagent.nodeId === node.nodeId)) continue;
+    if (hasNonTerminalSubagentForNode(state.subagents, node.nodeId)) continue;
     const ageMs = runnerStarting ? runnerStartingStateAgeMs(node, tickStartedAt) : ageSince(node.updatedAt, tickStartedAt);
     const requiredAgeMs = runnerStarting || retryableInitialAllocationBlock ? thresholdMs : INTEGRATION_RETRY_COOLDOWN_MS;
     if (ageMs < requiredAgeMs) continue;
@@ -1518,6 +1583,17 @@ async function reconcileStaleRunnerStartingNodes(
       result.started.push(started);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
+      const recoverableLaunchFailure = await keepRunnerLaunchFailureRecoverable(
+        runtime,
+        { ...node, preparedResources },
+        `stale runnerStarting restart failed: ${errorMessage}`,
+        result,
+        tickStartedAt,
+        "staleRunnerStarting.restartFailedRecoverable",
+        options.maxAutoRetries,
+        { subagentId: preparedResources.subagentId },
+      );
+      if (recoverableLaunchFailure) continue;
       const summary = isProviderLimitError(errorMessage)
         ? quotaBlockedSummary(errorMessage)
         : unhandledScenarioBlockedSummary(`stale runnerStarting restart failed: ${errorMessage}`);
@@ -2839,21 +2915,17 @@ async function startReadyNodes(
       subagent = await startGoalSubagentWithTimeout(runtime, options, options.adapter, lifecycleNode, startOptions, tickStartedAt);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      if (error instanceof ControllerActionTimeoutError) {
-        const pendingNode = withNodePatch(lifecycleNode, {
-          status: "running",
-          lifecyclePhase: "runnerStarting",
-          lastValidationSummary: `runner launch timed out; stale runner-start recovery can retry after threshold: ${errorMessage}`,
-          updatedAt: tickStartedAt,
-        });
-        await runtime.saveGoalDagNode(pendingNode);
-        await recordControllerEvent(runtime, goalId, "node.runnerLaunchTimedOut", {
-          nodeId: node.nodeId,
-          subagentId: startOptions.subagentId,
-          summary: pendingNode.lastValidationSummary,
-        }, tickStartedAt);
-        continue;
-      }
+      const recoverableLaunchFailure = await keepRunnerLaunchFailureRecoverable(
+        runtime,
+        lifecycleNode,
+        errorMessage,
+        result,
+        tickStartedAt,
+        error instanceof ControllerActionTimeoutError ? "node.runnerLaunchTimedOut" : "node.runnerLaunchFailedRecoverable",
+        options.maxAutoRetries,
+        { timeout: error instanceof ControllerActionTimeoutError },
+      );
+      if (recoverableLaunchFailure) continue;
       const summary = isProviderLimitError(errorMessage)
         ? quotaBlockedSummary(errorMessage)
         : unhandledScenarioBlockedSummary(`runner launch failed: ${errorMessage}`);
@@ -2908,7 +2980,7 @@ async function blockNodesWithTerminalDependencyBlockers(
       const dependency = nodesById.get(dependencyId);
       const status = dependency?.status ?? "blocked";
       const detail = propagatedSummaries.get(dependencyId) ?? dependency?.lastValidationSummary;
-      return detail ? `dependency ${dependencyId} is ${status}: ${detail}` : `dependency ${dependencyId} is ${status}`;
+      return detail ? `dependency ${dependencyId} is ${status}: ${compactDependencyBlockerDetail(detail)}` : `dependency ${dependencyId} is ${status}`;
     }).join("; ");
     const summary = `dependency blocked: ${dependencySummary}`;
     const blockedNode = withNodePatch(node, {
@@ -2931,6 +3003,17 @@ async function blockNodesWithTerminalDependencyBlockers(
   }
 
   return changed;
+}
+
+function compactDependencyBlockerDetail(detail: string): string {
+  const firstLine = detail
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line && !/^at\s+/.test(line));
+  const compact = (firstLine ?? detail).replace(/\s+/g, " ").trim();
+  if (!compact) return "blocked";
+  if (/^dependency blocked:/i.test(compact)) return "dependency blocked";
+  return truncateForPrompt(compact, 500);
 }
 
 function latestSubagentPerNode(subagents: GoalSubagentRecord[]): GoalSubagentRecord[] {
@@ -3031,11 +3114,11 @@ function normalizeValidationFailureSignature(value?: string): string | undefined
 }
 
 function withNodePatch(node: GoalDagNode, patch: Partial<GoalDagNode>): GoalDagNode {
-  return { ...node, ...patch, updatedAt: new Date().toISOString() };
+  return { ...node, ...patch, updatedAt: patch.updatedAt ?? new Date().toISOString() };
 }
 
 function withSubagentPatch(subagent: GoalSubagentRecord, patch: Partial<GoalSubagentRecord>): GoalSubagentRecord {
-  return { ...subagent, ...patch, updatedAt: new Date().toISOString(), lastActivityAt: patch.lastActivityAt ?? subagent.lastActivityAt };
+  return { ...subagent, ...patch, updatedAt: patch.updatedAt ?? new Date().toISOString(), lastActivityAt: patch.lastActivityAt ?? subagent.lastActivityAt };
 }
 
 function subagentChanged(left: GoalSubagentRecord, right: GoalSubagentRecord): boolean {

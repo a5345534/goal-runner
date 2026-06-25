@@ -1086,7 +1086,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
           reason: pushTargetPreflight.reason,
         });
         if (options.notify !== false) safeNotify(ctx, `Goal ${goalId.slice(0, 8)} blocked before final promotion: ${pushTargetPreflight.reason}`, "warning");
-        stopPiGoalBackgroundResources(goalId);
+        stopPiGoalBackgroundResources(goalId, { state, workspaceRoot: binding.workspace });
         return true;
       }
     }
@@ -1111,7 +1111,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
         controllerBranch: binding.branch,
       });
       if (options.notify !== false) safeNotify(ctx, `Goal ${goalId.slice(0, 8)} blocked during final promotion: ${promotion.summary}`, "warning");
-      stopPiGoalBackgroundResources(goalId);
+      stopPiGoalBackgroundResources(goalId, { state, workspaceRoot: binding.workspace });
       return true;
     }
     await recordPiControllerEvent(runtime, goalId, "promotion.passed", {
@@ -1148,7 +1148,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
           blockerCount: reverify.blockers.length,
         });
         if (options.notify !== false) safeNotify(ctx, `Goal ${goalId.slice(0, 8)} blocked during closeout submodule verification: ${reverify.summary}`, "warning");
-        stopPiGoalBackgroundResources(goalId);
+        stopPiGoalBackgroundResources(goalId, { state, workspaceRoot: binding.workspace });
         return true;
       }
 
@@ -1163,7 +1163,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
             prePushStatus: "blocked",
           });
           if (options.notify !== false) safeNotify(ctx, `Goal ${goalId.slice(0, 8)} blocked during pre-push checkout simulation: cannot resolve parent remote URL`, "warning");
-          stopPiGoalBackgroundResources(goalId);
+          stopPiGoalBackgroundResources(goalId, { state, workspaceRoot: binding.workspace });
           return true;
         }
         const prePush = manager.verifyRecursiveCheckout({
@@ -1180,7 +1180,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
             prePushStatus: "blocked",
           });
           if (options.notify !== false) safeNotify(ctx, `Goal ${goalId.slice(0, 8)} blocked during pre-push checkout simulation: ${prePush.summary}`, "warning");
-          stopPiGoalBackgroundResources(goalId);
+          stopPiGoalBackgroundResources(goalId, { state, workspaceRoot: binding.workspace });
           return true;
         }
       }
@@ -1198,7 +1198,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
           reason: pushTarget.reason,
         });
         if (options.notify !== false) safeNotify(ctx, `Goal ${goalId.slice(0, 8)} blocked during parent push target resolution: ${pushTarget.reason}`, "warning");
-        stopPiGoalBackgroundResources(goalId);
+        stopPiGoalBackgroundResources(goalId, { state, workspaceRoot: binding.workspace });
         return true;
       }
 
@@ -1218,7 +1218,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
           parentPushStatus: "blocked",
         });
         if (options.notify !== false) safeNotify(ctx, `Goal ${goalId.slice(0, 8)} blocked during parent push: ${parentPush.summary}`, "warning");
-        stopPiGoalBackgroundResources(goalId);
+        stopPiGoalBackgroundResources(goalId, { state, workspaceRoot: binding.workspace });
         return true;
       }
 
@@ -1233,7 +1233,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
             postPushStatus: "blocked",
           });
           if (options.notify !== false) safeNotify(ctx, `Goal ${goalId.slice(0, 8)} blocked during post-push verification: cannot resolve parent remote URL`, "warning");
-          stopPiGoalBackgroundResources(goalId);
+          stopPiGoalBackgroundResources(goalId, { state, workspaceRoot: binding.workspace });
           return true;
         }
         const postPush = manager.verifyRecursiveCheckout({
@@ -1249,7 +1249,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
             postPushStatus: "blocked",
           });
           if (options.notify !== false) safeNotify(ctx, `Goal ${goalId.slice(0, 8)} blocked during post-push verification: ${postPush.summary}`, "warning");
-          stopPiGoalBackgroundResources(goalId);
+          stopPiGoalBackgroundResources(goalId, { state, workspaceRoot: binding.workspace });
           return true;
         }
       }
@@ -1264,7 +1264,6 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
       status: finalization.status,
       reason: finalization.reason,
     });
-    stopPiGoalBackgroundResources(goalId);
     if (finalization.status === "complete") {
       const cleanup = cleanupTerminalSubagentWorkspaces(manager, state, {
         verifySourceReachable: isAutoAllocated,
@@ -1290,6 +1289,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
         controllerCleanupError,
       });
     }
+    stopPiGoalBackgroundResources(goalId, { state, workspaceRoot: binding.workspace });
   }
 
   return true;
@@ -1356,11 +1356,21 @@ function promotePiControllerBranchIfRequired(
   return { ok: true, summary: result.summary, result };
 }
 
-function stopPiGoalBackgroundResources(goalId: string): void {
+function stopPiGoalBackgroundResources(goalId: string, options: { state?: GoalOrchestrationState; workspaceRoot?: string; sessionFile?: string; deferSignalMs?: number } = {}): void {
   cleanupPiGoalControllerAdapter(goalId);
   const handle = backgroundGoalSessions.get(goalId);
   handle?.stop();
   backgroundGoalSessions.delete(goalId);
+
+  const records = readPiBackgroundRunnerInventory(goalId, options.state?.subagents ?? [], {
+    workspaceRoots: options.workspaceRoot ? [options.workspaceRoot] : undefined,
+    sessionFiles: options.sessionFile ? [options.sessionFile] : undefined,
+  }).filter((record) => record.runnerAlive || record.childAlive);
+  if (records.length === 0) return;
+  const signal = () => { signalPiBackgroundRunners(records, "stop"); };
+  const delay = options.deferSignalMs ?? 100;
+  if (delay <= 0) signal();
+  else setTimeout(signal, delay).unref?.();
 }
 
 function cleanupPiControllerWorkspaceIfSafe(manager: NativeGitWorkspaceManager, binding: ResolvedWorkspaceBinding): string | undefined {

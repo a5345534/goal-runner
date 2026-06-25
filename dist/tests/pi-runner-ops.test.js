@@ -75,6 +75,41 @@ test("readPiBackgroundRunnerInventory recognizes legacy tmp runner dirs", () => 
         rmSync(dir, { recursive: true, force: true });
     }
 });
+test("readPiBackgroundRunnerInventory can match goal-owned controller runners by workspace root", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-runner-workspace-inventory-"));
+    try {
+        const runnerDir = join(dir, "goal-runner-bg-controller");
+        mkdirSync(runnerDir);
+        const readyPath = join(runnerDir, "ready.json");
+        writeFileSync(join(runnerDir, "config.json"), JSON.stringify({
+            runId: "run-controller",
+            cwd: "/repo/.worktrees/goal-123-feature",
+            sessionFile: "/sessions/controller.jsonl",
+            sessionName: "goal: Implement feature",
+            readyPath,
+            commandPath: join(runnerDir, "command.json"),
+            logPath: join(runnerDir, "runner.log"),
+        }));
+        writeFileSync(readyPath, JSON.stringify({
+            sessionFile: "/sessions/controller.jsonl",
+            sessionId: "controller-session",
+            runnerPid: 99999999,
+            childPid: 99999998,
+        }));
+        const withoutWorkspace = readPiBackgroundRunnerInventory("goal-abcdef12", [], { tmpRoot: dir });
+        assert.equal(withoutWorkspace.length, 0);
+        const records = readPiBackgroundRunnerInventory("goal-abcdef12", [], {
+            tmpRoot: dir,
+            workspaceRoots: ["/repo/.worktrees/goal-123-feature"],
+        });
+        assert.equal(records.length, 1);
+        assert.equal(records[0]?.goalId, "goal-abcdef12");
+        assert.equal(records[0]?.sessionId, "controller-session");
+    }
+    finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
 test("archivePiBackgroundRunnerDirs moves only stopped runner temp dirs", () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-runner-archive-"));
     const archiveRoot = join(dir, "archive");

@@ -36,7 +36,9 @@ export function readPiBackgroundRunnerInventory(goalId, subagents, options = {})
             cwd: config.cwd,
             sessionId,
         });
-        if (!match && !pathMentionsGoal(config.cwd, goalId) && !pathMentionsGoal(sessionFile, goalId) && !pathMentionsGoal(config.sessionName, goalId))
+        const workspaceMatch = pathWithinAnyRoot(config.cwd, options.workspaceRoots ?? []);
+        const sessionFileMatch = Boolean(sessionFile && (options.sessionFiles ?? []).includes(sessionFile));
+        if (!match && !workspaceMatch && !sessionFileMatch && !pathMentionsGoal(config.cwd, goalId) && !pathMentionsGoal(sessionFile, goalId) && !pathMentionsGoal(config.sessionName, goalId))
             continue;
         const runnerPid = numberOrUndefined(ready.runnerPid);
         const childPid = numberOrUndefined(ready.childPid);
@@ -59,7 +61,7 @@ export function readPiBackgroundRunnerInventory(goalId, subagents, options = {})
             childAlive: isPidAlive(childPid),
             subagentId: match?.subagentId ?? parseSubagentId(config.sessionName),
             nodeId: match?.nodeId,
-            goalId: match?.goalId ?? (pathMentionsGoal(config.cwd, goalId) || pathMentionsGoal(sessionFile, goalId) ? goalId : undefined),
+            goalId: match?.goalId ?? (workspaceMatch || sessionFileMatch || pathMentionsGoal(config.cwd, goalId) || pathMentionsGoal(sessionFile, goalId) ? goalId : undefined),
         });
     }
     return records.sort((left, right) => left.runnerDir.localeCompare(right.runnerDir));
@@ -160,7 +162,18 @@ function parseSubagentId(sessionName) {
 function pathMentionsGoal(value, goalId) {
     if (!value)
         return false;
-    return value.includes(goalId) || value.includes(goalId.slice(0, 8));
+    return value.includes(goalId) || value.includes(goalId.slice(0, 8)) || value.includes(goalId.slice(0, 12));
+}
+function pathWithinAnyRoot(value, roots) {
+    if (!value)
+        return false;
+    const normalizedValue = path.resolve(value);
+    return roots.some((root) => {
+        if (!root)
+            return false;
+        const normalizedRoot = path.resolve(root);
+        return normalizedValue === normalizedRoot || normalizedValue.startsWith(`${normalizedRoot}${path.sep}`);
+    });
 }
 function readJson(file) {
     if (!file)
