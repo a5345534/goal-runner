@@ -348,8 +348,8 @@ test("controller validation runner applies forbidden paths to mapped submodule i
         rmSync(dirname(parent), { recursive: true, force: true });
     }
 });
-test("controller validation runner fails closed when changed submodule gitlink diff cannot be inspected", () => {
-    const { parent, submodule } = initSubmoduleValidationWorkspace("goal-validation-submodule-missing-");
+test("controller validation runner initializes missing submodule worktree before internal diff", () => {
+    const { parent, submodule } = initSubmoduleValidationWorkspace("goal-validation-submodule-init-");
     try {
         commitSubmoduleChange(parent, submodule, "packages/runtime-ports/src/index.ts", "export const ok = true;\n");
         rmSync(submodule, { recursive: true, force: true });
@@ -361,8 +361,30 @@ test("controller validation runner fails closed when changed submodule gitlink d
             },
             subagent: { ...request().subagent, workspacePath: parent },
         }));
+        assert.equal(result.status, "passed");
+        assert.match(result.validationSignals?.join("\n") ?? "", /scope policy passed/);
+    }
+    finally {
+        rmSync(dirname(parent), { recursive: true, force: true });
+    }
+});
+test("controller validation runner fails closed when changed submodule gitlink diff cannot be inspected", () => {
+    const { parent, submodule } = initSubmoduleValidationWorkspace("goal-validation-submodule-missing-");
+    try {
+        commitSubmoduleChange(parent, submodule, "packages/runtime-ports/src/index.ts", "export const ok = true;\n");
+        rmSync(submodule, { recursive: true, force: true });
+        rmSync(join(parent, ".git", "modules", "aos-core"), { recursive: true, force: true });
+        const result = runControllerValidation(request({
+            node: {
+                ...request().node,
+                workspace: { baseRef: "HEAD~1" },
+                validation: { allowedPaths: ["aos-core/packages/runtime-ports/**"] },
+            },
+            subagent: { ...request().subagent, workspacePath: parent },
+        }));
         assert.equal(result.status, "failed");
         assert.match(result.summary ?? "", /changed submodule gitlink aos-core cannot be validated/);
+        assert.match(result.summary ?? "", /missing commit\(s\)|not initialized/);
     }
     finally {
         rmSync(dirname(parent), { recursive: true, force: true });

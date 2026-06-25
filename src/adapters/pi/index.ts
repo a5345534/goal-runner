@@ -1071,7 +1071,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
   let promotionStatus: ReturnType<NativeGitWorkspaceManager["promoteControllerBranch"]>["status"] = "notRequired";
   const manager = new NativeGitWorkspaceManager({ fetch: false });
   const isAutoAllocated = isAutoAllocatedPiControllerWorkspace(binding);
-  const closeoutPolicy = isAutoAllocated ? resolveNativeGitCloseoutPolicy(AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY) : undefined;
+  const closeoutPolicy = isAutoAllocated ? resolveNativeGitCloseoutPolicy(AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY, { env: process.env }) : undefined;
   if (terminal.allComplete && terminal.integrationIssues.length === 0) {
     if (closeoutPolicy) {
       const pushTargetPreflight = manager.normalizePromotionTarget(
@@ -1286,6 +1286,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
       }
       await recordPiControllerEvent(runtime, goalId, "cleanup.finished", {
         subagentCleanupErrors: cleanupErrors.length,
+        subagentCleanup: summarizePiCleanupResults(cleanup),
         controllerCleanupError,
       });
     }
@@ -1295,6 +1296,26 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
 }
 
 const TERMINAL_PI_DAG_NODE_STATUSES = new Set<GoalDagNode["status"]>(["complete", "blocked", "blockedTerminal", "failed", "superseded"]);
+
+function summarizePiCleanupResults(results: ReturnType<typeof cleanupTerminalSubagentWorkspaces>): Record<string, unknown> {
+  const byAction: Record<string, number> = {};
+  const errors: Array<Record<string, unknown>> = [];
+  for (const result of results) {
+    byAction[result.action] = (byAction[result.action] ?? 0) + 1;
+    if (result.action === "error") {
+      errors.push({
+        subagentId: result.subagentId,
+        nodeId: result.nodeId,
+        workspacePath: result.workspacePath,
+        branch: result.branch,
+        error: result.error,
+        forceAuthorized: result.forceAuthorized,
+        reachabilityVerified: result.reachabilityVerified,
+      });
+    }
+  }
+  return { total: results.length, byAction, errors };
+}
 
 function assessPiDagTerminalState(state: GoalOrchestrationState): {
   terminal: boolean;

@@ -192,6 +192,24 @@ test("native git manager auto-allocates a controller worktree and branch", () =>
   }
 });
 
+test("native git manager cleanup is idempotent when worktree and branch are already gone", () => {
+  const repo = createRepo();
+  try {
+    const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+    const allocation = manager.allocateControllerWorkspace({
+      invocationCwd: repo,
+      goalId: "goal-cleanup-idempotent",
+      objective: "Cleanup idempotently",
+    });
+
+    manager.cleanupWorkspace({ repoRoot: repo, worktreePath: allocation.worktreePath, branch: allocation.branch, force: true });
+    assert.equal(existsSync(allocation.worktreePath), false);
+    assert.doesNotThrow(() => manager.cleanupWorkspace({ repoRoot: repo, worktreePath: allocation.worktreePath, branch: allocation.branch, force: true }));
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("native git manager rejects missing explicit controller base refs before worktree add", () => {
   const repo = createRepo();
   try {
@@ -1303,6 +1321,91 @@ test("native git integrator rejects dirty subagent worktrees with follow-up prom
     manager.cleanupWorkspace({ repoRoot: repo, worktreePath: controller.worktreePath, branch: controller.branch, force: true });
   } finally {
     rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("native git integrator resolves submodule gitlink conflicts with a submodule merge commit", () => {
+  const root = mkdtempSync(join(tmpdir(), "goal-native-submodule-integrate-"));
+  const previousTrustedPatterns = process.env[TRUSTED_SUBMODULE_URL_PATTERNS_ENV];
+  try {
+    const subRemote = join(root, "aos-core.git");
+    const subSeed = join(root, "aos-core-seed");
+    const parent = join(root, "parent");
+    git(root, ["init", "--bare", subRemote]);
+    mkdirSync(subSeed, { recursive: true });
+    git(subSeed, ["init", "-b", "main"]);
+    git(subSeed, ["config", "user.email", "goal@example.test"]);
+    git(subSeed, ["config", "user.name", "Goal Test"]);
+    writeFileSync(join(subSeed, "README.md"), "base\n");
+    git(subSeed, ["add", "README.md"]);
+    git(subSeed, ["commit", "-m", "submodule base"]);
+    git(subSeed, ["remote", "add", "origin", subRemote]);
+    git(subSeed, ["push", "origin", "HEAD:refs/heads/main"]);
+    git(subRemote, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+    mkdirSync(parent, { recursive: true });
+    git(parent, ["init", "-b", "main"]);
+    git(parent, ["config", "user.email", "goal@example.test"]);
+    git(parent, ["config", "user.name", "Goal Test"]);
+    git(parent, ["commit", "--allow-empty", "-m", "initial"]);
+    git(parent, ["-c", "protocol.file.allow=always", "submodule", "add", subRemote, "aos-core"]);
+    git(parent, ["commit", "-am", "add aos-core submodule"]);
+
+    process.env[TRUSTED_SUBMODULE_URL_PATTERNS_ENV] = subRemote;
+    const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+    const controller = manager.allocateControllerWorkspace({ invocationCwd: parent, goalId: "goal-abcdef12", objective: "Controller" });
+    const allocation = manager.allocateSubagentWorkspace({ invocationCwd: parent, controllerWorkspacePath: controller.worktreePath, goalId: "goal-abcdef12", nodeId: "submodule" });
+
+    git(controller.worktreePath, ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "aos-core"]);
+    git(join(controller.worktreePath, "aos-core"), ["config", "user.email", "goal@example.test"]);
+    git(join(controller.worktreePath, "aos-core"), ["config", "user.name", "Goal Test"]);
+    writeFileSync(join(controller.worktreePath, "aos-core", "controller.txt"), "controller\n");
+    git(join(controller.worktreePath, "aos-core"), ["add", "controller.txt"]);
+    git(join(controller.worktreePath, "aos-core"), ["commit", "-m", "controller submodule change"]);
+    git(controller.worktreePath, ["add", "aos-core"]);
+    git(controller.worktreePath, ["commit", "-m", "controller bumps submodule"]);
+
+    git(allocation.worktreePath, ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "aos-core"]);
+    git(join(allocation.worktreePath, "aos-core"), ["config", "user.email", "goal@example.test"]);
+    git(join(allocation.worktreePath, "aos-core"), ["config", "user.name", "Goal Test"]);
+    writeFileSync(join(allocation.worktreePath, "aos-core", "subagent.txt"), "subagent\n");
+    git(join(allocation.worktreePath, "aos-core"), ["add", "subagent.txt"]);
+    git(join(allocation.worktreePath, "aos-core"), ["commit", "-m", "subagent submodule change"]);
+    git(allocation.worktreePath, ["add", "aos-core"]);
+    git(allocation.worktreePath, ["commit", "-m", "subagent bumps submodule"]);
+
+    const result = manager.integrateSubagentBranch({
+      controllerWorkspacePath: controller.worktreePath,
+      subagent: {
+        goalId: "goal-abcdef12",
+        nodeId: "submodule",
+        subagentId: allocation.subagentId,
+        harnessAdapterId: "fake",
+        workspacePath: allocation.worktreePath,
+        branch: allocation.branch,
+        status: "controllerValidating",
+        prompts: [],
+        createdAt: "2026-06-02T00:00:00.000Z",
+        updatedAt: "2026-06-02T00:00:00.000Z",
+      },
+    });
+
+    assert.equal(result.status, "complete");
+    assert.match(result.summary, /resolved submodule gitlink conflict/);
+    assert.match(result.summary, /submodule-merge-commit/);
+    const gitlinkSha = git(controller.worktreePath, ["rev-parse", "HEAD:aos-core"]);
+    const mergeCommit = git(join(controller.worktreePath, "aos-core"), ["cat-file", "-p", gitlinkSha]);
+    assert.equal((mergeCommit.match(/^parent /gm) ?? []).length, 2);
+    assert.equal(git(join(controller.worktreePath, "aos-core"), ["show", `${gitlinkSha}:controller.txt`]), "controller");
+    assert.equal(git(join(controller.worktreePath, "aos-core"), ["show", `${gitlinkSha}:subagent.txt`]), "subagent");
+    assert.match(git(subRemote, ["for-each-ref", "--format=%(refname)", "refs/heads/goal-runner/retained"]), /goal-runner\/retained\/goal-abcdef12\/aos-core-/);
+
+    manager.cleanupWorkspace({ repoRoot: parent, worktreePath: allocation.worktreePath, branch: allocation.branch, force: true });
+    manager.cleanupWorkspace({ repoRoot: parent, worktreePath: controller.worktreePath, branch: controller.branch, force: true });
+  } finally {
+    if (previousTrustedPatterns === undefined) delete process.env[TRUSTED_SUBMODULE_URL_PATTERNS_ENV];
+    else process.env[TRUSTED_SUBMODULE_URL_PATTERNS_ENV] = previousTrustedPatterns;
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

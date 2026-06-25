@@ -255,6 +255,30 @@ test("Pi subagent session inspection maps transcript markers to self-report stat
         rmSync(dir, { recursive: true, force: true });
     }
 });
+test("Pi subagent session inspection accepts markdown-decorated markers and rejects placeholders", () => {
+    const decorated = readPiSubagentSessionState(subagent({ sessionFile: "/decorated" }), {
+        exists: () => true,
+        readFile: () => JSON.stringify({
+            type: "message",
+            message: { role: "assistant", content: "### **SUBAGENT_RESULT:** implemented runtime contracts and tests passed" },
+            timestamp: now,
+        }),
+    });
+    assert.equal(decorated.status, "selfReportedComplete");
+    assert.equal(decorated.selfReportedResult, "implemented runtime contracts and tests passed");
+    const placeholder = readPiSubagentSessionState(subagent({ sessionFile: "/placeholder" }), {
+        exists: () => true,
+        live: true,
+        now: () => new Date(now),
+        readFile: () => JSON.stringify({
+            type: "message",
+            message: { role: "assistant", content: "SUBAGENT_RESULT: <summary>" },
+            timestamp: now,
+        }),
+    });
+    assert.equal(placeholder.status, "idle");
+    assert.equal(placeholder.selfReportedResult, undefined);
+});
 test("Pi subagent session inspection streams large files and skips runtime state mirrors", () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-subagent-large-state-"));
     const sessionFile = join(dir, "session.jsonl");

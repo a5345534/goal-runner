@@ -284,7 +284,13 @@ function validateChangedSubmoduleGitlinkPath(
       continue;
     }
     if (isZeroGitSha(entry.oldSha) || isZeroGitSha(entry.newSha)) {
-      failures.push(submoduleGitlinkFailure(root, `${entry.source} has an all-zero revision`));
+      if (entry.source === "working tree diff" && recoverMissingSubmoduleWorkingTreeDiff(cwd, root)) continue;
+      failures.push(submoduleGitlinkFailure(root, `${entry.source} has an all-zero revision; initialize/fetch the submodule and commit a real gitlink before retrying`));
+      continue;
+    }
+    const availabilityFailure = ensureSubmoduleDiffCommitsAvailable(cwd, root, entry.oldSha, entry.newSha);
+    if (availabilityFailure) {
+      failures.push(submoduleGitlinkFailure(root, `${entry.source} internal revisions are unavailable: ${availabilityFailure}`));
       continue;
     }
     const diff = safeExecResult("git", ["diff", "--name-status", "-z", `${entry.oldSha}..${entry.newSha}`], resolve(cwd, root));
@@ -365,6 +371,41 @@ function isFullGitSha(value: string): boolean {
 
 function isZeroGitSha(value: string): boolean {
   return /^0{40}$/.test(value);
+}
+
+function ensureSubmoduleDiffCommitsAvailable(parentCwd: string, root: string, oldSha: string, newSha: string): string | undefined {
+  const submoduleCwd = resolve(parentCwd, root);
+  ensureSubmoduleWorktreeInitialized(parentCwd, root);
+  if (!existsSync(submoduleCwd)) return `submodule worktree ${root} is not initialized`;
+
+  const missingBefore = [oldSha, newSha].filter((sha) => !gitCommitExists(submoduleCwd, sha));
+  if (missingBefore.length > 0) {
+    safeExecResult("git", ["fetch", "--no-tags", "origin"], submoduleCwd);
+    for (const sha of missingBefore) safeExecResult("git", ["fetch", "--no-tags", "origin", sha], submoduleCwd);
+  }
+
+  const missingAfter = [oldSha, newSha].filter((sha) => !gitCommitExists(submoduleCwd, sha));
+  return missingAfter.length > 0 ? `missing commit(s) ${dedupe(missingAfter).join(", ")}; fetch or retain the submodule refs before controller validation` : undefined;
+}
+
+function recoverMissingSubmoduleWorkingTreeDiff(parentCwd: string, root: string): boolean {
+  ensureSubmoduleWorktreeInitialized(parentCwd, root);
+  const entries: SubmoduleGitlinkDiffEntry[] = [];
+  addRawSubmoduleGitlinkEntries(safeExec("git", ["diff", "--raw", "--abbrev=40", "-z", "--", root], parentCwd), root, "working tree diff", entries);
+  return entries.every((entry) => !isZeroGitSha(entry.oldSha) && !isZeroGitSha(entry.newSha));
+}
+
+function ensureSubmoduleWorktreeInitialized(parentCwd: string, root: string): void {
+  safeExecResult("git", ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive", "--", root], parentCwd);
+}
+
+function gitCommitExists(cwd: string, sha: string): boolean {
+  try {
+    execFileSync("git", ["cat-file", "-e", `${sha}^{commit}`], { cwd, stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function dedupe(values: string[]): string[] {

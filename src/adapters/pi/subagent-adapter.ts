@@ -48,9 +48,11 @@ interface ParsedPiSessionState {
   lastError?: string;
 }
 
-const RESULT_MARKER = /(?:^|\n)\s*SUBAGENT_RESULT\s*:\s*([\s\S]*?)(?=\n\s*SUBAGENT_[A-Z_]+\s*:|$)/i;
-const BLOCKED_MARKER = /(?:^|\n)\s*SUBAGENT_BLOCKED\s*:\s*([\s\S]*?)(?=\n\s*SUBAGENT_[A-Z_]+\s*:|$)/i;
-const STATUS_BLOCKED_MARKER = /(?:^|\n)\s*SUBAGENT_STATUS\s*:\s*blocked\b/i;
+const MARKER_LINE_PREFIX = String.raw`(?:^|\n)\s*(?:#{1,6}\s*)?(?:[-*]\s*)?(?:\*\*)?`;
+const MARKER_LOOKAHEAD_PREFIX = String.raw`\n\s*(?:#{1,6}\s*)?(?:[-*]\s*)?(?:\*\*)?`;
+const RESULT_MARKER = new RegExp(`${MARKER_LINE_PREFIX}SUBAGENT_RESULT(?:\\*\\*)?\\s*:\\s*([\\s\\S]*?)(?=${MARKER_LOOKAHEAD_PREFIX}SUBAGENT_[A-Z_]+(?:\\*\\*)?\\s*:|$)`, "i");
+const BLOCKED_MARKER = new RegExp(`${MARKER_LINE_PREFIX}SUBAGENT_BLOCKED(?:\\*\\*)?\\s*:\\s*([\\s\\S]*?)(?=${MARKER_LOOKAHEAD_PREFIX}SUBAGENT_[A-Z_]+(?:\\*\\*)?\\s*:|$)`, "i");
+const STATUS_BLOCKED_MARKER = /(?:^|\n)\s*(?:#{1,6}\s*)?(?:[-*]\s*)?(?:\*\*)?SUBAGENT_STATUS(?:\*\*)?\s*:\s*blocked\b/i;
 const DEFAULT_STALE_SUBAGENT_SESSION_MS = 10 * 60_000;
 const CONTEXT_OVERFLOW_ERROR_PATTERNS = [
   /context_length_exceeded/i,
@@ -470,8 +472,18 @@ function isBefore(value: string | undefined, cutoff: string | undefined): boolea
 }
 
 function cleanupMarkerText(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
-  return trimmed ? trimmed : undefined;
+  let trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  trimmed = trimmed
+    .replace(/^\*\*/, "")
+    .replace(/\*\*$/u, "")
+    .trim();
+  if (!trimmed || isPlaceholderMarkerText(trimmed)) return undefined;
+  return trimmed;
+}
+
+function isPlaceholderMarkerText(value: string): boolean {
+  return /^<\s*(?:summary|summary of changes|specific blocker|specific blocker and what input\/state change is needed)\b/i.test(value.trim());
 }
 
 function textFromContent(content: unknown): string {

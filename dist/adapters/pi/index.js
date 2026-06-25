@@ -891,7 +891,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(runtime, ctx, goalId, bindi
     let promotionStatus = "notRequired";
     const manager = new NativeGitWorkspaceManager({ fetch: false });
     const isAutoAllocated = isAutoAllocatedPiControllerWorkspace(binding);
-    const closeoutPolicy = isAutoAllocated ? resolveNativeGitCloseoutPolicy(AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY) : undefined;
+    const closeoutPolicy = isAutoAllocated ? resolveNativeGitCloseoutPolicy(AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY, { env: process.env }) : undefined;
     if (terminal.allComplete && terminal.integrationIssues.length === 0) {
         if (closeoutPolicy) {
             const pushTargetPreflight = manager.normalizePromotionTarget({ controllerWorkspacePath: binding.workspace, controllerBranch: binding.branch, targetRef: binding.promotionTargetRef }, closeoutPolicy);
@@ -1098,6 +1098,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(runtime, ctx, goalId, bindi
             }
             await recordPiControllerEvent(runtime, goalId, "cleanup.finished", {
                 subagentCleanupErrors: cleanupErrors.length,
+                subagentCleanup: summarizePiCleanupResults(cleanup),
                 controllerCleanupError,
             });
         }
@@ -1105,6 +1106,25 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(runtime, ctx, goalId, bindi
     return true;
 }
 const TERMINAL_PI_DAG_NODE_STATUSES = new Set(["complete", "blocked", "blockedTerminal", "failed", "superseded"]);
+function summarizePiCleanupResults(results) {
+    const byAction = {};
+    const errors = [];
+    for (const result of results) {
+        byAction[result.action] = (byAction[result.action] ?? 0) + 1;
+        if (result.action === "error") {
+            errors.push({
+                subagentId: result.subagentId,
+                nodeId: result.nodeId,
+                workspacePath: result.workspacePath,
+                branch: result.branch,
+                error: result.error,
+                forceAuthorized: result.forceAuthorized,
+                reachabilityVerified: result.reachabilityVerified,
+            });
+        }
+    }
+    return { total: results.length, byAction, errors };
+}
 function assessPiDagTerminalState(state) {
     if (state.nodes.length === 0)
         return { terminal: false, allComplete: false, integrationIssues: [] };

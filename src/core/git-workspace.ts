@@ -565,14 +565,16 @@ export class NativeGitWorkspaceManager {
       }
     }
 
-    if (request.force) {
-      git(request.worktreePath, ["clean", "-fd"]);
-      git(repoRoot, ["worktree", "remove", "--force", request.worktreePath]);
-    } else {
-      git(repoRoot, ["worktree", "remove", request.worktreePath]);
+    const registeredWorktrees = listGitWorktrees(repoRoot).map((item) => resolve(item.worktreePath));
+    const requestedWorktree = resolve(request.worktreePath);
+    const worktreeRegistered = registeredWorktrees.includes(requestedWorktree);
+    const worktreeExists = existsSync(request.worktreePath);
+    if (worktreeRegistered || worktreeExists) {
+      if (request.force && worktreeExists) git(request.worktreePath, ["clean", "-fd"]);
+      git(repoRoot, ["worktree", "remove", ...(request.force ? ["--force"] : []), request.worktreePath]);
     }
 
-    if (request.branch) {
+    if (request.branch && gitRefExists(repoRoot, request.branch)) {
       git(repoRoot, ["branch", request.force ? "-D" : "-d", request.branch]);
     }
 
@@ -664,9 +666,31 @@ export class NativeGitWorkspaceManager {
       };
     }
 
+    let submoduleMergeSummary: string | undefined;
     try {
       git(controllerWorkspacePath, ["merge", "--no-ff", "--no-commit", sourceHead]);
+    } catch (error) {
+      const resolution = resolveSubmoduleIntegrationMergeConflicts({
+        controllerWorkspacePath,
+        sourceWorkspacePath: source.workspacePath,
+        sourceHead,
+        goalId: request.subagent.goalId,
+      });
+      if (!resolution.ok) {
+        safeGit(controllerWorkspacePath, ["merge", "--abort"]);
+        const message = `git merge failed while integrating subagent ${request.subagent.subagentId}: ${gitErrorMessage(error)}${resolution.error ? `; submodule-aware resolution failed: ${resolution.error}` : ""}`;
+        return nativeGitIntegrationFailure(
+          request,
+          message,
+          { sourceBranch, sourceRef, sourceHead },
+          buildMergeConflictFollowupPrompt(request, message),
+          resolution.validationSignals,
+        );
+      }
+      submoduleMergeSummary = resolution.summary;
+    }
 
+    try {
       // Integration-time submodule publish gate: scan staged gitlinks and ensure
       // every changed submodule SHA is durably remote-fetchable before the merge
       // commit enters the controller branch history.
@@ -680,7 +704,7 @@ export class NativeGitWorkspaceManager {
         baseTreeish: "HEAD",
         targetTreeish: "INDEX",
         phase: "integration",
-        policy: resolveNativeGitCloseoutPolicy(AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY),
+        policy: resolveNativeGitCloseoutPolicy(AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY, { env: process.env }),
       });
 
       if (publish.status === "blocked") {
@@ -709,7 +733,7 @@ export class NativeGitWorkspaceManager {
       const integrationCommitSha = git(controllerWorkspacePath, ["rev-parse", "--verify", "HEAD"]);
       return {
         status: "complete",
-        summary: appendIntegrationSummary(`merged subagent ${request.subagent.subagentId} ${shortSha(sourceHead)} into controller ${shortSha(integrationCommitSha)}`, postMergeValidation.summary),
+        summary: appendIntegrationSummary(appendIntegrationSummary(`merged subagent ${request.subagent.subagentId} ${shortSha(sourceHead)} into controller ${shortSha(integrationCommitSha)}`, submoduleMergeSummary), postMergeValidation.summary),
         sourceBranch,
         sourceRef,
         sourceHead,
@@ -718,8 +742,8 @@ export class NativeGitWorkspaceManager {
         completedAt: new Date().toISOString(),
       };
     } catch (error) {
-      safeGit(controllerWorkspacePath, ["merge", "--abort"]);
-      const message = `git merge failed while integrating subagent ${request.subagent.subagentId}: ${gitErrorMessage(error)}`;
+      abortMergeAndCleanPostMergeValidationArtifacts(controllerWorkspacePath);
+      const message = `git integration failed while integrating subagent ${request.subagent.subagentId}: ${gitErrorMessage(error)}`;
       return nativeGitIntegrationFailure(
         request,
         message,
@@ -1470,6 +1494,206 @@ function nativeGitIntegrationFailure(
   };
 }
 
+interface SubmoduleIntegrationConflictResolution {
+  ok: boolean;
+  summary?: string;
+  error?: string;
+  validationSignals?: string[];
+}
+
+interface UnmergedSubmoduleGitlink {
+  path: string;
+  baseSha?: string;
+  oursSha?: string;
+  theirsSha?: string;
+}
+
+function resolveSubmoduleIntegrationMergeConflicts(request: {
+  controllerWorkspacePath: string;
+  sourceWorkspacePath?: string;
+  sourceHead: string;
+  goalId: string;
+}): SubmoduleIntegrationConflictResolution {
+  const unmerged = parseUnmergedIndexEntries(request.controllerWorkspacePath);
+  if (unmerged.errors.length > 0) {
+    return { ok: false, error: `non-submodule merge conflict(s): ${unmerged.errors.join(", ")}`, validationSignals: unmerged.errors };
+  }
+  if (unmerged.submodules.length === 0) {
+    return { ok: false, error: "merge did not leave resolvable submodule gitlink conflicts" };
+  }
+
+  const resolved: string[] = [];
+  const signals: string[] = [];
+  for (const entry of unmerged.submodules) {
+    const result = resolveSingleSubmoduleGitlinkConflict({
+      controllerWorkspacePath: request.controllerWorkspacePath,
+      sourceWorkspacePath: request.sourceWorkspacePath,
+      goalId: request.goalId,
+      entry,
+    });
+    if (!result.ok) {
+      return { ok: false, error: result.error, validationSignals: [...signals, ...(result.validationSignals ?? [])] };
+    }
+    resolved.push(result.summary ?? `${entry.path}: resolved`);
+    signals.push(result.summary ?? `${entry.path}: resolved`);
+  }
+
+  const remaining = parseUnmergedIndexEntries(request.controllerWorkspacePath);
+  if (remaining.errors.length > 0 || remaining.submodules.length > 0) {
+    const remainingItems = [...remaining.errors, ...remaining.submodules.map((item) => item.path)];
+    return { ok: false, error: `unmerged entries remain after submodule resolution: ${remainingItems.join(", ")}`, validationSignals: remainingItems };
+  }
+
+  return {
+    ok: true,
+    summary: `resolved submodule gitlink conflict(s): ${resolved.join("; ")}`,
+    validationSignals: signals,
+  };
+}
+
+function parseUnmergedIndexEntries(cwd: string): { submodules: UnmergedSubmoduleGitlink[]; errors: string[] } {
+  const output = safeGit(cwd, ["ls-files", "-u", "-z"]);
+  if (!output) return { submodules: [], errors: [] };
+
+  const byPath = new Map<string, { modes: Map<number, string>; shas: Map<number, string> }>();
+  const errors: string[] = [];
+  for (const record of output.split("\0").filter(Boolean)) {
+    const match = record.match(/^(\d+)\s+([0-9a-f]{40})\s+(\d)\t(.+)$/i);
+    if (!match) {
+      errors.push(`unparseable unmerged index entry: ${record}`);
+      continue;
+    }
+    const [, mode, sha, stageText, path] = match;
+    const stage = Number(stageText);
+    const bucket = byPath.get(path) ?? { modes: new Map<number, string>(), shas: new Map<number, string>() };
+    bucket.modes.set(stage, mode);
+    bucket.shas.set(stage, sha);
+    byPath.set(path, bucket);
+  }
+
+  const submodules: UnmergedSubmoduleGitlink[] = [];
+  for (const [path, item] of byPath.entries()) {
+    const modes = [...item.modes.values()];
+    if (modes.every((mode) => mode === "160000")) {
+      submodules.push({
+        path,
+        baseSha: item.shas.get(1),
+        oursSha: item.shas.get(2),
+        theirsSha: item.shas.get(3),
+      });
+    } else {
+      errors.push(path);
+    }
+  }
+  return { submodules, errors };
+}
+
+function resolveSingleSubmoduleGitlinkConflict(request: {
+  controllerWorkspacePath: string;
+  sourceWorkspacePath?: string;
+  goalId: string;
+  entry: UnmergedSubmoduleGitlink;
+}): SubmoduleIntegrationConflictResolution {
+  const { entry } = request;
+  const oursSha = entry.oursSha;
+  const theirsSha = entry.theirsSha;
+  if (!oursSha || !theirsSha) return { ok: false, error: `${entry.path}: missing ours/theirs submodule SHA` };
+  if (isZeroSha(oursSha) || isZeroSha(theirsSha)) return { ok: false, error: `${entry.path}: cannot resolve all-zero submodule SHA conflict` };
+
+  const submoduleCwd = resolve(request.controllerWorkspacePath, entry.path);
+  const init = safeGit(request.controllerWorkspacePath, ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive", "--", entry.path]);
+  void init;
+  if (!existsSync(submoduleCwd)) return { ok: false, error: `${entry.path}: submodule worktree is not checked out` };
+
+  const canonicalUrl = resolveSubmoduleCanonicalUrl(request.controllerWorkspacePath, entry.path, "WORKTREE")
+    ?? resolveSubmoduleCanonicalUrl(request.controllerWorkspacePath, entry.path, "HEAD");
+  const sourceWorkspacePaths = [request.sourceWorkspacePath, request.controllerWorkspacePath].filter((item): item is string => Boolean(item));
+  for (const sha of [oursSha, theirsSha]) {
+    const available = ensureSubmoduleCommitAvailable(submoduleCwd, entry.path, sha, sourceWorkspacePaths, canonicalUrl);
+    if (!available) return { ok: false, error: `${entry.path}: submodule commit ${shortSha(sha)} is unavailable locally or from source/remote` };
+  }
+
+  let resolvedSha = theirsSha;
+  let strategy = "theirs";
+  if (oursSha === theirsSha) {
+    resolvedSha = oursSha;
+    strategy = "same-sha";
+  } else if (gitIsAncestor(submoduleCwd, oursSha, theirsSha)) {
+    resolvedSha = theirsSha;
+    strategy = "fast-forward-to-theirs";
+  } else if (gitIsAncestor(submoduleCwd, theirsSha, oursSha)) {
+    resolvedSha = oursSha;
+    strategy = "keep-ours-already-contains-theirs";
+  } else {
+    try {
+      git(submoduleCwd, ["checkout", "--detach", oursSha]);
+      git(submoduleCwd, ["merge", "--no-ff", "--no-commit", theirsSha]);
+      git(submoduleCwd, ["commit", "-m", `Merge ${entry.path} submodule changes for goal ${request.goalId.slice(0, 8)}`]);
+      resolvedSha = git(submoduleCwd, ["rev-parse", "--verify", "HEAD"]);
+      strategy = "submodule-merge-commit";
+    } catch (error) {
+      safeGit(submoduleCwd, ["merge", "--abort"]);
+      safeGit(submoduleCwd, ["checkout", "--detach", oursSha]);
+      return { ok: false, error: `${entry.path}: submodule merge failed: ${gitErrorMessage(error)}` };
+    }
+  }
+
+  git(request.controllerWorkspacePath, ["update-index", "--cacheinfo", `160000,${resolvedSha},${entry.path}`]);
+  return { ok: true, summary: `${entry.path}: ${strategy} ${shortSha(oursSha)} + ${shortSha(theirsSha)} -> ${shortSha(resolvedSha)}` };
+}
+
+function ensureSubmoduleCommitAvailable(
+  submoduleCwd: string,
+  submodulePath: string,
+  sha: string,
+  sourceWorkspacePaths: string[],
+  canonicalUrl?: string,
+): boolean {
+  if (gitCommitObjectExists(submoduleCwd, sha)) return true;
+
+  for (const sourceWorkspacePath of sourceWorkspacePaths) {
+    const objectSource = locateSubmoduleCommitObject(sha, [sourceWorkspacePath], submodulePath);
+    if (!objectSource) continue;
+    const sourceRepo = objectSource.includes(`${sep}.git${sep}modules${sep}`) ? objectSource : resolve(objectSource, submodulePath);
+    if (!existsSync(sourceRepo)) continue;
+    try {
+      git(submoduleCwd, ["fetch", "--no-tags", sourceRepo, sha]);
+    } catch {
+      // try next source
+    }
+    if (gitCommitObjectExists(submoduleCwd, sha)) return true;
+  }
+
+  if (canonicalUrl) {
+    for (const args of [
+      ["fetch", "--no-tags", canonicalUrl, sha],
+      ["fetch", "--no-tags", canonicalUrl],
+    ]) {
+      try {
+        git(submoduleCwd, args);
+      } catch {
+        // try next fetch shape
+      }
+      if (gitCommitObjectExists(submoduleCwd, sha)) return true;
+    }
+  }
+
+  return false;
+}
+
+function gitCommitObjectExists(cwd: string, sha: string): boolean {
+  try {
+    execFileSync("git", ["cat-file", "-e", `${sha}^{commit}`], { cwd, stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isZeroSha(value: string): boolean {
+  return /^0{40}$/.test(value);
+}
+
 interface NativeGitPostMergeValidationResult {
   ok: boolean;
   summary: string;
@@ -1585,7 +1809,7 @@ function buildPostMergeValidationFollowupPrompt(request: NativeGitSubagentBranch
   ].join("\n");
 }
 
-function appendIntegrationSummary(left: string, right: string): string {
+function appendIntegrationSummary(left: string, right: string | undefined): string {
   return right ? `${left}; ${right}` : left;
 }
 
