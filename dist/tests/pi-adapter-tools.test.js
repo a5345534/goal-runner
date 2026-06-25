@@ -1489,4 +1489,101 @@ test("goal-owned /goal --dag start does not trigger foreground hidden continuati
         rmSync(workspace, { recursive: true, force: true });
     }
 });
+test("goal-owned /goal --dag in print mode hands off to detached controller and preserves runners on shutdown", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "goal-pi-dag-print-handoff-"));
+    const previousStateHome = process.env.AGENT_GOAL_STATE_HOME;
+    process.env.AGENT_GOAL_STATE_HOME = dir;
+    const workspace = createGitWorkspace();
+    const dagFile = join(workspace, "test.dag.json");
+    writeFileSync(dagFile, JSON.stringify({
+        version: 1,
+        objective: "ship print-mode feature",
+        nodes: [{ id: "node-1", objective: "Implement print-mode feature" }],
+    }));
+    git(workspace, ["add", "test.dag.json"]);
+    git(workspace, ["commit", "-m", "add dag"]);
+    let commandHandler;
+    const handlers = new Map();
+    const launched = [];
+    const prompts = [];
+    const stopped = [];
+    setPiBackgroundGoalSessionLauncherForTests(async (request) => {
+        launched.push({ sessionId: request.sessionId, sessionFile: request.sessionFile, sessionName: request.sessionName ?? "" });
+        const index = launched.length;
+        const sessionFile = request.sessionFile ?? join(dir, `print-handoff-session-${index}.jsonl`);
+        writeFileSync(sessionFile, "");
+        const sessionId = request.sessionId ?? `print-handoff-session-${index}`;
+        return {
+            sessionFile,
+            sessionId,
+            setSessionName: async () => undefined,
+            sendPrompt: async (prompt) => {
+                prompts.push(prompt);
+                writeFileSync(sessionFile, JSON.stringify({
+                    type: "message",
+                    timestamp: new Date().toISOString(),
+                    message: { role: "assistant", content: [{ type: "text", text: "SUBAGENT_RESULT: done" }] },
+                }));
+            },
+            isAlive: () => true,
+            stop: () => stopped.push(sessionId),
+        };
+    });
+    const pi = {
+        registerTool() { },
+        registerCommand(_name, options) {
+            commandHandler = options.handler;
+        },
+        on(event, handler) {
+            const list = handlers.get(event) ?? [];
+            list.push(handler);
+            handlers.set(event, list);
+        },
+        appendEntry() { },
+        sendMessage() { },
+    };
+    const notifications = [];
+    const controllerCtx = {
+        mode: "print",
+        hasUI: false,
+        cwd: workspace,
+        model: { provider: "test", id: "model" },
+        ui: {
+            notify(message) { notifications.push(message); },
+            setStatus() { },
+            setWidget() { },
+            confirm: async () => true,
+            editor: async () => undefined,
+            select: async () => undefined,
+            custom: async () => undefined,
+        },
+        sessionManager: {
+            getSessionFile: () => "/origin/session.jsonl",
+            getSessionName: () => "origin",
+        },
+        isIdle: () => true,
+        hasPendingMessages: () => false,
+    };
+    try {
+        goalPiExtension(pi);
+        assert.ok(commandHandler);
+        await commandHandler?.(`--workspace ${workspace} --branch main --dag test.dag.json`, controllerCtx);
+        assert.equal(launched.length, 2, "controller and first subagent runners should launch");
+        assert.match(prompts[0] ?? "", /SUBAGENT_RESULT/);
+        assert.match(prompts.at(-1) ?? "", /^\/goal resume [0-9a-f-]{36}$/);
+        for (const handler of handlers.get("session_shutdown") ?? [])
+            await handler({ type: "session_shutdown", reason: "quit" });
+        assert.deepEqual(stopped, [], "print-mode foreground shutdown must not stop detached goal runners");
+        assert.match(notifications.at(-1) ?? "", /Goal-owned controller session started/);
+    }
+    finally {
+        setPiBackgroundGoalSessionLauncherForTests();
+        if (previousStateHome === undefined)
+            delete process.env.AGENT_GOAL_STATE_HOME;
+        else
+            process.env.AGENT_GOAL_STATE_HOME = previousStateHome;
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(workspace, { recursive: true, force: true });
+    }
+});
 //# sourceMappingURL=pi-adapter-tools.test.js.map

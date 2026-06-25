@@ -361,9 +361,11 @@ export default function goalPiExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (event?: { reason?: string }) => {
-    stopAllPiGoalControllerPollingLoops();
-    cleanupAllPiGoalControllerAdapters();
-    cleanupAllBackgroundGoalSessions();
+    if (!shouldPreserveDetachedGoalBackgroundResourcesOnShutdown(lastCtx, event)) {
+      stopAllPiGoalControllerPollingLoops();
+      cleanupAllPiGoalControllerAdapters();
+      cleanupAllBackgroundGoalSessions();
+    }
     cleanupExpiredStartedAttempts();
     if (shouldCloseStoreOnSessionShutdown(event)) await store.close?.();
   });
@@ -371,6 +373,10 @@ export default function goalPiExtension(pi: ExtensionAPI) {
 
 function shouldCloseStoreOnSessionShutdown(event?: { reason?: string }): boolean {
   return event?.reason === undefined || event.reason === "quit" || event.reason === "reload";
+}
+
+function shouldPreserveDetachedGoalBackgroundResourcesOnShutdown(ctx: ExtensionContext | ExtensionCommandContext | undefined, event?: { reason?: string }): boolean {
+  return event?.reason === "quit" && (ctx?.mode === "print" || ctx?.mode === "json");
 }
 
 function readPiGoalControllerDefaults(pi: ExtensionAPI): PiGoalControllerDefaults {
@@ -628,6 +634,7 @@ async function startGoalOwnedPiSession(
       });
     }
     const orchestration = await runPiGoalControllerLoopForGoal(runtime, ctx, created.goal, binding, options.modelRouting, { thinkingLevel: options.thinkingLevel });
+    await handOffGoalToDetachedControllerForOneShotMode(runtime, ctx, created.goal, background);
     const dagSource = options.dagSourceFile ? ` DAG: ${shortenPath(options.dagSourceFile)}.` : "";
     ctx.ui.notify(
       `Goal-owned controller session started (${shortGoalId}) and planned ${orchestration.plannedNodeCount} DAG node(s); started ${orchestration.startedSubagentCount} subagent(s).${dagSource} Workspace: ${binding.workspace}${formatWorkspaceValidationSuffix(validation)}. Use /goal monitor ${shortGoalId} or /goal list to inspect it.`,
@@ -637,6 +644,45 @@ async function startGoalOwnedPiSession(
     background.stop();
     throw error;
   }
+}
+
+function isOneShotPiMode(ctx: ExtensionContext | ExtensionCommandContext): boolean {
+  return ctx.mode === "print" || ctx.mode === "json";
+}
+
+function renderDetachedControllerResumeCommand(goal: Pick<GoalRecord, "goalId">): string {
+  return `/goal resume ${goal.goalId}`;
+}
+
+async function handOffGoalToDetachedControllerForOneShotMode(
+  runtime: GoalRuntime,
+  ctx: ExtensionContext | ExtensionCommandContext,
+  goal: GoalRecord,
+  background: BackgroundGoalSessionHandle,
+): Promise<void> {
+  if (!isOneShotPiMode(ctx)) return;
+  await recordPiControllerEvent(runtime, goal.goalId, "controller.detachedHandoff", {
+    mode: ctx.mode,
+    sessionId: background.sessionId,
+    sessionFile: background.sessionFile,
+  });
+  await background.sendPrompt(renderDetachedControllerResumeCommand(goal));
+}
+
+async function launchDetachedGoalControllerResumeSession(
+  goal: GoalSummary,
+  resumed: GoalRecord,
+  controllerDefaults: PiGoalControllerDefaults,
+): Promise<BackgroundGoalSessionHandle> {
+  const labelObjective = resumed.objective.length <= 64 ? resumed.objective : `${resumed.objective.slice(0, 61)}...`;
+  const sessionName = `goal ${resumed.goalId.slice(0, 8)}: ${labelObjective}`;
+  return backgroundGoalSessionLauncher({
+    cwd: goal.executionWorkspace ?? process.cwd(),
+    sessionFile: goal.sessionFile,
+    sessionName,
+    modelArg: normalizePiModelArg(goal.controllerModelArg ?? resolveGoalModelForHarness({ harness: "pi", role: "controller", modelScenario: goal.controllerModelScenario, modelClass: goal.controllerModelClass ?? "controller" }).modelArg),
+    thinkingLevel: controllerDefaults.thinkingLevel,
+  });
 }
 
 async function runPiGoalControllerLoopForGoal(
@@ -2133,6 +2179,20 @@ function isFailureMessage(message: string): boolean {
 
 async function resumeTargetGoal(runtime: GoalRuntime, ctx: ExtensionCommandContext, goal: GoalSummary, controllerDefaults: PiGoalControllerDefaults = {}): Promise<void> {
   const dagNodes = await runtime.listGoalDagNodes(goal.goalId);
+  if (goal.executionWorkspace && goal.sessionFile && dagNodes.length > 0 && isOneShotPiMode(ctx)) {
+    const result = await runtime.resumeGoal(goal.sessionKey, { continueIfIdle: false });
+    const resumed = result.goal;
+    if (resumed?.status !== "active") {
+      ctx.ui.notify(result.message, "info");
+      return;
+    }
+    const background = await launchDetachedGoalControllerResumeSession(goal, resumed, controllerDefaults);
+    backgroundGoalSessions.set(resumed.goalId, background);
+    await background.sendPrompt(renderDetachedControllerResumeCommand(resumed));
+    ctx.ui.notify(`Goal ${resumed.goalId.slice(0, 8)} resumed in detached controller session. Use /goal monitor ${resumed.goalId.slice(0, 8)} to inspect it.`, "info");
+    return;
+  }
+
   if (goal.executionWorkspace && dagNodes.length > 0) {
     const result = await runtime.resumeGoal(goal.sessionKey, { continueIfIdle: false });
     const resumed = result.goal;
