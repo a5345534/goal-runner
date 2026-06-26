@@ -137,8 +137,10 @@ export interface GoalControllerTickOptions {
   staleStateThresholdMs?: number;
   /** Maximum time to wait for adapter prompt dispatch before degrading to recoverable needs-followup (default 60 seconds). */
   subagentPromptDispatchTimeoutMs?: number;
-  /** Maximum time to wait for adapter runner launch before recording a recoverable launch timeout (default 60 seconds). */
+  /** Maximum time to wait for adapter runner launch before recording a recoverable launch timeout (default 90 seconds). */
   subagentRunnerLaunchTimeoutMs?: number;
+  /** Delay before retrying a known recoverable runner-launch failure (default 30 seconds). */
+  runnerLaunchRetryDelayMs?: number;
   systemPrompt?: string;
   metadata?: Record<string, unknown>;
   now?: Date | string | (() => Date | string);
@@ -202,6 +204,7 @@ const MAX_VALIDATION_FOLLOWUPS_FOR_SAME_FAILURE = 2;
 const DEFAULT_STALE_CONTROLLER_STATE_MS = 10 * 60_000;
 const DEFAULT_SUBAGENT_PROMPT_DISPATCH_TIMEOUT_MS = 60_000;
 const DEFAULT_SUBAGENT_RUNNER_LAUNCH_TIMEOUT_MS = 90_000;
+const DEFAULT_RUNNER_LAUNCH_RETRY_DELAY_MS = 30_000;
 const INTEGRATION_RETRY_COOLDOWN_MS = 60_000;
 const RECOVERY_BLOCKED_LEDGER_COOLDOWN_MS = 5 * 60_000;
 const recoveryBlockedLedgerCooldown = new Map<string, number>();
@@ -1499,7 +1502,13 @@ async function reconcileStaleRunnerStartingNodes(
     if (!runnerStarting && !runnerPreparing && !retryableBlockedRunnerStart && !retryableInitialAllocationBlock) continue;
     if (hasNonTerminalSubagentForNode(state.subagents, node.nodeId)) continue;
     const ageMs = runnerStarting ? runnerStartingStateAgeMs(node, tickStartedAt) : ageSince(node.updatedAt, tickStartedAt);
-    const requiredAgeMs = runnerStarting || retryableInitialAllocationBlock ? thresholdMs : INTEGRATION_RETRY_COOLDOWN_MS;
+    const launchRetryDelayMs = Math.min(thresholdMs, options.runnerLaunchRetryDelayMs ?? DEFAULT_RUNNER_LAUNCH_RETRY_DELAY_MS);
+    const hasRecoverableLaunchFailure = runnerStarting && runnerLaunchFailureCount(node.preparedResources) > 0;
+    const requiredAgeMs = hasRecoverableLaunchFailure
+      ? launchRetryDelayMs
+      : runnerStarting || retryableInitialAllocationBlock
+        ? thresholdMs
+        : INTEGRATION_RETRY_COOLDOWN_MS;
     if (ageMs < requiredAgeMs) continue;
 
     await recordControllerEvent(runtime, node.goalId, "staleRunnerStarting.detected", {

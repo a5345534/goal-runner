@@ -169,16 +169,18 @@ test("controller keeps missing-transcript launch failures recoverable instead of
     assert.equal(second?.status, "planned");
     const earlyRetry = await runtime.runGoalControllerTick("goal-1", {
         adapter,
-        now: "2026-06-02T00:05:00.000Z",
+        now: "2026-06-02T00:00:10.000Z",
         staleStateThresholdMs: 10 * 60_000,
+        runnerLaunchRetryDelayMs: 30_000,
     });
     assert.equal(earlyRetry.started.length, 0);
     assert.equal(adapter.starts.length, 1);
     adapter.fail = false;
     const retried = await runtime.runGoalControllerTick("goal-1", {
         adapter,
-        now: "2026-06-02T00:11:00.000Z",
+        now: "2026-06-02T00:00:31.000Z",
         staleStateThresholdMs: 10 * 60_000,
+        runnerLaunchRetryDelayMs: 30_000,
     });
     assert.equal(retried.started.length, 1);
     assert.equal(adapter.starts.length, 2);

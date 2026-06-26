@@ -107,8 +107,10 @@ export interface GoalControllerTickOptions {
     staleStateThresholdMs?: number;
     /** Maximum time to wait for adapter prompt dispatch before degrading to recoverable needs-followup (default 60 seconds). */
     subagentPromptDispatchTimeoutMs?: number;
-    /** Maximum time to wait for adapter runner launch before recording a recoverable launch timeout (default 60 seconds). */
+    /** Maximum time to wait for adapter runner launch before recording a recoverable launch timeout (default 90 seconds). */
     subagentRunnerLaunchTimeoutMs?: number;
+    /** Delay before retrying a known recoverable runner-launch failure (default 30 seconds). */
+    runnerLaunchRetryDelayMs?: number;
     systemPrompt?: string;
     metadata?: Record<string, unknown>;
     now?: Date | string | (() => Date | string);
