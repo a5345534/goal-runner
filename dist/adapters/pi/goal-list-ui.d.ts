@@ -9,6 +9,16 @@ export interface GoalListThemeLike {
     fg(color: string, text: string): string;
     bold?(text: string): string;
 }
+/** Collapse duplicate status/activity labels into a compact state label. */
+export declare function formatGoalListState(goal: GoalSummary): string;
+/** Return a compact metric string, omitting all-zero runtime/token pairs. */
+export declare function formatGoalListMetrics(goal: GoalSummary): string;
+/** Return a compact workspace/branch location label. */
+export declare function formatGoalListWhere(goal: GoalSummary): string;
+/** Shorten common objective boilerplate to preserve the meaningful change phrase. */
+export declare function formatGoalListSummary(goal: GoalSummary): string;
+/** Build a compact primary row and apply final display-width truncation. */
+export declare function formatGoalListRow(goal: GoalSummary, marker: string, state: string, width: number): string;
 export declare class GoalListController {
     private readonly goals;
     private selected;
