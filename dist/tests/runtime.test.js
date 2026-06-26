@@ -343,6 +343,29 @@ test("sqlite store persists ledger events across reopen", async () => {
         rmSync(root, { recursive: true, force: true });
     }
 });
+test("sqlite store persists DAG node quality profiles across reopen", async () => {
+    const root = mkdtempSync(join(tmpdir(), "goal-runner-quality-"));
+    const dbPath = join(root, "goals.sqlite");
+    try {
+        const store = new SQLiteGoalStore({ dbPath });
+        const runtime = new GoalRuntime({ store });
+        const [node] = await runtime.planGoalDag("goal-quality", [{
+                nodeId: "implement-feature",
+                objective: "Implement feature with quality profiles",
+                kind: "implementation",
+                qualityProfiles: ["incremental-implementation", "test-driven-change"],
+            }], { now: "2026-06-02T00:00:00.000Z" });
+        assert.deepEqual(node?.qualityProfiles, ["incremental-implementation", "test-driven-change"]);
+        store.close();
+        const reopened = new SQLiteGoalStore({ dbPath });
+        const persisted = await reopened.getGoalDagNode("goal-quality", "implement-feature");
+        assert.deepEqual(persisted?.qualityProfiles, ["incremental-implementation", "test-driven-change"]);
+        reopened.close();
+    }
+    finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
 test("goal registry lists summaries and resolves short ids", async () => {
     const runtime = new GoalRuntime({
         store: new MemoryGoalStore(),

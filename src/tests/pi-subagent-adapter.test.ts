@@ -111,6 +111,22 @@ test("Pi harness subagent adapter starts a detached Pi session and sends the ini
   assert.match(prompts[0] ?? "", /create attendance doctypes/);
 });
 
+test("Pi harness subagent adapter includes quality profile discipline in initial prompt", () => {
+  const prompt = renderPiSubagentInitialPrompt({
+    goalId: "goal-1",
+    node: node({ qualityProfiles: ["incremental-implementation", "docs-required", "ship-preflight"] }),
+    subagentId: "subagent-1",
+    cwd: "/repo/.worktrees/attendance",
+    initialPrompt: "implement quality-profiled node",
+  });
+
+  assert.match(prompt, /QUALITY PROFILE EXECUTION DISCIPLINE/);
+  assert.match(prompt, /incremental-implementation, docs-required, ship-preflight/);
+  assert.match(prompt, /smallest independently verifiable slice/);
+  assert.match(prompt, /required documentation/);
+  assert.match(prompt, /release-readiness/);
+});
+
 test("Pi harness subagent adapter rejects and stops the handle when initial prompt dispatch fails", async () => {
   const stopped: string[] = [];
   const launcher = async (): Promise<BackgroundGoalSessionHandle> => ({

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
+  createGoalDagNodes,
   createGoalDagNodesFromFileContent,
   GoalRuntime,
   MemoryGoalStore,
@@ -57,6 +58,50 @@ test("goal DAG file parser creates explicit nodes without inferred sequencing", 
   assert.equal(plan.nodeInputs[1]?.risk, "medium");
   assert.equal(plan.nodeInputs[0]?.thinkingLevel, "high");
   assert.equal(plan.nodeInputs[1]?.thinkingLevel, "xhigh");
+});
+
+test("goal DAG file parser resolves quality profiles from defaults and node config", () => {
+  const document = parseGoalDagFileContent(JSON.stringify({
+    version: 1,
+    objective: "Quality-profiled DAG",
+    defaults: { qualityProfiles: ["incremental-implementation", "docs-required"] },
+    nodes: [
+      {
+        id: "implement-feature",
+        objective: "Implement feature",
+        kind: "implementation",
+        qualityProfiles: ["test-driven-change", "docs-required"],
+      },
+      {
+        id: "ship-check",
+        objective: "Run ship preflight",
+        after: ["implement-feature"],
+        qualityProfiles: ["ship-preflight"],
+      },
+    ],
+  }));
+
+  assert.deepEqual(document.defaults?.qualityProfiles, ["incremental-implementation", "docs-required"]);
+  assert.deepEqual(document.nodes[0]?.qualityProfiles, ["test-driven-change", "docs-required"]);
+
+  const plan = createGoalDagNodesFromFileContent("goal-1", JSON.stringify(document), { now });
+  assert.deepEqual(plan.nodes[0]?.qualityProfiles, ["incremental-implementation", "docs-required", "test-driven-change"]);
+  assert.deepEqual(plan.nodes[1]?.qualityProfiles, ["incremental-implementation", "docs-required", "ship-preflight"]);
+});
+
+test("runtime DAG planner rejects malformed direct quality profile inputs", () => {
+  assert.throws(
+    () => createGoalDagNodes("goal-1", [{ objective: "bad", qualityProfiles: ["api-boundary-review"] as never }], { now }),
+    /unsupported quality profile.*api-boundary-review/,
+  );
+  assert.throws(
+    () => createGoalDagNodes("goal-1", [{ objective: "empty", qualityProfiles: [] }], { now }),
+    /qualityProfiles must not be empty/,
+  );
+  assert.throws(
+    () => createGoalDagNodes("goal-1", [{ objective: "dup", qualityProfiles: ["docs-required", "docs-required"] }], { now }),
+    /duplicate quality profile docs-required/,
+  );
 });
 
 test("goal DAG file parser accepts node workspace bindings and rejects nested worktree outputs", () => {

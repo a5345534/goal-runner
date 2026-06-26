@@ -7,6 +7,7 @@ import type { GoalDagPlannedNodesResult, GoalDagPlannerResult } from "./dag-plan
 import {
   parseGoalDagFileContent,
   parseGoalDagFileDocument,
+  resolveGoalQualityProfiles,
   type GoalDagFileDefaults,
   type GoalDagFileDocument,
   type GoalDagFileNode,
@@ -39,6 +40,7 @@ export function planGoalDagFromFileDocument(
   const defaultConflicts = document.defaults?.conflicts;
   const defaultModelScenario = document.defaults?.modelScenario;
   const defaultThinkingLevel = document.defaults?.thinkingLevel;
+  const defaultQualityProfiles = document.defaults?.qualityProfiles;
 
   return {
     goalId,
@@ -46,6 +48,7 @@ export function planGoalDagFromFileDocument(
       const expectedOutputs = [...(node.outputs ?? defaultOutputs)];
       const validators = [...(node.validators ?? defaultValidators)];
       const conflictHints = cloneConflictHints(node.conflicts ?? defaultConflicts);
+      const qualityProfiles = resolveGoalQualityProfiles(defaultQualityProfiles, node.qualityProfiles);
       const selection = selectModelScenarioForNode({
         nodeId: node.id,
         objective: node.objective,
@@ -64,6 +67,7 @@ export function planGoalDagFromFileDocument(
         scope: node.scope,
         kind: node.kind,
         validation: cloneValidationContract(node.validation),
+        qualityProfiles: qualityProfiles.length > 0 ? qualityProfiles : undefined,
         dependencyNodeIds: [...(node.after ?? [])],
         expectedOutputs,
         validators,

@@ -1,3 +1,4 @@
+import { renderQualityProfileGuardrailLines } from "./quality-profiles.js";
 import type { GoalDagNode } from "./types.js";
 
 export const EXECUTOR_GUARDRAIL_TAG = "[CONTROLLER EXECUTION POLICY]";
@@ -18,6 +19,7 @@ export function renderExecutorGuardrailLines(node: GoalDagNode): string[] {
       ? `Allowed changed paths: ${allowedPaths.join(", ")}`
       : "Allowed changed paths: only files directly required by this node objective/scope.",
     forbiddenPaths.length ? `Forbidden changed paths: ${forbiddenPaths.join(", ")}` : undefined,
+    ...renderQualityProfileGuardrailLines(node),
     "If the node appears to require changes outside allowed paths or inside forbidden paths, stop and report SUBAGENT_BLOCKED with the specific scope change needed instead of editing them.",
     "Before SUBAGENT_RESULT, inspect the workspace diff/status, run or explain the listed validators when applicable, and include verification plus remaining risks in the summary.",
   ].filter((line): line is string => Boolean(line));

@@ -6,6 +6,7 @@ export interface GoalDagPlanNodeInput {
     scope?: string;
     kind?: GoalDagNode["kind"];
     validation?: GoalDagNode["validation"];
+    qualityProfiles?: GoalDagNode["qualityProfiles"];
     dependencyNodeIds?: string[];
     expectedOutputs?: string[];
     validators?: string[];

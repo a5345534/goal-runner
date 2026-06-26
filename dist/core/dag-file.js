@@ -1,6 +1,6 @@
 import { createGoalDagNodes } from "./dag-scheduler.js";
 import { selectModelScenarioForNode } from "./model-routing.js";
-import { parseGoalDagFileContent, parseGoalDagFileDocument, } from "goal-contract";
+import { parseGoalDagFileContent, parseGoalDagFileDocument, resolveGoalQualityProfiles, } from "goal-contract";
 export { parseGoalDagFileContent, parseGoalDagFileDocument };
 const DEFAULT_MAX_NODES = 20;
 export function planGoalDagFromFileDocument(goalId, document, options = {}) {
@@ -14,12 +14,14 @@ export function planGoalDagFromFileDocument(goalId, document, options = {}) {
     const defaultConflicts = document.defaults?.conflicts;
     const defaultModelScenario = document.defaults?.modelScenario;
     const defaultThinkingLevel = document.defaults?.thinkingLevel;
+    const defaultQualityProfiles = document.defaults?.qualityProfiles;
     return {
         goalId,
         nodeInputs: document.nodes.map((node) => {
             const expectedOutputs = [...(node.outputs ?? defaultOutputs)];
             const validators = [...(node.validators ?? defaultValidators)];
             const conflictHints = cloneConflictHints(node.conflicts ?? defaultConflicts);
+            const qualityProfiles = resolveGoalQualityProfiles(defaultQualityProfiles, node.qualityProfiles);
             const selection = selectModelScenarioForNode({
                 nodeId: node.id,
                 objective: node.objective,
@@ -38,6 +40,7 @@ export function planGoalDagFromFileDocument(goalId, document, options = {}) {
                 scope: node.scope,
                 kind: node.kind,
                 validation: cloneValidationContract(node.validation),
+                qualityProfiles: qualityProfiles.length > 0 ? qualityProfiles : undefined,
                 dependencyNodeIds: [...(node.after ?? [])],
                 expectedOutputs,
                 validators,

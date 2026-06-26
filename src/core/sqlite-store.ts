@@ -112,6 +112,7 @@ interface SqliteDagNodeRow {
   scope: string | null;
   kind: string | null;
   validation_json: string | null;
+  quality_profiles_json: string | null;
   dependency_node_ids_json: string;
   expected_outputs_json: string;
   validators_json: string;
@@ -395,18 +396,19 @@ export class SQLiteGoalStore implements GoalStore {
     this.db
       .prepare(
         `INSERT INTO goal_dag_nodes (
-          goal_id, node_id, slug, objective, scope, kind, validation_json, dependency_node_ids_json,
+          goal_id, node_id, slug, objective, scope, kind, validation_json, quality_profiles_json, dependency_node_ids_json,
           expected_outputs_json, validators_json, workspace_strategy, workspace_json, risk,
           model_scenario, model_class, model_arg, model_resolution_json, thinking_level, conflict_hints_json, completion_gates_json, status,
           lifecycle_phase, prepared_resources_json, last_adapter_observation_json, last_recovery_decision_json,
           last_validation_summary, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(goal_id, node_id) DO UPDATE SET
           slug = excluded.slug,
           objective = excluded.objective,
           scope = excluded.scope,
           kind = excluded.kind,
           validation_json = excluded.validation_json,
+          quality_profiles_json = excluded.quality_profiles_json,
           dependency_node_ids_json = excluded.dependency_node_ids_json,
           expected_outputs_json = excluded.expected_outputs_json,
           validators_json = excluded.validators_json,
@@ -436,6 +438,7 @@ export class SQLiteGoalStore implements GoalStore {
         node.scope ?? null,
         node.kind ?? null,
         node.validation === undefined ? null : JSON.stringify(node.validation),
+        node.qualityProfiles === undefined ? null : JSON.stringify(node.qualityProfiles),
         JSON.stringify(node.dependencyNodeIds),
         JSON.stringify(node.expectedOutputs),
         JSON.stringify(node.validators),
@@ -732,6 +735,7 @@ export class SQLiteGoalStore implements GoalStore {
         scope TEXT,
         kind TEXT,
         validation_json TEXT,
+        quality_profiles_json TEXT,
         dependency_node_ids_json TEXT NOT NULL,
         expected_outputs_json TEXT NOT NULL,
         validators_json TEXT NOT NULL,
@@ -803,6 +807,7 @@ export class SQLiteGoalStore implements GoalStore {
     addColumnIfMissing(this.db, "goal_dag_nodes", "workspace_json", "TEXT");
     addColumnIfMissing(this.db, "goal_dag_nodes", "kind", "TEXT");
     addColumnIfMissing(this.db, "goal_dag_nodes", "validation_json", "TEXT");
+    addColumnIfMissing(this.db, "goal_dag_nodes", "quality_profiles_json", "TEXT");
     addColumnIfMissing(this.db, "goal_dag_nodes", "lifecycle_phase", "TEXT");
     addColumnIfMissing(this.db, "goal_dag_nodes", "prepared_resources_json", "TEXT");
     addColumnIfMissing(this.db, "goal_dag_nodes", "last_adapter_observation_json", "TEXT");
@@ -953,6 +958,7 @@ function rowToDagNode(row: SqliteDagNodeRow): GoalDagNode {
     scope: row.scope ?? undefined,
     kind: row.kind ?? undefined,
     validation: parseValidationContract(row.validation_json),
+    qualityProfiles: parseQualityProfiles(row.quality_profiles_json),
     dependencyNodeIds: parseStringArray(row.dependency_node_ids_json),
     expectedOutputs: parseStringArray(row.expected_outputs_json),
     validators: parseStringArray(row.validators_json),
@@ -1054,6 +1060,18 @@ function parseValidationContract(json: string | null): GoalDagNode["validation"]
     const parsed = JSON.parse(json) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
     return parsed as GoalDagNode["validation"];
+  } catch {
+    return undefined;
+  }
+}
+
+function parseQualityProfiles(json: string | null): GoalDagNode["qualityProfiles"] | undefined {
+  if (!json) return undefined;
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!Array.isArray(parsed)) return undefined;
+    const profiles = parsed.filter((value): value is string => typeof value === "string");
+    return profiles.length > 0 ? profiles as GoalDagNode["qualityProfiles"] : undefined;
   } catch {
     return undefined;
   }

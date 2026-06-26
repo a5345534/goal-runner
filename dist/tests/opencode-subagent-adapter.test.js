@@ -93,6 +93,19 @@ test("Opencode harness subagent adapter starts a detached opencode session and s
         setOpencodeBackgroundSessionLauncherForTests();
     }
 });
+test("Opencode harness subagent adapter includes quality profile discipline in initial prompt", () => {
+    const prompt = renderOpencodeSubagentInitialPrompt({
+        goalId: "goal-1",
+        node: node({ qualityProfiles: ["api-contract-change", "security-sensitive-review"] }),
+        subagentId: "subagent-1",
+        cwd: "/repo/.worktrees/attendance",
+        initialPrompt: "implement quality-profiled node",
+    });
+    assert.match(prompt, /QUALITY PROFILE EXECUTION DISCIPLINE/);
+    assert.match(prompt, /api-contract-change, security-sensitive-review/);
+    assert.match(prompt, /public API\/contract compatibility/);
+    assert.match(prompt, /security impact/);
+});
 test("Opencode harness subagent adapter honors controller-prepared resources", async () => {
     const { launcher, launches } = fakeLauncher();
     setOpencodeBackgroundSessionLauncherForTests(launcher);

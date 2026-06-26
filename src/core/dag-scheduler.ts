@@ -1,4 +1,6 @@
+import { GOAL_QUALITY_PROFILES, isGoalQualityProfile } from "goal-contract";
 import { nodeRequiredIntegrationsSatisfied } from "./integration.js";
+import { cloneQualityProfiles } from "./quality-profiles.js";
 import type { GoalDagConflictHints, GoalDagNode, GoalDagNodeStatus, GoalOrchestrationState, GoalSubagentRecord } from "./types.js";
 
 export interface GoalDagPlanNodeInput {
@@ -8,6 +10,7 @@ export interface GoalDagPlanNodeInput {
   scope?: string;
   kind?: GoalDagNode["kind"];
   validation?: GoalDagNode["validation"];
+  qualityProfiles?: GoalDagNode["qualityProfiles"];
   dependencyNodeIds?: string[];
   expectedOutputs?: string[];
   validators?: string[];
@@ -71,6 +74,7 @@ export function createGoalDagNodes(goalId: string, inputs: GoalDagPlanNodeInput[
       scope: input.scope,
       kind: input.kind,
       validation: cloneValidationContract(input.validation),
+      qualityProfiles: cloneQualityProfiles(input.qualityProfiles),
       dependencyNodeIds: [...(input.dependencyNodeIds ?? [])],
       expectedOutputs: [...(input.expectedOutputs ?? [])],
       validators: [...(input.validators ?? [])],
@@ -104,6 +108,7 @@ export function validateGoalDag(nodes: GoalDagNode[]): GoalDagValidationResult {
     if (!node.objective.trim()) errors.push(`node ${node.nodeId || "<missing>"} is missing objective`);
     for (const error of validateNodeWorkspaceBinding(node)) errors.push(error);
     for (const error of validateNodeExpectedOutputs(node)) errors.push(error);
+    for (const error of validateNodeQualityProfiles(node)) errors.push(error);
     if (ids.has(node.nodeId)) errors.push(`duplicate node id: ${node.nodeId}`);
     ids.add(node.nodeId);
   }
@@ -333,6 +338,23 @@ function validateNodeExpectedOutputs(node: GoalDagNode): string[] {
   return node.expectedOutputs
     .filter(isWorktreeRelativeOutputPath)
     .map((output) => `node ${node.nodeId} expected output ${output} must be relative to the subagent workspace root, not .worktrees/`);
+}
+
+function validateNodeQualityProfiles(node: GoalDagNode): string[] {
+  const profiles = node.qualityProfiles;
+  if (profiles === undefined) return [];
+  if (profiles.length === 0) return [`node ${node.nodeId} qualityProfiles must not be empty when provided`];
+  const errors: string[] = [];
+  const seen = new Set<string>();
+  for (const profile of profiles) {
+    if (!isGoalQualityProfile(profile)) {
+      errors.push(`node ${node.nodeId} has unsupported quality profile ${JSON.stringify(profile)}; supported values are: ${GOAL_QUALITY_PROFILES.join(", ")}`);
+      continue;
+    }
+    if (seen.has(profile)) errors.push(`node ${node.nodeId} contains duplicate quality profile ${profile}`);
+    seen.add(profile);
+  }
+  return errors;
 }
 
 function isNativeGitWorktreeStrategy(strategy: string | undefined): boolean {

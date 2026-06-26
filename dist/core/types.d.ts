@@ -270,8 +270,8 @@ export interface GoalControllerActionAttemptRecord {
     error?: string;
     evidence?: Record<string, unknown>;
 }
-import type { GoalDagConflictHints, GoalDagNodeKind, GoalValidationArtifactLock, GoalDagValidationContract, GoalDagNodeWorkspaceBinding, GoalModelResolution } from "goal-contract";
-export type { GoalDagConflictHints, GoalDagNodeKind, GoalValidationArtifactLock, GoalDagValidationContract, GoalDagNodeWorkspaceBinding, GoalModelResolution, };
+import type { GoalDagConflictHints, GoalDagNodeKind, GoalValidationArtifactLock, GoalDagValidationContract, GoalDagNodeWorkspaceBinding, GoalModelResolution, GoalQualityProfile } from "goal-contract";
+export type { GoalDagConflictHints, GoalDagNodeKind, GoalValidationArtifactLock, GoalDagValidationContract, GoalDagNodeWorkspaceBinding, GoalModelResolution, GoalQualityProfile, };
 export interface GoalDagNode {
     goalId: string;
     nodeId: string;
@@ -280,6 +280,8 @@ export interface GoalDagNode {
     scope?: string;
     kind?: GoalDagNodeKind;
     validation?: GoalDagValidationContract;
+    /** Resolved quality profiles from DAG defaults and node-level config. */
+    qualityProfiles?: GoalQualityProfile[];
     dependencyNodeIds: string[];
     expectedOutputs: string[];
     validators: string[];

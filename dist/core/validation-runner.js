@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, isAbsolute, resolve } from "node:path";
+import { unsupportedQualityProfilesOf, GOAL_QUALITY_PROFILES } from "./quality-profiles.js";
 import { isSupportedRequiredEvidence, SUPPORTED_REQUIRED_EVIDENCE } from "./validation-evidence.js";
 export function createControllerValidationRunner(options = {}) {
     return (request) => runControllerValidation(request, options);
@@ -19,6 +20,17 @@ export function runControllerValidation(request, options = {}) {
                 `Natural-language acceptance checks belong in validators, audit reports, objective/scope, path policy, or producer trace/review metadata.`,
             validationSignals: [
                 `invalid contract: unsupported required evidence: ${unsupportedEvidence.join(", ")}`,
+            ],
+        };
+    }
+    const unsupportedQualityProfiles = unsupportedQualityProfilesOf(request.node);
+    if (unsupportedQualityProfiles.length > 0) {
+        return {
+            status: "blocked",
+            summary: `Invalid DAG node contract: unsupported qualityProfiles token(s): ${unsupportedQualityProfiles.join(", ")}. ` +
+                `Supported quality profiles: ${GOAL_QUALITY_PROFILES.join(", ")}.`,
+            validationSignals: [
+                `invalid contract: unsupported quality profiles: ${unsupportedQualityProfiles.join(", ")}`,
             ],
         };
     }

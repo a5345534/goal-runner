@@ -517,6 +517,20 @@ test("controller validation runner blocks persisted unsupported required evidenc
     // Validation signals should include diagnostic info about the unsupported token
     assert.match(result.validationSignals?.join("\n") ?? "", /invalid contract: unsupported required evidence: pnpm test passes/);
 });
+test("controller validation runner blocks persisted unsupported quality profiles without follow-up", () => {
+    const req = request({
+        node: {
+            ...request().node,
+            qualityProfiles: ["api-boundary-review"],
+        },
+    });
+    const result = runControllerValidation(req);
+    assert.equal(result.status, "blocked");
+    assert.ok(!result.followupPrompt, "must not include followupPrompt for invalid contract");
+    assert.match(result.summary ?? "", /unsupported qualityProfiles token\(s\): api-boundary-review/);
+    assert.match(result.summary ?? "", /Supported quality profiles/);
+    assert.match(result.validationSignals?.join("\n") ?? "", /invalid contract: unsupported quality profiles: api-boundary-review/);
+});
 test("controller validation runner blocks multiple persisted unsupported evidence tokens together", () => {
     const req = request({
         node: {

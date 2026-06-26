@@ -1,4 +1,6 @@
+import { GOAL_QUALITY_PROFILES, isGoalQualityProfile } from "goal-contract";
 import { nodeRequiredIntegrationsSatisfied } from "./integration.js";
+import { cloneQualityProfiles } from "./quality-profiles.js";
 const RUNNING_NODE_STATUSES = new Set(["running", "selfReportedComplete", "controllerValidating"]);
 const TERMINAL_SUCCESS_STATUSES = new Set(["complete"]);
 const TERMINAL_BLOCKED_STATUSES = new Set(["blocked", "blockedTerminal", "failed", "superseded"]);
@@ -16,6 +18,7 @@ export function createGoalDagNodes(goalId, inputs, options = {}) {
             scope: input.scope,
             kind: input.kind,
             validation: cloneValidationContract(input.validation),
+            qualityProfiles: cloneQualityProfiles(input.qualityProfiles),
             dependencyNodeIds: [...(input.dependencyNodeIds ?? [])],
             expectedOutputs: [...(input.expectedOutputs ?? [])],
             validators: [...(input.validators ?? [])],
@@ -52,6 +55,8 @@ export function validateGoalDag(nodes) {
         for (const error of validateNodeWorkspaceBinding(node))
             errors.push(error);
         for (const error of validateNodeExpectedOutputs(node))
+            errors.push(error);
+        for (const error of validateNodeQualityProfiles(node))
             errors.push(error);
         if (ids.has(node.nodeId))
             errors.push(`duplicate node id: ${node.nodeId}`);
@@ -276,6 +281,25 @@ function validateNodeExpectedOutputs(node) {
     return node.expectedOutputs
         .filter(isWorktreeRelativeOutputPath)
         .map((output) => `node ${node.nodeId} expected output ${output} must be relative to the subagent workspace root, not .worktrees/`);
+}
+function validateNodeQualityProfiles(node) {
+    const profiles = node.qualityProfiles;
+    if (profiles === undefined)
+        return [];
+    if (profiles.length === 0)
+        return [`node ${node.nodeId} qualityProfiles must not be empty when provided`];
+    const errors = [];
+    const seen = new Set();
+    for (const profile of profiles) {
+        if (!isGoalQualityProfile(profile)) {
+            errors.push(`node ${node.nodeId} has unsupported quality profile ${JSON.stringify(profile)}; supported values are: ${GOAL_QUALITY_PROFILES.join(", ")}`);
+            continue;
+        }
+        if (seen.has(profile))
+            errors.push(`node ${node.nodeId} contains duplicate quality profile ${profile}`);
+        seen.add(profile);
+    }
+    return errors;
 }
 function isNativeGitWorktreeStrategy(strategy) {
     return (strategy ?? "").toLowerCase().includes("native-git");

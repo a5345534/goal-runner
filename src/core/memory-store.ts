@@ -211,6 +211,7 @@ function cloneDagNode(node: GoalDagNode): GoalDagNode {
           forbiddenPaths: node.validation.forbiddenPaths ? [...node.validation.forbiddenPaths] : undefined,
         }
       : undefined,
+    qualityProfiles: node.qualityProfiles ? [...node.qualityProfiles] : undefined,
     dependencyNodeIds: [...node.dependencyNodeIds],
     expectedOutputs: [...node.expectedOutputs],
     validators: [...node.validators],

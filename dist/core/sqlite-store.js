@@ -152,18 +152,19 @@ export class SQLiteGoalStore {
     async saveGoalDagNode(node) {
         this.db
             .prepare(`INSERT INTO goal_dag_nodes (
-          goal_id, node_id, slug, objective, scope, kind, validation_json, dependency_node_ids_json,
+          goal_id, node_id, slug, objective, scope, kind, validation_json, quality_profiles_json, dependency_node_ids_json,
           expected_outputs_json, validators_json, workspace_strategy, workspace_json, risk,
           model_scenario, model_class, model_arg, model_resolution_json, thinking_level, conflict_hints_json, completion_gates_json, status,
           lifecycle_phase, prepared_resources_json, last_adapter_observation_json, last_recovery_decision_json,
           last_validation_summary, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(goal_id, node_id) DO UPDATE SET
           slug = excluded.slug,
           objective = excluded.objective,
           scope = excluded.scope,
           kind = excluded.kind,
           validation_json = excluded.validation_json,
+          quality_profiles_json = excluded.quality_profiles_json,
           dependency_node_ids_json = excluded.dependency_node_ids_json,
           expected_outputs_json = excluded.expected_outputs_json,
           validators_json = excluded.validators_json,
@@ -184,7 +185,7 @@ export class SQLiteGoalStore {
           last_recovery_decision_json = excluded.last_recovery_decision_json,
           last_validation_summary = excluded.last_validation_summary,
           updated_at = excluded.updated_at`)
-            .run(node.goalId, node.nodeId, node.slug, node.objective, node.scope ?? null, node.kind ?? null, node.validation === undefined ? null : JSON.stringify(node.validation), JSON.stringify(node.dependencyNodeIds), JSON.stringify(node.expectedOutputs), JSON.stringify(node.validators), node.workspaceStrategy ?? null, node.workspace === undefined ? null : JSON.stringify(node.workspace), node.risk ?? null, node.modelScenario ?? null, node.modelClass ?? null, node.modelArg ?? null, node.modelResolution === undefined ? null : JSON.stringify(node.modelResolution), node.thinkingLevel ?? null, node.conflictHints === undefined ? null : JSON.stringify(node.conflictHints), JSON.stringify(node.completionGates), node.status, node.lifecyclePhase ?? null, node.preparedResources === undefined ? null : JSON.stringify(node.preparedResources), node.lastAdapterObservation === undefined ? null : JSON.stringify(node.lastAdapterObservation), node.lastRecoveryDecision === undefined ? null : JSON.stringify(node.lastRecoveryDecision), node.lastValidationSummary ?? null, node.createdAt, node.updatedAt);
+            .run(node.goalId, node.nodeId, node.slug, node.objective, node.scope ?? null, node.kind ?? null, node.validation === undefined ? null : JSON.stringify(node.validation), node.qualityProfiles === undefined ? null : JSON.stringify(node.qualityProfiles), JSON.stringify(node.dependencyNodeIds), JSON.stringify(node.expectedOutputs), JSON.stringify(node.validators), node.workspaceStrategy ?? null, node.workspace === undefined ? null : JSON.stringify(node.workspace), node.risk ?? null, node.modelScenario ?? null, node.modelClass ?? null, node.modelArg ?? null, node.modelResolution === undefined ? null : JSON.stringify(node.modelResolution), node.thinkingLevel ?? null, node.conflictHints === undefined ? null : JSON.stringify(node.conflictHints), JSON.stringify(node.completionGates), node.status, node.lifecyclePhase ?? null, node.preparedResources === undefined ? null : JSON.stringify(node.preparedResources), node.lastAdapterObservation === undefined ? null : JSON.stringify(node.lastAdapterObservation), node.lastRecoveryDecision === undefined ? null : JSON.stringify(node.lastRecoveryDecision), node.lastValidationSummary ?? null, node.createdAt, node.updatedAt);
     }
     async getGoalDagNode(goalId, nodeId) {
         const row = this.db
@@ -404,6 +405,7 @@ export class SQLiteGoalStore {
         scope TEXT,
         kind TEXT,
         validation_json TEXT,
+        quality_profiles_json TEXT,
         dependency_node_ids_json TEXT NOT NULL,
         expected_outputs_json TEXT NOT NULL,
         validators_json TEXT NOT NULL,
@@ -475,6 +477,7 @@ export class SQLiteGoalStore {
         addColumnIfMissing(this.db, "goal_dag_nodes", "workspace_json", "TEXT");
         addColumnIfMissing(this.db, "goal_dag_nodes", "kind", "TEXT");
         addColumnIfMissing(this.db, "goal_dag_nodes", "validation_json", "TEXT");
+        addColumnIfMissing(this.db, "goal_dag_nodes", "quality_profiles_json", "TEXT");
         addColumnIfMissing(this.db, "goal_dag_nodes", "lifecycle_phase", "TEXT");
         addColumnIfMissing(this.db, "goal_dag_nodes", "prepared_resources_json", "TEXT");
         addColumnIfMissing(this.db, "goal_dag_nodes", "last_adapter_observation_json", "TEXT");
@@ -618,6 +621,7 @@ function rowToDagNode(row) {
         scope: row.scope ?? undefined,
         kind: row.kind ?? undefined,
         validation: parseValidationContract(row.validation_json),
+        qualityProfiles: parseQualityProfiles(row.quality_profiles_json),
         dependencyNodeIds: parseStringArray(row.dependency_node_ids_json),
         expectedOutputs: parseStringArray(row.expected_outputs_json),
         validators: parseStringArray(row.validators_json),
@@ -720,6 +724,20 @@ function parseValidationContract(json) {
         if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
             return undefined;
         return parsed;
+    }
+    catch {
+        return undefined;
+    }
+}
+function parseQualityProfiles(json) {
+    if (!json)
+        return undefined;
+    try {
+        const parsed = JSON.parse(json);
+        if (!Array.isArray(parsed))
+            return undefined;
+        const profiles = parsed.filter((value) => typeof value === "string");
+        return profiles.length > 0 ? profiles : undefined;
     }
     catch {
         return undefined;

@@ -178,6 +178,24 @@ Nodes with no `after` dependencies are immediately schedulable, subject to contr
 | `completionGates` | no | string array | Completion gates. Defaults to `controller-validation`. Integration gate names such as `subagent-integration`, `subagent-branch-integration`, `branch-integration`, or `native-git-integration` explicitly require branch integration before completion. `post-merge-validation` additionally requires post-merge validators in the controller workspace. |
 | `modelScenario` | no | scenario id | Explicit model-routing scenario for this node. Overrides defaults and rules. |
 | `thinkingLevel` | no | string | Pi thinking level for this node. Overrides `defaults.thinkingLevel`. |
+| `qualityProfiles` | no | string array | Closed quality-profile vocabulary from `goal-contract`. Runtime merges `defaults.qualityProfiles` and node-level values, persists the resolved list, and injects matching execution discipline into subagent prompts. |
+
+## Quality profiles
+
+`qualityProfiles` is a closed vocabulary owned by `goal-contract`:
+
+- `incremental-implementation`
+- `test-driven-change`
+- `code-review-required`
+- `independent-audit`
+- `security-sensitive-review`
+- `api-contract-change`
+- `database-migration`
+- `docs-required`
+- `observability-required`
+- `ship-preflight`
+
+Runtime rejects malformed direct node inputs, preserves valid profiles in memory/SQLite state, and adds prompt-time discipline for Pi/OpenCode subagents. Concrete provider/model ids never appear in `qualityProfiles`.
 
 ## Validation contract
 
@@ -216,7 +234,7 @@ A node can declare a generic validation contract. Runtime persists this metadata
 
 `validation.allowedPaths` and `validation.forbiddenPaths` define a controller-side scope policy for changed files. Paths are repository/workspace-relative strings. Exact paths match that file, and simple `/**` suffixes match everything below that prefix (for example `src/**` matches `src/feature.ts`). When `allowedPaths` is absent, changed files are not restricted by allow-list. When `allowedPaths` is present, every changed file must match at least one allowed path. `forbiddenPaths` always has priority: any changed file matching a forbidden path fails validation even if it also matches an allowed path. Nodes without a scope policy keep existing behavior, but subagents are still instructed not to make unrelated changes.
 
-Every subagent launch includes a controller execution policy in the executor prompt. The policy restates the assigned node boundary, allowed/forbidden paths when configured, the exact completion markers, and the requirement to inspect diff/status plus run or explain validators before `SUBAGENT_RESULT`. This is prompt-time guidance only; controller validation remains authoritative and fails closed on scope/policy violations.
+Every subagent launch includes a controller execution policy in the executor prompt. The policy restates the assigned node boundary, allowed/forbidden paths when configured, the exact completion markers, any active quality-profile execution discipline, and the requirement to inspect diff/status plus run or explain validators before `SUBAGENT_RESULT`. This is prompt-time guidance only; controller validation remains authoritative and fails closed on scope/policy violations.
 
 `validation.requiredEvidence` is a **closed** token list:
 
@@ -308,11 +326,12 @@ Subagents running in native-git workspaces should commit intended repository cha
     "capabilities": ["capability"]
   },
   "modelScenario": "implementation",
-  "thinkingLevel": "high"
+  "thinkingLevel": "high",
+  "qualityProfiles": ["incremental-implementation", "test-driven-change"]
 }
 ```
 
-A node-level field overrides the corresponding default. For example, if `defaults.validators` is set and a node also has `validators`, only the node's validators are used for that node. `defaults.thinkingLevel` is applied to nodes that do not set `thinkingLevel`.
+A node-level field overrides the corresponding default for fields such as `validators`, `outputs`, `completionGates`, and `thinkingLevel`. `qualityProfiles` are additive instead: runtime resolves defaults plus node-level values with stable first-seen de-duplication.
 
 ## Model routing
 
