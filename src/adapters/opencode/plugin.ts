@@ -34,11 +34,14 @@ import { z } from "zod";
 import {
   GoalRuntime,
   NativeGitWorkspaceManager,
+  buildGoalDebugReport,
   SQLiteGoalStore,
   cleanupTerminalSubagentWorkspaces,
   createControllerValidationRunner,
+  createGoalDebugTracerFromEnv,
   createNativeGitSubagentBranchIntegrator,
   createNativeGitSubagentWorkspaceAllocator,
+  formatGoalDebugReport,
   parseGoalCommand,
   parseGoalDagFileContent,
   parseTokenBudget,
@@ -76,7 +79,7 @@ import { readOpencodeGoalMonitorSnapshot } from "./monitor-ui.js";
 import { finalizeOpencodeGoalFromDagTerminalState, formatOpencodeCloseoutDiagnostics } from "./closeout.js";
 
 const MEANINGFUL_PROGRESS_TOOL_SET = new Set(["write", "edit", "bash", "read", "grep", "find", "ls"]);
-const POST_STOP_ALLOWED_TOOL_SET = new Set(["get_goal", "read", "grep", "find", "ls"]);
+const POST_STOP_ALLOWED_TOOL_SET = new Set(["get_goal", "get_goal_debug", "read", "grep", "find", "ls"]);
 const OPENCODE_STATE_DIR_NAME = ".goal-runner";
 const LEGACY_OPENCODE_STATE_DIR_NAME = ".agent-goal-runtime";
 
@@ -119,11 +122,13 @@ function resolveDefaultOpencodeStateRoot(): string {
 export function createOpencodeGoalPluginContext(options: OpencodeGoalPluginOptions = {}): OpencodeGoalPluginContext {
   const stateRoot = options.stateRoot ?? resolveDefaultOpencodeStateRoot();
   const store = new SQLiteGoalStore({ stateRoot });
+  const debugTracer = createGoalDebugTracerFromEnv({ stateRoot });
   const registry = new OpencodeHiddenContinuationRegistry();
   const subagentAdapter = options.subagentAdapter ?? createOpencodeHarnessSubagentAdapter();
   const now = options.now ?? (() => new Date());
   const runtime = options.runtime ?? new GoalRuntime({
     store,
+    debugTracer,
     callbacks: {
       readHarnessState: async (sessionKey) => {
         const sessionID = sessionIDForKey(sessionKey);
@@ -266,6 +271,18 @@ function buildOpencodePluginHooks(ctx: OpencodeGoalPluginContext, input: Opencod
     },
   };
 
+  tool.get_goal_debug = {
+    description: "Get a read-only diagnostic report for a goal, including DAG/subagent state, recent events, and detected anomalies.",
+    args: {
+      goal_ref: z.string().optional().describe("Optional goal id or unambiguous prefix. Defaults to the current/nearest goal."),
+    },
+    async execute(args: { goal_ref?: string }, toolCtx: { sessionID?: string }) {
+      const sessionID = toolCtx?.sessionID ?? ctx.activeSessionID;
+      if (!sessionID) return "No opencode session is active.";
+      return formatOpencodeGoalDebug(ctx, sessionKeyForID(sessionID), args.goal_ref);
+    },
+  };
+
   tool.create_goal = {
     description:
       "Create a goal only when explicitly requested by the user/system/developer context and no goal currently exists. Do not infer goals from ordinary tasks.",
@@ -372,13 +389,13 @@ function buildOpencodePluginHooks(ctx: OpencodeGoalPluginContext, input: Opencod
         });
         return;
       }
-      if (toolName === "get_goal" || toolName === "create_goal" || toolName === "update_goal" || toolName === OPENCODE_GOAL_TOOL) return;
+      if (toolName === "get_goal" || toolName === "get_goal_debug" || toolName === "create_goal" || toolName === "update_goal" || toolName === OPENCODE_GOAL_TOOL) return;
       ctx.busySessions.add(toolInput.sessionID);
     },
 
     "tool.execute.after": async (toolInput: { tool: string; sessionID: string; callID: string; args: unknown }) => {
       const toolName = toolInput.tool;
-      if (toolName === "get_goal" || toolName === "create_goal" || toolName === "update_goal" || toolName === OPENCODE_GOAL_TOOL) return;
+      if (toolName === "get_goal" || toolName === "get_goal_debug" || toolName === "create_goal" || toolName === "update_goal" || toolName === OPENCODE_GOAL_TOOL) return;
       const isError = Boolean((toolInput.args as { isError?: boolean } | undefined)?.isError);
       const usage = await readOpencodeTokenUsageForSession(toolInput.sessionID);
       await ctx.runtime.toolCompleted({
@@ -466,6 +483,9 @@ async function runOpencodeGoalSubcommand(
     }
     case "monitor": {
       return await monitorOpencodeGoal(ctx, goal);
+    }
+    case "debug": {
+      return await formatOpencodeGoalDebug(ctx, sessionKey, ref);
     }
     case "pause":
     case "resume":
@@ -861,6 +881,18 @@ async function resolveGoalReference(
 function formatGoalListLine(goal: GoalSummary): string {
   const tokens = goal.tokenBudget === undefined ? String(goal.tokensUsed) : `${goal.tokensUsed}/${goal.tokenBudget}`;
   return `${goal.shortGoalId} ${goal.status} ${goal.timeUsedSeconds}s ${tokens} ${goal.executionWorkspace ?? "legacy"} — ${goal.objectiveSummary}`;
+}
+
+async function formatOpencodeGoalDebug(ctx: OpencodeGoalPluginContext, sessionKey: string, reference?: string): Promise<string> {
+  const goal = await resolveGoalReference(ctx, sessionKey, reference);
+  const state = await ctx.runtime.getGoalOrchestrationState(goal.goalId);
+  const [ledgerEvents, harnessState, reservation] = await Promise.all([
+    ctx.runtime.listLedgerEvents(goal.sessionKey, goal.goalId),
+    ctx.runtime.readHarnessState(goal.sessionKey).catch(() => undefined),
+    ctx.runtime.getReservation(goal.sessionKey).catch(() => undefined),
+  ]);
+  await ctx.runtime.recordMonitorDebugSnapshot(goal, state, { source: "opencode.get_goal_debug", ledgerEvents, harnessState, reservation });
+  return formatGoalDebugReport(buildGoalDebugReport({ goal, state, ledgerEvents, harnessState, reservation, traceTarget: ctx.runtime.getDebugTraceTarget() }));
 }
 
 async function formatOpencodeGoalStatus(ctx: OpencodeGoalPluginContext, goal: GoalSummary): Promise<string> {

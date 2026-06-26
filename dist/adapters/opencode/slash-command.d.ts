@@ -1,7 +1,7 @@
 import { parseGoalWorkspaceFlags } from "./workspace.js";
 export declare const OPENCODE_GOAL_TOOL = "goal_command";
 export declare const OPENCODE_GOAL_SLASH = "goal";
-export declare const OPENCODE_GOAL_SUBCOMMAND_SET: readonly ["list", "status", "monitor", "pause", "resume", "clear", "edit", "budget"];
+export declare const OPENCODE_GOAL_SUBCOMMAND_SET: readonly ["list", "status", "monitor", "debug", "pause", "resume", "clear", "edit", "budget"];
 export type OpencodeGoalSubcommand = (typeof OPENCODE_GOAL_SUBCOMMAND_SET)[number];
 export interface OpencodeGoalSlashParse {
     /** What kind of input the user provided. */

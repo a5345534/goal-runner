@@ -3,6 +3,7 @@ import { runGoalControllerLoop as runGoalControllerLoopCore, runGoalControllerTi
 import { createGoalDagNodesFromObjective, } from "./dag-planner.js";
 import { createGoalDagNodesFromFileDocument } from "./dag-file.js";
 import { createGoalDagNodes, getGoalDagReadyQueue as computeGoalDagReadyQueue, } from "./dag-scheduler.js";
+import { instrumentGoalStore, recordGoalDebugSnapshot, } from "./debug-trace.js";
 import { findRequiredSubagentIntegrationIssues } from "./integration.js";
 import { attachPreparedResourcesToNode, withGoalDagNodeLifecyclePhase } from "./lifecycle.js";
 import { parseGoalCommand, validateGoalObjective } from "./parser.js";
@@ -13,10 +14,12 @@ const TERMINAL_DAG_NODE_STATUSES = new Set(["complete", "blocked", "blockedTermi
 export class GoalRuntime {
     store;
     callbacks;
+    debugTracer;
     config;
     activeTurns = new Map();
     constructor(options) {
-        this.store = options.store;
+        this.debugTracer = options.debugTracer;
+        this.store = instrumentGoalStore(options.store, this.debugTracer);
         this.callbacks = options.callbacks ?? {};
         this.config = {
             defaultTokenBudget: options.config?.defaultTokenBudget ?? 200_000,
@@ -259,10 +262,93 @@ export class GoalRuntime {
         return updated;
     }
     async runGoalControllerTick(goalId, options) {
-        return runGoalControllerTickCore(this, goalId, { now: this.config.now, ...options });
+        const startedAt = Date.now();
+        try {
+            const result = await runGoalControllerTickCore(this, goalId, { now: this.config.now, ...options });
+            await this.recordDebugTrace({
+                category: "controller",
+                operation: "tick",
+                severity: "debug",
+                ok: true,
+                durationMs: Date.now() - startedAt,
+                goalId,
+                details: {
+                    started: result.started.length,
+                    synced: result.synced.length,
+                    blocked: result.blocked.length,
+                    completed: result.completed.length,
+                    failed: result.failed.length,
+                    followups: result.followups.length,
+                    ready: result.ready.length,
+                    queueBlocked: result.queueBlocked.length,
+                    changed: result.changed,
+                },
+            });
+            await this.recordGoalDebugSnapshot(goalId, "controller.tick", { tickResult: { started: result.started.length, synced: result.synced.length, blocked: result.blocked.length, completed: result.completed.length, followups: result.followups.length } });
+            return result;
+        }
+        catch (error) {
+            await this.recordDebugTrace({
+                category: "controller",
+                operation: "tick",
+                severity: "error",
+                ok: false,
+                durationMs: Date.now() - startedAt,
+                goalId,
+                error: error instanceof Error ? error.message : String(error),
+            });
+            throw error;
+        }
     }
     async runGoalControllerLoop(goalId, options) {
-        return runGoalControllerLoopCore(this, goalId, { now: this.config.now, ...options });
+        const startedAt = Date.now();
+        try {
+            const result = await runGoalControllerLoopCore(this, goalId, { now: this.config.now, ...options });
+            await this.recordDebugTrace({
+                category: "controller",
+                operation: "loop",
+                severity: "debug",
+                ok: true,
+                durationMs: Date.now() - startedAt,
+                goalId,
+                details: { goalId: result.goalId, ticks: result.ticks.length, changedTicks: result.ticks.filter((tick) => tick.changed).length },
+            });
+            await this.recordGoalDebugSnapshot(goalId, "controller.loop", { loopResult: result });
+            return result;
+        }
+        catch (error) {
+            await this.recordDebugTrace({
+                category: "controller",
+                operation: "loop",
+                severity: "error",
+                ok: false,
+                durationMs: Date.now() - startedAt,
+                goalId,
+                error: error instanceof Error ? error.message : String(error),
+            });
+            throw error;
+        }
+    }
+    getDebugTraceTarget() {
+        return this.debugTracer?.getTraceTarget?.();
+    }
+    async recordDebugTrace(event) {
+        if (!this.debugTracer?.enabled)
+            return;
+        await this.debugTracer.record(event);
+    }
+    async recordMonitorDebugSnapshot(goal, state, options = { source: "monitor" }) {
+        recordGoalDebugSnapshot(this.debugTracer, { goal, state, source: options.source, ledgerEvents: options.ledgerEvents, harnessState: options.harnessState, reservation: options.reservation, details: options.details });
+    }
+    async recordGoalDebugSnapshot(goalId, source, details) {
+        if (!this.debugTracer?.enabled)
+            return;
+        const goal = await this.getGoalById(goalId);
+        if (!goal)
+            return;
+        const state = await this.getGoalOrchestrationState(goalId);
+        const ledgerEvents = await this.store.listLedgerEvents(goal.sessionKey, goalId);
+        recordGoalDebugSnapshot(this.debugTracer, { goal, state, ledgerEvents, source, details });
     }
     async resolveGoalReference(reference) {
         const trimmed = reference.trim();

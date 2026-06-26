@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY, GoalRuntime, NativeGitWorkspaceManager, SQLiteGoalStore, cleanupTerminalSubagentWorkspaces, createControllerValidationRunner, createNativeGitSubagentBranchIntegrator, createNativeGitSubagentWorkspaceAllocator, findRequiredSubagentIntegrationIssues, parseGoalCommand, parseGoalDagFileContent, parseGoalModelRoutingConfigJson, parseTokenBudget, renderActiveGoalReminderPrompt, resolveControllerModelClass, resolveNativeGitCloseoutPolicy, resolveDefaultStateRoot, resolveGoalModelForHarness, selectModelScenarioForNode, } from "../../core/index.js";
+import { AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY, GoalRuntime, NativeGitWorkspaceManager, buildGoalDebugReport, createGoalDebugTracerFromEnv, SQLiteGoalStore, cleanupTerminalSubagentWorkspaces, createControllerValidationRunner, createNativeGitSubagentBranchIntegrator, createNativeGitSubagentWorkspaceAllocator, findRequiredSubagentIntegrationIssues, formatGoalDebugReport, parseGoalCommand, parseGoalDagFileContent, parseGoalModelRoutingConfigJson, parseTokenBudget, renderActiveGoalReminderPrompt, resolveControllerModelClass, resolveNativeGitCloseoutPolicy, resolveDefaultStateRoot, resolveGoalModelForHarness, selectModelScenarioForNode, } from "../../core/index.js";
 import { launchPiRpcBackgroundGoalSession, } from "./background-session.js";
 import { GoalListController } from "./goal-list-ui.js";
 import { normalizePiModelArg } from "./model-args.js";
@@ -24,7 +24,7 @@ const SUPERSEDED_CONTINUATION_KIND = "superseded_goal_continuation";
 const RECOVERY_CONTEXT_KIND = "goal_recovery_context";
 const CONTINUATION_MARKER = "agent_goal_continuation";
 const MAX_RECOVERY_EXCERPT_CHARS = 2_000;
-const POST_STOP_ALLOWED_TOOL_SET = new Set(["get_goal", "read", "grep", "find", "ls"]);
+const POST_STOP_ALLOWED_TOOL_SET = new Set(["get_goal", "get_goal_debug", "goal_config", "read", "grep", "find", "ls"]);
 const MEANINGFUL_PROGRESS_TOOL_SET = new Set(["write", "edit", "bash", "read", "grep", "find", "ls"]);
 let backgroundGoalSessionLauncher = launchPiRpcBackgroundGoalSession;
 const backgroundGoalSessions = new Map();
@@ -40,12 +40,15 @@ export function setPiBackgroundGoalSessionLauncherForTests(launcher) {
     backgroundGoalSessionLauncher = launcher ?? launchPiRpcBackgroundGoalSession;
 }
 export default function goalPiExtension(pi) {
+    applyPiGoalConfigEnvironmentDefaults();
     const store = new PiSessionGoalMirrorStore(new SQLiteGoalStore(), (data) => pi.appendEntry(PI_GOAL_SESSION_ENTRY_TYPE, data));
+    const debugTracer = createGoalDebugTracerFromEnv();
     let lastCtx;
     const sessionContexts = new Map();
     let staleContinuationAbortPending;
     const runtime = new GoalRuntime({
         store,
+        debugTracer,
         callbacks: {
             readHarnessState: async (sessionKey) => {
                 const ctx = sessionContexts.get(sessionKey);
@@ -104,7 +107,7 @@ export default function goalPiExtension(pi) {
         },
     });
     pi.registerCommand("goal", {
-        description: "Long-running orchestrated goal: /goal <objective>, /goal list, /goal status|monitor|pause|resume|edit|budget|clear [goal-ref]",
+        description: "Long-running orchestrated goal: /goal <objective>, /goal list, /goal status|monitor|debug|pause|resume|edit|budget|clear [goal-ref]",
         getArgumentCompletions: (prefix) => {
             const commands = [
                 "--tokens",
@@ -116,6 +119,7 @@ export default function goalPiExtension(pi) {
                 "list",
                 "status",
                 "monitor",
+                "debug",
                 "edit",
                 "budget",
                 "pause",
@@ -148,6 +152,42 @@ export default function goalPiExtension(pi) {
             lastCtx = rememberPiGoalSessionContext(sessionContexts, ctx);
             const result = await getPiSessionGoalToolResult(runtime, ctx);
             return { content: [{ type: "text", text: result.message }], details: result.goal ?? null };
+        },
+    });
+    pi.registerTool({
+        name: "get_goal_debug",
+        label: "Get Goal Debug",
+        description: "Get a read-only diagnostic report for a goal, including DAG/subagent state, recent events, and detected anomalies.",
+        parameters: Type.Object({
+            goal_ref: Type.Optional(Type.String({ description: "Optional goal id or unambiguous prefix. Defaults to the current/nearest goal." })),
+        }),
+        promptSnippet: "get_goal_debug returns a read-only /goal diagnostic report and anomaly summary.",
+        promptGuidelines: ["Use get_goal_debug when monitoring or debugging a /goal run before deciding whether a goal-runner bug needs investigation."],
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            lastCtx = rememberPiGoalSessionContext(sessionContexts, ctx);
+            const goal = await resolveGoalReferenceOrDefault(runtime, ctx, params.goal_ref);
+            const report = await buildPiGoalDebugReport(runtime, goal, "pi.get_goal_debug");
+            return { content: [{ type: "text", text: formatGoalDebugReport(report) }], details: report };
+        },
+    });
+    pi.registerTool({
+        name: "goal_config",
+        label: "Goal Config",
+        description: "Read or update goal-runner configuration keys. Use set/clear only when explicitly requested by the user.",
+        parameters: Type.Object({
+            action: StringEnum(["show", "get", "set", "clear"]),
+            key: Type.Optional(Type.String({ description: "Config key, e.g. controller-poll-ms, debug-trace, model-routing-file." })),
+            value: Type.Optional(Type.String({ description: "Value for action=set. Use strings so JSON/path/list values can be passed verbatim." })),
+        }),
+        promptSnippet: "goal_config reads or updates /goal runtime configuration keys.",
+        promptGuidelines: [
+            "Use goal_config with action show/get for diagnostics and to inspect parameter settings.",
+            "Use goal_config with action set/clear only when the user explicitly asks to change goal-runner configuration.",
+        ],
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            lastCtx = rememberPiGoalSessionContext(sessionContexts, ctx);
+            const message = applyGoalConfigToolRequest(params);
+            return { content: [{ type: "text", text: message }], details: buildGoalConfigSnapshot(params.key) };
         },
     });
     pi.registerTool({
@@ -245,8 +285,8 @@ export default function goalPiExtension(pi) {
             meaningfulProgress: succeeded && toolName !== undefined ? isMeaningfulProgressTool(toolName) : false,
             progressSummary: succeeded ? toolName : `${toolName ?? "unknown"} failed`,
         });
-        if (toolName === "get_goal" || toolName === "create_goal" || toolName === "update_goal") {
-            // Goal tool handlers already performed semantic state transitions; this hook keeps accounting fresh.
+        if (toolName === "get_goal" || toolName === "get_goal_debug" || toolName === "create_goal" || toolName === "update_goal") {
+            // Goal tool handlers already performed semantic/read-only handling; this hook keeps accounting fresh.
         }
     });
     pi.on("turn_end", async (event, ctx) => {
@@ -395,6 +435,11 @@ async function handlePiGoalCommand(runtime, ctx, args, backgroundGoalSessions, c
     if (first === "monitor") {
         ensureAtMostOneGoalRef(first, tokens.slice(1));
         await monitorTargetGoal(runtime, ctx, tokens[1]);
+        return;
+    }
+    if (first === "debug") {
+        ensureAtMostOneGoalRef(first, tokens.slice(1));
+        await showTargetGoalDebug(runtime, ctx, tokens[1]);
         return;
     }
     if (first === "pause" || first === "resume" || first === "clear") {
@@ -1305,7 +1350,7 @@ function stopAllPiGoalControllerPollingLoops() {
     piGoalControllerPollsInFlight.clear();
 }
 function readPiGoalControllerPollMs() {
-    const raw = readPiGoalConfig().controllerPollMs ?? process.env.AGENT_GOAL_PI_CONTROLLER_POLL_MS;
+    const raw = process.env.AGENT_GOAL_PI_CONTROLLER_POLL_MS ?? readPiGoalConfig().controllerPollMs;
     if (raw === "0" || raw === "off")
         return 0;
     if (!raw)
@@ -1314,7 +1359,7 @@ function readPiGoalControllerPollMs() {
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 5_000;
 }
 function readPiGoalControllerLeaseMs() {
-    const raw = process.env.AGENT_GOAL_PI_CONTROLLER_LEASE_MS;
+    const raw = process.env.AGENT_GOAL_PI_CONTROLLER_LEASE_MS ?? readPiGoalConfig().controllerLeaseMs;
     if (raw) {
         const parsed = Number.parseInt(raw, 10);
         if (Number.isFinite(parsed) && parsed > 0)
@@ -1323,7 +1368,7 @@ function readPiGoalControllerLeaseMs() {
     return Math.max(120_000, readPiGoalControllerPollMs() * 30);
 }
 function readPiGoalMaxSubagents() {
-    const raw = readPiGoalConfig().maxSubagents ?? process.env.AGENT_GOAL_PI_MAX_SUBAGENTS;
+    const raw = process.env.AGENT_GOAL_PI_MAX_SUBAGENTS ?? readPiGoalConfig().maxSubagents;
     if (!raw)
         return 1;
     const parsed = Number.parseInt(raw, 10);
@@ -1338,6 +1383,155 @@ function resolvePiGoalConfigPath() {
     }
     return PI_GOAL_RUNNER_CONFIG_PATH;
 }
+const GOAL_CONFIG_DEFINITIONS = [
+    {
+        key: "maxSubagents",
+        label: "max-subagents",
+        env: ["AGENT_GOAL_PI_MAX_SUBAGENTS"],
+        defaultValue: "1",
+        kind: "positive-int",
+        description: "Maximum concurrent Pi subagents per controller tick.",
+    },
+    {
+        key: "maxAutoRetries",
+        label: "max-auto-retries",
+        env: ["AGENT_GOAL_PI_MAX_AUTO_RETRIES"],
+        defaultValue: "2",
+        kind: "nonnegative-int",
+        description: "Maximum automatic controller recovery retries per runner/subagent failure family.",
+    },
+    {
+        key: "controllerPollMs",
+        label: "controller-poll-ms",
+        env: ["AGENT_GOAL_PI_CONTROLLER_POLL_MS"],
+        defaultValue: "5000",
+        kind: "poll-ms",
+        description: "Pi controller polling interval in milliseconds; 0/off disables polling.",
+    },
+    {
+        key: "controllerLeaseMs",
+        label: "controller-lease-ms",
+        env: ["AGENT_GOAL_PI_CONTROLLER_LEASE_MS"],
+        defaultValue: "max(120000, controller-poll-ms*30)",
+        kind: "positive-int",
+        description: "Controller poll lease duration in milliseconds.",
+    },
+    {
+        key: "debugTrace",
+        label: "debug-trace",
+        env: ["GOAL_RUNNER_DEBUG_TRACE", "AGENT_GOAL_DEBUG_TRACE"],
+        defaultValue: "off",
+        kind: "boolean",
+        description: "Enable persistent JSONL debug trace events for store/controller/monitor/anomaly data.",
+        restartRequired: true,
+    },
+    {
+        key: "debugTraceDir",
+        label: "debug-trace-dir",
+        env: ["GOAL_RUNNER_DEBUG_TRACE_DIR", "AGENT_GOAL_DEBUG_TRACE_DIR"],
+        kind: "string",
+        description: "Directory for JSONL debug trace files.",
+        restartRequired: true,
+    },
+    {
+        key: "debugTraceFile",
+        label: "debug-trace-file",
+        env: ["GOAL_RUNNER_DEBUG_TRACE_FILE", "AGENT_GOAL_DEBUG_TRACE_FILE"],
+        kind: "string",
+        description: "Exact JSONL debug trace file path.",
+        restartRequired: true,
+    },
+    {
+        key: "allowedWorkspaceRoots",
+        label: "allowed-workspace-roots",
+        env: ["AGENT_GOAL_ALLOWED_WORKSPACE_ROOTS"],
+        kind: "string",
+        description: "Allowed execution workspace roots, separated by ':' on POSIX or ';' on Windows.",
+        restartRequired: true,
+    },
+    {
+        key: "completionAudit",
+        label: "completion-audit",
+        env: ["AGENT_GOAL_COMPLETION_AUDIT", "PI_GOAL_COMPLETION_AUDIT"],
+        defaultValue: "heuristic",
+        kind: "audit-mode",
+        description: "Completion audit mode: heuristic/on/off.",
+        restartRequired: true,
+    },
+    {
+        key: "modelRoutingFile",
+        label: "model-routing-file",
+        env: ["AGENT_GOAL_MODEL_ROUTING_FILE"],
+        kind: "string",
+        description: "Path to reusable model routing config JSON.",
+        restartRequired: true,
+    },
+    {
+        key: "modelRoutingJson",
+        label: "model-routing-json",
+        env: ["AGENT_GOAL_MODEL_ROUTING_JSON"],
+        kind: "json",
+        description: "Inline reusable model routing JSON.",
+        restartRequired: true,
+    },
+    {
+        key: "modelClassCatalogFile",
+        label: "model-class-catalog-file",
+        env: ["AGENT_GOAL_MODEL_CLASS_CATALOG_FILE"],
+        kind: "string",
+        description: "Path to model-class catalog override JSON.",
+        restartRequired: true,
+    },
+    {
+        key: "modelClassCatalogJson",
+        label: "model-class-catalog-json",
+        env: ["AGENT_GOAL_MODEL_CLASS_CATALOG_JSON"],
+        kind: "json",
+        description: "Inline model-class catalog override JSON.",
+        restartRequired: true,
+    },
+    {
+        key: "modelBindingFile",
+        label: "model-binding-file",
+        env: ["AGENT_GOAL_MODEL_BINDING_FILE"],
+        kind: "string",
+        description: "Path to harness model binding catalog override JSON.",
+        restartRequired: true,
+    },
+    {
+        key: "modelBindingJson",
+        label: "model-binding-json",
+        env: ["AGENT_GOAL_MODEL_BINDING_JSON"],
+        kind: "json",
+        description: "Inline harness model binding catalog override JSON.",
+        restartRequired: true,
+    },
+    {
+        key: "trustedSubmoduleUrlPatterns",
+        label: "trusted-submodule-url-patterns",
+        env: ["AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_URL_PATTERNS"],
+        kind: "string",
+        description: "Trusted submodule URL patterns for retained-ref publishing; JSON array or comma/newline-separated patterns.",
+        restartRequired: true,
+    },
+    {
+        key: "controllerAuditModel",
+        label: "controller-audit-model",
+        env: ["AGENT_GOAL_CONTROLLER_AUDIT_MODEL", "AGENT_GOAL_PI_CONTROLLER_AUDIT_MODEL", "PI_GOAL_CONTROLLER_AUDIT_MODEL"],
+        kind: "string",
+        description: "Optional controller-audit model id used when controller audit is enabled.",
+        restartRequired: true,
+        secret: true,
+    },
+];
+const GOAL_CONFIG_KEY_MAP = new Map();
+for (const definition of GOAL_CONFIG_DEFINITIONS) {
+    GOAL_CONFIG_KEY_MAP.set(definition.key, definition);
+    GOAL_CONFIG_KEY_MAP.set(definition.label, definition);
+    for (const alias of definition.aliases ?? [])
+        GOAL_CONFIG_KEY_MAP.set(alias, definition);
+}
+const appliedPiGoalConfigEnvDefaults = new Set();
 let _cachedPiGoalRuntimeConfig;
 let _cachedPath;
 function readPiGoalConfig() {
@@ -1349,7 +1543,7 @@ function readPiGoalConfig() {
         const raw = fs.readFileSync(configPath, "utf8");
         const parsed = JSON.parse(raw);
         if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-            _cachedPiGoalRuntimeConfig = parsed;
+            _cachedPiGoalRuntimeConfig = sanitizePiGoalConfig(parsed);
         }
         else {
             _cachedPiGoalRuntimeConfig = {};
@@ -1361,13 +1555,24 @@ function readPiGoalConfig() {
     _cachedPath = configPath;
     return _cachedPiGoalRuntimeConfig;
 }
+function sanitizePiGoalConfig(raw) {
+    const result = {};
+    for (const [rawKey, rawValue] of Object.entries(raw)) {
+        const definition = resolveGoalConfigDefinition(rawKey);
+        if (!definition || rawValue === undefined || rawValue === null)
+            continue;
+        result[definition.key] = String(rawValue);
+    }
+    return result;
+}
 function writePiGoalConfig(patch) {
     const current = readPiGoalConfig();
-    const merged = { ...current, ...patch };
-    // Remove keys that were explicitly cleared
-    for (const key of Object.keys(patch)) {
-        if (patch[key] === null)
+    const merged = { ...current };
+    for (const [key, value] of Object.entries(patch)) {
+        if (value === null)
             delete merged[key];
+        else
+            merged[key] = value;
     }
     const configPath = resolvePiGoalConfigPath();
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
@@ -1375,89 +1580,200 @@ function writePiGoalConfig(patch) {
     _cachedPiGoalRuntimeConfig = undefined;
     _cachedPath = undefined;
 }
-function formatGoalConfigValue(key) {
+function applyPiGoalConfigEnvironmentDefaults() {
     const config = readPiGoalConfig();
-    const value = config[key];
-    const env = configEnvFor(key);
-    const effective = env !== undefined ? String(env) : (value !== undefined ? String(value) : undefined);
-    const source = env !== undefined ? "env" : (value !== undefined ? "config" : "default");
-    return effective !== undefined ? `${effective} (${source})` : `default (${source})`;
-}
-function configEnvFor(key) {
-    switch (key) {
-        case "maxSubagents": return process.env.AGENT_GOAL_PI_MAX_SUBAGENTS;
-        case "maxAutoRetries": return process.env.AGENT_GOAL_PI_MAX_AUTO_RETRIES;
-        case "controllerPollMs": return process.env.AGENT_GOAL_PI_CONTROLLER_POLL_MS;
-        default: return undefined;
+    for (const definition of GOAL_CONFIG_DEFINITIONS) {
+        const value = config[definition.key];
+        if (value === undefined || definition.env.length === 0)
+            continue;
+        if (definition.env.some((name) => process.env[name] !== undefined && !appliedPiGoalConfigEnvDefaults.has(name)))
+            continue;
+        const target = definition.env[0];
+        process.env[target] = value;
+        appliedPiGoalConfigEnvDefaults.add(target);
     }
 }
+function explicitConfigEnvFor(definition) {
+    for (const name of definition.env) {
+        const value = process.env[name];
+        if (value !== undefined && !appliedPiGoalConfigEnvDefaults.has(name))
+            return { name, value };
+    }
+    return undefined;
+}
+function formatGoalConfigValue(definition) {
+    const snapshot = goalConfigEntrySnapshot(definition);
+    const rendered = snapshot.value === undefined ? "unset" : renderGoalConfigValue(snapshot.value, definition);
+    return `${rendered} (${snapshot.source})${definition.restartRequired ? " — applies on next Pi reload/start" : ""}`;
+}
+function goalConfigEntrySnapshot(definition) {
+    const config = readPiGoalConfig();
+    const env = explicitConfigEnvFor(definition);
+    const configValue = config[definition.key];
+    const value = env?.value ?? configValue ?? definition.defaultValue;
+    const source = env ? `env:${env.name}` : configValue !== undefined ? "config" : definition.defaultValue !== undefined ? "default" : "unset";
+    return {
+        key: definition.key,
+        label: definition.label,
+        value,
+        source,
+        env: definition.env,
+        defaultValue: definition.defaultValue,
+        description: definition.description,
+        restartRequired: definition.restartRequired === true,
+    };
+}
+function buildGoalConfigSnapshot(key) {
+    if (key) {
+        const definition = resolveGoalConfigDefinition(key);
+        return definition ? goalConfigEntrySnapshot(definition) : { error: `unknown config key: ${key}` };
+    }
+    return {
+        configFile: resolvePiGoalConfigPath(),
+        entries: GOAL_CONFIG_DEFINITIONS.map(goalConfigEntrySnapshot),
+    };
+}
+function renderGoalConfigValue(value, definition) {
+    if (!definition.secret)
+        return value;
+    return value.length <= 8 ? "[set]" : `${value.slice(0, 4)}…${value.slice(-4)}`;
+}
+function resolveGoalConfigDefinition(rawKey) {
+    return GOAL_CONFIG_KEY_MAP.get(rawKey.trim());
+}
 function readPiGoalMaxAutoRetries() {
-    const raw = readPiGoalConfig().maxAutoRetries ?? process.env.AGENT_GOAL_PI_MAX_AUTO_RETRIES;
+    const raw = process.env.AGENT_GOAL_PI_MAX_AUTO_RETRIES ?? readPiGoalConfig().maxAutoRetries;
     if (!raw)
         return 2;
     const parsed = Number.parseInt(raw, 10);
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : 2;
 }
-const GOAL_CONFIG_KEYS = ["maxSubagents", "maxAutoRetries", "controllerPollMs"];
+function renderGoalConfigList() {
+    const lines = ["Goal runtime configuration (use /goal config <key> <value> to change):", ""];
+    for (const definition of GOAL_CONFIG_DEFINITIONS) {
+        lines.push(`  ${definition.label}: ${formatGoalConfigValue(definition)}`);
+        lines.push(`    ${definition.description}`);
+        if (definition.env.length)
+            lines.push(`    env: ${definition.env.join(", ")}`);
+    }
+    lines.push("", `Config file: ${resolvePiGoalConfigPath()}`);
+    lines.push("Environment variables override config file values. Config-backed environment defaults apply to settings whose legacy code path reads env directly.");
+    lines.push("Use /goal config <key> clear to remove a config value.");
+    return lines.join("\n");
+}
+function renderGoalConfigKey(rawKey) {
+    const definition = resolveGoalConfigDefinition(rawKey);
+    if (!definition)
+        throwUnknownGoalConfigKey(rawKey);
+    return [
+        `${definition.label}: ${formatGoalConfigValue(definition)}`,
+        definition.description,
+        definition.env.length ? `env: ${definition.env.join(", ")}` : undefined,
+        definition.restartRequired ? "Note: this setting applies on next Pi reload/start or fresh controller process." : undefined,
+    ].filter(Boolean).join("\n");
+}
+function applyGoalConfigToolRequest(params) {
+    if (params.action === "show")
+        return renderGoalConfigList();
+    if (!params.key)
+        throw new Error(`goal_config action ${params.action} requires key`);
+    if (params.action === "get")
+        return renderGoalConfigKey(params.key);
+    if (params.action === "clear")
+        return clearGoalConfigValue(params.key);
+    if (params.value === undefined)
+        throw new Error("goal_config action set requires value");
+    return setGoalConfigValue(params.key, params.value);
+}
 async function handleGoalConfigCommand(ctx, args) {
     const key = args[0];
-    const value = args[1];
+    const rawValue = args.length > 1 ? args.slice(1).join(" ") : undefined;
     if (!key) {
-        const lines = ["Goal runtime configuration (use /goal config <key> <value> to change):", ""];
-        for (const k of GOAL_CONFIG_KEYS) {
-            const label = { maxSubagents: "max-subagents", maxAutoRetries: "max-auto-retries", controllerPollMs: "controller-poll-ms" }[k] ?? k;
-            lines.push(`  ${label}: ${formatGoalConfigValue(k)}`);
-        }
-        lines.push("", `Config file: ${resolvePiGoalConfigPath()}`);
-        lines.push("Environment variables override config file values.");
-        lines.push("Use /goal config <key> clear to remove a config value.");
-        ctx.ui.notify(lines.join("\n"), "info");
+        ctx.ui.notify(renderGoalConfigList(), "info");
         return;
     }
-    const keyMap = { "max-subagents": "maxSubagents", "max-auto-retries": "maxAutoRetries", "controller-poll-ms": "controllerPollMs" };
-    const resolved = keyMap[key] ?? key;
-    if (!GOAL_CONFIG_KEYS.includes(resolved)) {
-        throw new Error(`Unknown config key "${key}". Available: ${GOAL_CONFIG_KEYS.map((k) => keyMap[k] ?? k).join(", ")}`);
-    }
-    if (value === undefined) {
-        ctx.ui.notify(`${key}: ${formatGoalConfigValue(resolved)}`, "info");
+    if (rawValue === undefined) {
+        ctx.ui.notify(renderGoalConfigKey(key), "info");
         return;
     }
-    if (value === "clear" || value === "null" || value === "default") {
-        writePiGoalConfig({ [resolved]: null });
-        ctx.ui.notify(`Goal config "${key}" cleared (back to default).`, "info");
-        return;
+    const message = rawValue === "clear" || rawValue === "null" || rawValue === "default"
+        ? clearGoalConfigValue(key)
+        : setGoalConfigValue(key, rawValue);
+    ctx.ui.notify(message, "info");
+}
+function setGoalConfigValue(rawKey, rawValue) {
+    const definition = resolveGoalConfigDefinition(rawKey);
+    if (!definition)
+        throwUnknownGoalConfigKey(rawKey);
+    const value = normalizeGoalConfigValue(definition, rawValue);
+    writePiGoalConfig({ [definition.key]: value });
+    applyPiGoalConfigEnvironmentDefaults();
+    return `Goal config ${definition.label} set to ${renderGoalConfigValue(value, definition)}.${definition.restartRequired ? " Restart/reload Pi or start a fresh controller process for this setting to affect already-loaded env-based paths." : ""}`;
+}
+function clearGoalConfigValue(rawKey) {
+    const definition = resolveGoalConfigDefinition(rawKey);
+    if (!definition)
+        throwUnknownGoalConfigKey(rawKey);
+    writePiGoalConfig({ [definition.key]: null });
+    clearAppliedPiGoalConfigEnvDefault(definition);
+    return `Goal config ${definition.label} cleared (back to env/default).`;
+}
+function clearAppliedPiGoalConfigEnvDefault(definition) {
+    for (const name of definition.env) {
+        if (!appliedPiGoalConfigEnvDefaults.has(name))
+            continue;
+        delete process.env[name];
+        appliedPiGoalConfigEnvDefaults.delete(name);
     }
-    if (resolved === "maxSubagents") {
+}
+function normalizeGoalConfigValue(definition, rawValue) {
+    const value = rawValue.trim();
+    if (!value)
+        throw new Error(`${definition.label} requires a non-empty value`);
+    if (definition.kind === "positive-int") {
         const n = Number.parseInt(value, 10);
-        if (!Number.isFinite(n) || n <= 0)
-            throw new Error(`max-subagents must be a positive integer, got "${value}"`);
-        writePiGoalConfig({ maxSubagents: String(n) });
-        ctx.ui.notify(`Goal config max-subagents set to ${n}.`, "info");
-        return;
+        if (!Number.isFinite(n) || n <= 0 || String(n) !== value)
+            throw new Error(`${definition.label} must be a positive integer, got "${rawValue}"`);
+        return String(n);
     }
-    if (resolved === "maxAutoRetries") {
+    if (definition.kind === "nonnegative-int") {
         const n = Number.parseInt(value, 10);
-        if (!Number.isFinite(n) || n < 0)
-            throw new Error(`max-auto-retries must be a positive integer or 0, got "${value}"`);
-        writePiGoalConfig({ maxAutoRetries: String(n) });
-        ctx.ui.notify(`Goal config max-auto-retries set to ${n}.`, "info");
-        return;
+        if (!Number.isFinite(n) || n < 0 || String(n) !== value)
+            throw new Error(`${definition.label} must be a non-negative integer, got "${rawValue}"`);
+        return String(n);
     }
-    if (resolved === "controllerPollMs") {
-        if (value !== "0" && value !== "off") {
-            const n = Number.parseInt(value, 10);
-            if (!Number.isFinite(n) || n <= 0)
-                throw new Error(`controller-poll-ms must be a positive integer, 0, or "off", got "${value}"`);
-            writePiGoalConfig({ controllerPollMs: String(n) });
-            ctx.ui.notify(`Goal config controller-poll-ms set to ${n}ms.`, "info");
-        }
-        else {
-            writePiGoalConfig({ controllerPollMs: "0" });
-            ctx.ui.notify("Goal config controller-poll-ms set to 0 (polling disabled).", "info");
-        }
-        return;
+    if (definition.kind === "poll-ms") {
+        if (["0", "off", "false", "disabled"].includes(value.toLowerCase()))
+            return "0";
+        const n = Number.parseInt(value, 10);
+        if (!Number.isFinite(n) || n <= 0 || String(n) !== value)
+            throw new Error(`${definition.label} must be a positive integer, 0, or off, got "${rawValue}"`);
+        return String(n);
     }
+    if (definition.kind === "boolean") {
+        const normalized = value.toLowerCase();
+        if (["1", "true", "on", "yes", "enabled"].includes(normalized))
+            return "1";
+        if (["0", "false", "off", "no", "disabled"].includes(normalized))
+            return "0";
+        throw new Error(`${definition.label} must be one of on/off/true/false/1/0, got "${rawValue}"`);
+    }
+    if (definition.kind === "audit-mode") {
+        const normalized = value.toLowerCase();
+        if (["heuristic", "on", "1", "true", "enabled"].includes(normalized))
+            return normalized === "heuristic" ? "heuristic" : "on";
+        if (["off", "0", "false", "disabled", "none"].includes(normalized))
+            return "off";
+        throw new Error(`${definition.label} must be heuristic/on/off, got "${rawValue}"`);
+    }
+    if (definition.kind === "json") {
+        JSON.parse(value);
+        return value;
+    }
+    return rawValue;
+}
+function throwUnknownGoalConfigKey(key) {
+    throw new Error(`Unknown config key "${key}". Available: ${GOAL_CONFIG_DEFINITIONS.map((definition) => definition.label).join(", ")}`);
 }
 async function showGoalList(runtime, ctx) {
     const summaries = await runtime.listGoalSummaries();
@@ -1503,6 +1819,21 @@ async function showTargetGoalStatus(runtime, ctx, reference) {
 async function monitorTargetGoal(runtime, ctx, reference) {
     const goal = await resolveGoalReferenceOrDefault(runtime, ctx, reference);
     await monitorGoalSummary(runtime, ctx, goal);
+}
+async function showTargetGoalDebug(runtime, ctx, reference) {
+    const goal = await resolveGoalReferenceOrDefault(runtime, ctx, reference);
+    const report = await buildPiGoalDebugReport(runtime, goal, "pi.debug-command");
+    ctx.ui.notify(formatGoalDebugReport(report), report.anomalies.some((anomaly) => anomaly.severity === "error") ? "warning" : "info");
+}
+async function buildPiGoalDebugReport(runtime, goal, source) {
+    const state = await runtime.getGoalOrchestrationState(goal.goalId);
+    const [ledgerEvents, harnessState, reservation] = await Promise.all([
+        runtime.listLedgerEvents(goal.sessionKey, goal.goalId),
+        runtime.readHarnessState(goal.sessionKey).catch(() => undefined),
+        runtime.getReservation(goal.sessionKey).catch(() => undefined),
+    ]);
+    await runtime.recordMonitorDebugSnapshot(goal, state, { source, ledgerEvents, harnessState, reservation });
+    return buildGoalDebugReport({ goal, state, ledgerEvents, harnessState, reservation, traceTarget: runtime.getDebugTraceTarget() });
 }
 function ensureNoExtraGoalArgs(command, rest) {
     if (rest.length > 0)
@@ -1671,6 +2002,7 @@ async function readGoalMonitorDagSnapshot(runtime, goal) {
         runtime.getReservation(goal.sessionKey).catch(() => undefined),
     ]);
     const runners = readPiBackgroundRunnerInventory(goal.goalId, state.subagents);
+    await runtime.recordMonitorDebugSnapshot(goal, state, { source: "pi.monitor", ledgerEvents, harnessState, reservation, details: { runnerCount: runners.length } });
     return { ...state, runners, ledgerEvents, harnessState, reservation, refreshedAt: new Date().toISOString() };
 }
 async function runTargetGoalLifecycleCommand(runtime, ctx, action, reference, controllerDefaults = {}) {

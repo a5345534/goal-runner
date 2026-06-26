@@ -53,6 +53,7 @@ npm run build
 node dist/cli.js --state-root /tmp/agent-goal-smoke "finish the migration"
 node dist/cli.js --state-root /tmp/agent-goal-smoke
 node dist/cli.js --state-root /tmp/agent-goal-smoke pause
+node dist/cli.js --state-root /tmp/agent-goal-smoke debug
 node dist/cli.js --state-root /tmp/agent-goal-smoke clear
 ```
 
@@ -219,18 +220,72 @@ The Pi bridge registers these commands and model-visible tools:
 | `/goal list` | List recent materialized goals and open the selected goal in the read-only monitor. |
 | `/goal status [goal-ref]` | Show status, metadata, DAG nodes, subagents, and validation summaries for the selected/default goal. |
 | `/goal monitor [goal-ref]` | Open a read-only monitor for the selected/default goal transcript and lifecycle controls. |
+| `/goal debug [goal-ref]` | Emit a point-in-time debug report with DAG/subagent counts, recent events, detected anomalies, and the active trace file when tracing is enabled. |
+| `/goal config [key] [value\|clear]` | List, inspect, update, or clear goal-runner runtime configuration keys in one place. |
 | `/goal pause [goal-ref]` | Pause the selected/default goal so automatic continuation stops until it is resumed. |
 | `/goal resume [goal-ref]` | Resume a paused/blocked/budget-limited/usage-limited selected/default goal when policy allows continuation. |
 | `/goal clear [goal-ref]` | Clear runtime state for the selected/default goal without deleting its execution workspace or worktree. |
 | `/goal edit [goal-ref] <objective>` | Replace the selected/default goal's objective. If no objective is supplied, prompt with an editor. |
 | `/goal budget [goal-ref] <token-budget>` | Replace the selected/default goal's token budget without resetting already-used tokens. |
 | `get_goal` | Model-visible tool that returns the current Pi session goal, status, budget, usage, and elapsed time. |
+| `get_goal_debug` | Model-visible read-only tool that returns the same diagnostic/anomaly report as `/goal debug`, so agents can inspect run traces without human slash-command intervention. |
+| `goal_config` | Model-visible configuration tool for `show`, `get`, `set`, and `clear` operations. Agents should only `set`/`clear` when explicitly instructed by the user. |
 | `create_goal` | Model-visible Codex-compatible tool that creates a current-session goal only when explicitly requested and no current goal exists. |
 | `update_goal` | Model-visible Codex-compatible tool that marks the current goal `complete` or `blocked` subject to runtime audit rules. |
 
 It deliberately does **not** register `goal_complete`, `pause_goal`, or `abort_goal`; completion remains `update_goal({"status":"complete"})`.
 
+### Goal configuration
+
+`/goal config` lists every goal-runner parameter managed by the Pi bridge, its
+effective value, source (`env`, `config`, `default`, or `unset`), backing
+environment variables, and config file path. Use:
+
+```text
+/goal config                         # list all settings
+/goal config controller-poll-ms      # inspect one setting
+/goal config controller-poll-ms 0    # disable polling
+/goal config debug-trace on          # enable trace for the next Pi reload/start
+/goal config debug-trace-file /tmp/goal-debug.jsonl
+/goal config model-routing-file .goal/model-routing.json
+/goal config trusted-submodule-url-patterns '["https://github.com/a5345534/*"]'
+/goal config max-subagents clear     # remove config value, falling back to env/default
+```
+
+Agents can use the model-visible `goal_config` tool with `{ "action": "show" }`,
+`{ "action": "get", "key": "debug-trace" }`, `{ "action": "set", ... }`, or
+`{ "action": "clear", ... }`. Environment variables still override config-file
+values. Settings backed by legacy env-only code paths are applied as config-backed
+environment defaults when the Pi extension loads; values marked as restart/reload
+settings require a fresh Pi/goal-controller process to affect already-loaded
+components.
+
+`/goal config` currently covers: subagent concurrency/retry limits, controller
+poll/lease timing, debug trace on/file/dir, allowed workspace roots, completion
+audit mode, model routing/catalog/binding overrides, trusted submodule URL
+patterns, and controller audit model.
+
 `/goal --tokens <budget> ...` accepts positive numbers with optional `k` or `m` suffixes, for example `100k` or `1.5m`. New Pi goals are always orchestrated. Free-form objectives produce one execution node; multi-node DAGs require `/goal --dag <path>` with a JSON file matching `schemas/goal-dag.schema.json`. DAG files can declare `modelRouting.scenarios` plus rules so the controller session and each subagent node can use different abstract `modelClass` values by scenario. Concrete provider/model ids are resolved only by goal-runner harness binding catalogs, with resolution evidence persisted on controller metadata and DAG nodes. Reusable routing can also be provided through `AGENT_GOAL_MODEL_ROUTING_FILE` or `AGENT_GOAL_MODEL_ROUTING_JSON`, with DAG-local routing taking precedence. The controller can either use the supplied Git workspace or auto-allocate a native Git controller worktree/branch when workspace/branch/ref are omitted, then create subagent worktrees/branches under `.worktrees/`. Controller startup reports planned/started counts to the caller but does not send an initial model prompt to the controller session; token-consuming turns begin with subagent work or later controller validation/decision prompts. Explicit Git workspaces require a matching `--branch` or `--ref`. The adapter validates configured workspaces with read-only filesystem/git inspection and refuses missing, inaccessible, non-git, branch/ref-mismatched, or host-policy-disallowed bindings. Pi persists orchestration state in the goal store and restores active controller pollers on later session starts or `/goal` command entry. After all DAG nodes are terminal, controller validation passes, and required subagent branch integrations succeed (or are recorded as `not-required`), Pi marks the parent goal complete/blocked, clears stale subagent error notes, stops the controller poller, removes completed subagent worktrees, and removes auto-allocated controller worktrees; explicit workspaces and blocked/failed subagent worktrees are preserved. Subagents are prompted to commit intended repository changes on their assigned branch before reporting `SUBAGENT_RESULT:` because uncommitted work cannot be merged into the controller workspace. Set `AGENT_GOAL_ALLOWED_WORKSPACE_ROOTS` to a colon-separated list of allowed roots (semicolon-separated on Windows) to restrict eligible execution workspaces. Set `AGENT_GOAL_PI_CONTROLLER_POLL_MS=0` to disable polling. Pi controller validation always executes declared shell validators; nodes that declare validators never pass on self-report alone.
+
+### Debug trace and run diagnostics
+
+`/goal debug [goal-ref]`, the model-visible `get_goal_debug` tool, and
+`goal-runner debug [goal-ref]` produce a compact post-run diagnostic report from
+the durable goal store. The report summarizes
+DAG node/subagent status counts, recent ledger events, and anomaly signatures
+such as runner-starting without a live subagent, recoverable runner-launch
+failures waiting for retry, blocked/failed nodes, failed integrations, and DAGs
+that are terminal but not finalized.
+
+Use `/goal config debug-trace on` or set `GOAL_RUNNER_DEBUG_TRACE=1` (or legacy
+`AGENT_GOAL_DEBUG_TRACE=1`) before starting Pi/OpenCode/CLI to persist JSONL trace events under the runtime state
+root (`debug-traces/goal-runner-debug-YYYY-MM-DD.jsonl` by default). The trace
+captures logical store/database operations, controller tick/loop summaries,
+monitor snapshot summaries, and one structured `anomaly` event for each detected
+abnormal condition. Override the destination with `GOAL_RUNNER_DEBUG_TRACE_DIR`
+or `GOAL_RUNNER_DEBUG_TRACE_FILE`. Trace details are intentionally compact and
+redact prompt/objective/content-like fields so they can be attached to bug
+reports without copying full transcripts.
 
 For auto-allocated native-Git controller workspaces, submodule retained-ref publish trusts existing versioned submodule URLs when a gitlink is updated but the parent tree's `.gitmodules` URL for that path is unchanged. Newly added submodules or `.gitmodules` URL changes still require an operator allowlist before retained-ref publishing. Configure extra trusted URLs before starting or resuming the controller with `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_URL_PATTERNS`, using either a JSON array or comma/newline-separated patterns. Patterns require exact match unless they end in `*`, which performs prefix matching. Example: `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_URL_PATTERNS='["https://github.com/a5345534/*"]'`. Ordinary `goal/...` branches are not treated as durable refs, and a running Pi/controller process must be restarted or freshly loaded to pick up environment changes.
 

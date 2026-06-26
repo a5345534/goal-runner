@@ -64,7 +64,7 @@ test("opencode adapter registers Codex-compatible goal tools and a goal_command 
         const hooks = await opencodeGoalPlugin(makePluginInput(process.cwd(), client));
         assert.ok(hooks.tool);
         const toolNames = Object.keys(hooks.tool ?? {}).sort();
-        assert.deepEqual(toolNames, ["create_goal", "get_goal", "goal_command", "update_goal"]);
+        assert.deepEqual(toolNames, ["create_goal", "get_goal", "get_goal_debug", "goal_command", "update_goal"]);
     }
     finally {
         resetOpencodeClientForTests();
@@ -223,6 +223,10 @@ test("opencode adapter get_goal tool returns the current goal summary", async ()
         const response = await tool.execute({}, { sessionID: "ses_get" });
         assert.match(response, /verify the opencode bridge/);
         assert.match(response, /active/);
+        const debugTool = hooks.tool?.get_goal_debug;
+        const debugResponse = await debugTool.execute({}, { sessionID: "ses_get" });
+        assert.match(debugResponse, /Goal debug report/);
+        assert.match(debugResponse, /Anomalies:/);
     }
     finally {
         resetOpencodeClientForTests();

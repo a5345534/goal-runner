@@ -2,6 +2,7 @@ import { type GoalControllerLoopOptions, type GoalControllerLoopResult, type Goa
 import { type GoalDagObjectivePlanOptions, type GoalDagPlannedNodesResult } from "./dag-planner.js";
 import { type GoalDagFileDocument, type GoalDagFilePlanOptions } from "./dag-file.js";
 import { type GoalDagPlanNodeInput, type GoalDagPlanOptions, type GoalDagReadyQueue, type GoalDagSchedulingPolicy } from "./dag-scheduler.js";
+import { type GoalDebugTraceEventInput, type GoalDebugTracer } from "./debug-trace.js";
 import { type GoalCommand } from "./parser.js";
 import { type HarnessSubagentAdapter, type StartGoalSubagentOptions } from "./subagent-adapter.js";
 import type { BlockedAuditEvidence, ContinuationReservation, GoalAdapterCallbacks, GoalDagNode, GoalLedgerEvent, GoalOrchestrationState, GoalRecord, GoalReferenceResolution, GoalRuntimeConfig, GoalSessionMetadata, GoalStatusInput, GoalStore, GoalSubagentRecord, GoalSummary, GoalToolResult, WorkspaceProfile, GoalTurnStop, HarnessState, HiddenGoalTurnResult, TurnContext } from "./types.js";
@@ -16,12 +17,14 @@ export interface GoalDagTerminalFinalizationResult {
 export declare class GoalRuntime {
     private readonly store;
     private readonly callbacks;
+    private readonly debugTracer?;
     private readonly config;
     private readonly activeTurns;
     constructor(options: {
         store: GoalStore;
         callbacks?: GoalAdapterCallbacks;
         config?: GoalRuntimeConfig;
+        debugTracer?: GoalDebugTracer;
     });
     executeCommand(sessionKey: string, args: string, options?: {
         editObjective?: string;
@@ -66,6 +69,16 @@ export declare class GoalRuntime {
     syncGoalSubagent(adapter: HarnessSubagentAdapter, subagent: GoalSubagentRecord): Promise<GoalSubagentRecord>;
     runGoalControllerTick(goalId: string, options: GoalControllerTickOptions): Promise<GoalControllerTickResult>;
     runGoalControllerLoop(goalId: string, options: GoalControllerLoopOptions): Promise<GoalControllerLoopResult>;
+    getDebugTraceTarget(): string | undefined;
+    recordDebugTrace(event: GoalDebugTraceEventInput): Promise<void>;
+    recordMonitorDebugSnapshot(goal: GoalSummary | GoalRecord, state: GoalOrchestrationState, options?: {
+        source: string;
+        ledgerEvents?: GoalLedgerEvent[];
+        harnessState?: HarnessState;
+        reservation?: ContinuationReservation;
+        details?: Record<string, unknown>;
+    }): Promise<void>;
+    private recordGoalDebugSnapshot;
     resolveGoalReference(reference: string): Promise<GoalReferenceResolution>;
     saveWorkspaceProfile(profile: WorkspaceProfile): Promise<void>;
     getWorkspaceProfile(name: string): Promise<WorkspaceProfile | undefined>;

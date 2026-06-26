@@ -68,7 +68,7 @@ test("Pi adapter keeps model-visible goal tools Codex-compatible", async () => {
 
   try {
     goalPiExtension(pi as never);
-    assert.deepEqual(tools.map((tool) => tool.name).sort(), ["create_goal", "get_goal", "update_goal"]);
+    assert.deepEqual(tools.map((tool) => tool.name).sort(), ["create_goal", "get_goal", "get_goal_debug", "goal_config", "update_goal"]);
     for (const handler of handlers.get("session_shutdown") ?? []) await handler();
   } finally {
     if (previousStateHome === undefined) delete process.env.AGENT_GOAL_STATE_HOME;
@@ -869,10 +869,25 @@ test("Pi session start refreshes completed goal-owned session status", async () 
     goalPiExtension(pi as never);
     const getGoalTool = tools.find((tool) => tool.name === "get_goal");
     assert.ok(getGoalTool);
+    const debugTool = tools.find((tool) => tool.name === "get_goal_debug");
+    assert.ok(debugTool);
+    const configTool = tools.find((tool) => tool.name === "goal_config");
+    assert.ok(configTool);
+    const configShowResult = await configTool.execute("call", { action: "show" }, undefined, undefined, makeCtx(originFile, [], []) as never);
+    assert.match(configShowResult.content[0]?.text ?? "", /debug-trace/);
+    const configSetResult = await configTool.execute("call", { action: "set", key: "max-subagents", value: "2" }, undefined, undefined, makeCtx(originFile, [], []) as never);
+    assert.match(configSetResult.content[0]?.text ?? "", /max-subagents set to 2/);
+    const configGetResult = await configTool.execute("call", { action: "get", key: "max-subagents" }, undefined, undefined, makeCtx(originFile, [], []) as never);
+    assert.match(configGetResult.content[0]?.text ?? "", /2 \(config\)/);
+    const configClearResult = await configTool.execute("call", { action: "clear", key: "max-subagents" }, undefined, undefined, makeCtx(originFile, [], []) as never);
+    assert.match(configClearResult.content[0]?.text ?? "", /max-subagents cleared/);
     const otherToolResult = await getGoalTool.execute("call", {}, undefined, undefined, makeCtx("/other/session.jsonl", [], []) as never);
     assert.equal(otherToolResult.content[0]?.text, "No current goal.");
     const originToolResult = await getGoalTool.execute("call", {}, undefined, undefined, makeCtx(originFile, [], []) as never);
     assert.match(originToolResult.content[0]?.text ?? "", /Status: complete/);
+    const debugToolResult = await debugTool.execute("call", {}, undefined, undefined, makeCtx(originFile, [], []) as never);
+    assert.match(debugToolResult.content[0]?.text ?? "", /Goal debug report/);
+    assert.match(debugToolResult.content[0]?.text ?? "", /Anomalies:/);
 
     for (const handler of handlers.get("session_start") ?? []) await handler({}, makeCtx("/other/session.jsonl", otherStatuses, otherWidgets) as never);
     assert.deepEqual(otherStatuses, []);

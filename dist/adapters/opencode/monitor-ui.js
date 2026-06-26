@@ -30,6 +30,7 @@ export async function readOpencodeGoalMonitorSnapshot(runtime, goal, options = {
         ...options,
         ledgerEvents,
     });
+    await runtime.recordMonitorDebugSnapshot(goal, state, { source: "opencode.monitor", ledgerEvents, harnessState: options.harnessState, reservation: options.reservation, details: { lineCount: lines.length } });
     return { lines, refreshedAt: new Date().toISOString() };
 }
 export function renderOpencodeMonitorLines(goal, state, options = {}) {

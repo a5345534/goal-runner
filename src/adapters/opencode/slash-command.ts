@@ -18,6 +18,7 @@ export const OPENCODE_GOAL_SUBCOMMAND_SET = [
   "list",
   "status",
   "monitor",
+  "debug",
   "pause",
   "resume",
   "clear",
@@ -79,7 +80,7 @@ function isLikelyObjectiveToken(first: string, _second: string): boolean {
   // word that is not a goal-ref. Currently unused: the parser routes
   // `edit` and `budget` to their dedicated kinds first, and the
   // remaining subcommands never have an "objective" form.
-  return first === "list" || first === "status" || first === "monitor" || first === "pause" || first === "resume" || first === "clear";
+  return first === "list" || first === "status" || first === "monitor" || first === "debug" || first === "pause" || first === "resume" || first === "clear";
 }
 
 export function formatOpencodeGoalToolDescription(): string {
@@ -94,6 +95,7 @@ export function formatOpencodeGoalToolDescription(): string {
     '  command: "list"',
     '  command: "status"',
     '  command: "monitor"',
+    '  command: "debug"',
     '  command: "pause"',
     '  command: "resume"',
     '  command: "edit"  (interactive editor when no objective follows)',
