@@ -53,7 +53,7 @@ export function formatGoalListSummary(goal) {
     for (const pattern of boilerplatePrefixes) {
         summary = summary.replace(pattern, "");
     }
-    summary = summary.replace(/\s+in\s+goal-runner:\s+/i, " — ");
+    summary = summary.replace(/\s+in\s+goal-runner:\s+/i, ": ");
     return summary.trim() || goal.objectiveSummary;
 }
 /** Build a compact primary row and apply final display-width truncation. */

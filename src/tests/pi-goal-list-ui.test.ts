@@ -328,7 +328,7 @@ test("formatGoalListSummary compresses goal-runner OpenSpec objective suffix", (
     objectiveSummary: "Implement the approved OpenSpec change improve-goal-list-triage-layout in goal-runner: make Pi /goal list primary rows compact and high-signal",
   });
   const result = formatGoalListSummary(goal);
-  assert.equal(result, "improve-goal-list-triage-layout — make Pi /goal list primary rows compact and high-signal");
+  assert.equal(result, "improve-goal-list-triage-layout: make Pi /goal list primary rows compact and high-signal");
 });
 
 test("formatGoalListSummary passes through normal objectives unchanged", () => {

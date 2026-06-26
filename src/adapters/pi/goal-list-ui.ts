@@ -71,7 +71,7 @@ export function formatGoalListSummary(goal: GoalSummary): string {
   for (const pattern of boilerplatePrefixes) {
     summary = summary.replace(pattern, "");
   }
-  summary = summary.replace(/\s+in\s+goal-runner:\s+/i, " — ");
+  summary = summary.replace(/\s+in\s+goal-runner:\s+/i, ": ");
 
   return summary.trim() || goal.objectiveSummary;
 }
