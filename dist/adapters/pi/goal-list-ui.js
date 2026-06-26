@@ -29,16 +29,17 @@ export function formatGoalListMetrics(goal) {
 }
 /** Return a compact workspace/branch location label. */
 export function formatGoalListWhere(goal) {
-    const parts = [];
-    const ws = goal.executionWorkspace;
-    if (ws) {
-        parts.push(formatCompactWorkspace(ws));
-    }
-    const branch = goal.branch ?? goal.ref;
-    if (branch) {
-        parts.push(`@${formatCompactBranch(branch)}`);
-    }
-    return parts.join("");
+    const wsLabel = goal.executionWorkspace ? formatCompactWorkspace(goal.executionWorkspace) : "";
+    const branchLabel = goal.branch ?? goal.ref ? formatCompactBranch(goal.branch ?? goal.ref ?? "") : "";
+    if (wsLabel && branchLabel && wsLabel === branchLabel)
+        return wsLabel;
+    if (wsLabel && branchLabel)
+        return `${wsLabel}@${branchLabel}`;
+    if (wsLabel)
+        return wsLabel;
+    if (branchLabel)
+        return `@${branchLabel}`;
+    return "";
 }
 /** Shorten common objective boilerplate to preserve the meaningful change phrase. */
 export function formatGoalListSummary(goal) {
@@ -46,12 +47,14 @@ export function formatGoalListSummary(goal) {
     // Strip the most common OpenSpec boilerplate prefix so the change name
     // (which is the useful scannable signal) occupies the remaining width.
     const boilerplatePrefixes = [
-        /^Implement the approved OpenSpec change /i,
+        /^Implement and verify the approved OpenSpec change\s+/i,
+        /^Implement the approved OpenSpec change\s+/i,
     ];
     for (const pattern of boilerplatePrefixes) {
         summary = summary.replace(pattern, "");
     }
-    return summary || goal.objectiveSummary;
+    summary = summary.replace(/\s+in\s+goal-runner:\s+/i, " — ");
+    return summary.trim() || goal.objectiveSummary;
 }
 /** Build a compact primary row and apply final display-width truncation. */
 export function formatGoalListRow(goal, marker, state, width) {
@@ -104,14 +107,22 @@ function formatCompactWorkspace(ws) {
     // dominate the primary row.  Users who need the full path can open
     // the monitor view.
     const segments = normalized.split("/").filter(Boolean);
-    if (segments.length <= 1)
-        return normalized;
-    return segments[segments.length - 1];
+    const keep = segments.length <= 1 ? normalized : (segments[segments.length - 1] ?? normalized);
+    return formatCompactGoalSlug(keep);
 }
 function formatCompactBranch(branch) {
     // Strip noisy prefix groups (e.g. "goal/uuid/short-name" → "short-name").
     const keep = branch.split("/").pop() ?? branch;
-    return keep;
+    return formatCompactGoalSlug(keep);
+}
+function formatCompactGoalSlug(value) {
+    return value
+        .replace(/^goal-[a-f0-9]{3,}-/i, "")
+        .replace(/^implement-and-verify-the-approved-openspec-change-/i, "")
+        .replace(/^implement-the-approved-openspec-change-/i, "")
+        .replace(/^approved-openspec-change-/i, "")
+        .replace(/^implement-and-verify-/i, "")
+        .replace(/^implement-/i, "");
 }
 export class GoalListController {
     goals;
