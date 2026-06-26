@@ -59,6 +59,9 @@ export function formatGoalListSummary(goal: GoalSummary): string {
   const original = goal.objectiveSummary.trim();
   let summary = original;
 
+  const approvedOpenSpecChange = summary.match(/^Implement(?: and verify)? the approved OpenSpec change\s+([a-z0-9][a-z0-9-]+)/i);
+  if (approvedOpenSpecChange?.[1]) return approvedOpenSpecChange[1];
+
   const explicitChange = summary.match(/^Implement the ([a-z0-9][a-z0-9-]+) change\b/i);
   if (explicitChange?.[1]) return explicitChange[1];
 
@@ -142,10 +145,17 @@ function formatCompactWorkspace(ws: string): string {
   if (home && ws.startsWith(`${home}/`)) {
     normalized = `~/${ws.slice(home.length + 1)}`;
   }
-  // Keep only the last path segment so full absolute paths do not
-  // dominate the primary row.  Users who need the full path can open
-  // the monitor view.
+  // Auto-allocated goal workspaces live under `<workspace>/.worktrees/<goal-slug>`.
+  // The useful list signal is the owning workspace/repo (`goal-workspace`, `aos`,
+  // `goal-runner`), not the transient goal-slug directory.
   const segments = normalized.split("/").filter(Boolean);
+  const worktreesIndex = segments.lastIndexOf(".worktrees");
+  if (worktreesIndex > 0) {
+    return segments[worktreesIndex - 1] ?? normalized;
+  }
+  // For explicit workspaces, keep only the last path segment so full absolute
+  // paths do not dominate the primary row. Users who need the full path can
+  // open the monitor view.
   const keep = segments.length <= 1 ? normalized : (segments[segments.length - 1] ?? normalized);
   return formatCompactGoalSlug(keep);
 }

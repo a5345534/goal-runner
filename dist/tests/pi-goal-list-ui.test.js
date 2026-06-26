@@ -170,7 +170,7 @@ test("formatGoalListMetrics includes tokens when tokensUsed > 0 regardless of bu
     assert.ok(result.includes("t"), `expected token field in "${result}"`);
 });
 // ── formatGoalListWhere: workspace-only summarization ───────────────
-test("formatGoalListWhere summarizes long workspace to last path segment", () => {
+test("formatGoalListWhere summarizes auto worktree paths to owning workspace", () => {
     const home = process.env.HOME ?? "/home/user";
     const longWorkspace = `${home}/projects/active/goal-workspace/.worktrees/goal-e45-improve-list-layout`;
     const goal = fullSummary({
@@ -179,12 +179,9 @@ test("formatGoalListWhere summarizes long workspace to last path segment", () =>
         branch: undefined,
     });
     const result = formatGoalListWhere(goal);
-    // Must not contain the full path
+    assert.equal(result, "goal-workspace");
     assert.ok(!result.includes("projects"), `result "${result}" MUST NOT include full path`);
-    assert.ok(!result.includes(longWorkspace), `result "${result}" MUST NOT include raw workspace`);
-    // Should contain a meaningful short label
-    assert.ok(result.length > 0, "where must be non-empty when workspace is set");
-    assert.ok(result.length < longWorkspace.length, `where "${result}" must be shorter than raw workspace`);
+    assert.ok(!result.includes("goal-e45"), `result "${result}" MUST NOT include transient goal worktree slug`);
 });
 test("formatGoalListWhere omits branch/ref when workspace is absent", () => {
     const branchOnly = fullSummary({
@@ -222,7 +219,7 @@ test("formatGoalListWhere deduplicates matching goal worktree and branch slugs",
         branch: `goal/${noisySlug}`,
     });
     const result = formatGoalListWhere(goal);
-    assert.equal(result, "improve-g");
+    assert.equal(result, "goal-workspace");
     assert.ok(!result.includes("@"), `deduplicated where must not contain @: ${result}`);
     assert.ok(!result.includes("goal-e45"), `where must strip goal prefix: ${result}`);
     assert.ok(!result.includes("implement-the-approved-openspec-change"), `where must strip boilerplate slug: ${result}`);
@@ -273,6 +270,14 @@ test("formatGoalListSummary keeps only the OpenSpec change name before suffix de
     });
     const result = formatGoalListSummary(goal);
     assert.equal(result, "improve-goal-list-triage-layout");
+});
+test("formatGoalListSummary keeps only the OpenSpec change name before across-scope details", () => {
+    const goal = fullSummary({
+        goalId: "across11",
+        objective: "Implement the approved OpenSpec change implement-spec-ideation-authoring-flow across goal-contract, goal-runner, goal-dag, goal-spec, and goal-workspace while preserving Stage boundaries.",
+        objectiveSummary: "Implement the approved OpenSpec change implement-spec-ideation-authoring-flow across goal-contract, goal-runner, goal-dag, goal-spec, and goal-workspace while preserving Stage boundaries.",
+    });
+    assert.equal(formatGoalListSummary(goal), "implement-spec-ideation-authoring-flow");
 });
 test("formatGoalListSummary trims generic colon descriptions", () => {
     const goal = fullSummary({
@@ -329,7 +334,8 @@ test("formatGoalListRow at 80 columns does not contain full workspace path", () 
     const row = formatGoalListRow(goal, "▶", "active", 80);
     const home = process.env.HOME ?? "/home/user";
     assert.ok(!row.includes(home), `row "${row}" MUST NOT contain home path`);
-    assert.ok(!row.includes("goal-workspace"), `row "${row}" MUST NOT contain full path segments`);
+    assert.ok(!row.includes("projects/active"), `row "${row}" MUST NOT contain full path segments`);
+    assert.ok(row.includes("goal-workspace"), `row "${row}" must contain owning workspace name`);
 });
 test("formatGoalListRow at 80 columns does not contain duplicated status", () => {
     const goal = fixtSummary();
@@ -364,7 +370,7 @@ test("formatGoalListRow at 80 columns strips boilerplate and does not contain ra
 test("formatGoalListRow at 120 columns shows only id status workspace and goal name", () => {
     const goal = fixtSummary();
     const row = formatGoalListRow(goal, "▶", "active", 120);
-    assert.match(row, /^▶ e45-fix1 active\s+improve-list-layout\s+improve-goal-list-triage-layout/, `row "${row}" must align id/status/workspace/goal-name columns`);
+    assert.match(row, /^▶ e45-fix1 active\s+goal-workspace\s+improve-goal-list-triage-layout/, `row "${row}" must align id/status/workspace/goal-name columns`);
     assert.ok(row.includes("improve-goal-"), `row "${row}" must contain meaningful change name prefix`);
     assert.ok(!row.toLowerCase().includes("implement the approved openspec change"), `row "${row}" MUST NOT contain boilerplate`);
     assert.ok(!row.includes("—"), `row "${row}" must not include a separator column`);
@@ -390,7 +396,7 @@ test("formatGoalListRow avoids duplicate noisy goal slug where labels", () => {
     assert.ok(!row.includes("@"), `row must not duplicate matching workspace and branch labels: ${row}`);
     assert.ok(!row.includes("goal-e45"), `row must strip noisy goal slug prefix: ${row}`);
     assert.ok(!row.includes("implement-the-approved-openspec-change"), `row must strip branch slug boilerplate: ${row}`);
-    assert.ok(row.includes("improve-g"), `row must keep compact where cue: ${row}`);
+    assert.ok(row.includes("goal-workspace"), `row must keep owning workspace cue: ${row}`);
     assert.ok(row.includes("improve-goal-list-triage-layout"), `row must keep meaningful goal name: ${row}`);
     assert.ok(!row.includes("make Pi /goal list"), `row must omit descriptive suffix: ${row}`);
 });
@@ -399,7 +405,8 @@ test("formatGoalListRow at 120 columns still excludes full absolute workspace pa
     const row120 = formatGoalListRow(goal, "▶", "active", 120);
     const home = process.env.HOME ?? "/home/user";
     assert.ok(!row120.includes(home), `120-col row MUST NOT contain home path`);
-    assert.ok(!row120.includes("goal-workspace"), `120-col row MUST NOT contain full path segments`);
+    assert.ok(!row120.includes("projects/active"), `120-col row MUST NOT contain full path segments`);
+    assert.ok(row120.includes("goal-workspace"), `120-col row must include owning workspace name`);
 });
 test("formatGoalListRow at 120 columns still excludes branch/ref labels", () => {
     const goal = fixtSummary();
