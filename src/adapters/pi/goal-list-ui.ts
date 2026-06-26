@@ -17,6 +17,133 @@ export interface GoalListThemeLike {
 const TABS: GoalListTab[] = ["all", "active", "attention", "terminal"];
 const SORTS: GoalListSort[] = ["recent", "status", "runtime", "tokens"];
 
+// ---------------------------------------------------------------------------
+// Compact formatting helpers for /goal list primary rows
+// ---------------------------------------------------------------------------
+
+/** Collapse duplicate status/activity labels into a compact state label. */
+export function formatGoalListState(goal: GoalSummary): string {
+  const activity = goal.activityState;
+  if (!activity || activity === goal.status) {
+    return goal.status;
+  }
+  // Activity adds information that differs from status but we keep the
+  // primary state as the dominant signal.  Idle-eligibility is noise for
+  // list scanning; users who need it can open the monitor view.
+  return goal.status;
+}
+
+/** Return a compact metric string, omitting all-zero runtime/token pairs. */
+export function formatGoalListMetrics(goal: GoalSummary): string {
+  const parts: string[] = [];
+  if (goal.timeUsedSeconds > 0) {
+    parts.push(formatCompactDuration(goal.timeUsedSeconds));
+  }
+  const hasBudget = goal.tokenBudget !== undefined;
+  if (goal.tokensUsed > 0 || hasBudget) {
+    parts.push(formatCompactTokenField(goal.tokensUsed, goal.tokenBudget));
+  }
+  return parts.join(" ");
+}
+
+/** Return a compact workspace/branch location label. */
+export function formatGoalListWhere(goal: GoalSummary): string {
+  const parts: string[] = [];
+
+  const ws = goal.executionWorkspace;
+  if (ws) {
+    parts.push(formatCompactWorkspace(ws));
+  }
+
+  const branch = goal.branch ?? goal.ref;
+  if (branch) {
+    parts.push(`@${formatCompactBranch(branch)}`);
+  }
+
+  return parts.join("");
+}
+
+/** Shorten common objective boilerplate to preserve the meaningful change phrase. */
+export function formatGoalListSummary(goal: GoalSummary): string {
+  let summary = goal.objectiveSummary;
+
+  // Strip the most common OpenSpec boilerplate prefix so the change name
+  // (which is the useful scannable signal) occupies the remaining width.
+  const boilerplatePrefixes: RegExp[] = [
+    /^Implement the approved OpenSpec change /i,
+  ];
+  for (const pattern of boilerplatePrefixes) {
+    summary = summary.replace(pattern, "");
+  }
+
+  return summary || goal.objectiveSummary;
+}
+
+/** Build a compact primary row and apply final display-width truncation. */
+export function formatGoalListRow(goal: GoalSummary, marker: string, state: string, width: number): string {
+  const parts = [marker, goal.shortGoalId, state];
+
+  const metrics = formatGoalListMetrics(goal);
+  if (metrics) parts.push(metrics);
+
+  const where = formatGoalListWhere(goal);
+  if (where) parts.push(where);
+
+  const summary = formatGoalListSummary(goal);
+  parts.push(`— ${summary}`);
+
+  return truncateToWidth(parts.join(" "), width);
+}
+
+// ---------------------------------------------------------------------------
+// Internal compact-value formatters
+// ---------------------------------------------------------------------------
+
+function formatCompactDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h${minutes % 60}m`;
+}
+
+function formatCompactTokenField(used: number, budget?: number): string {
+  const fmt = formatCompactTokenCount;
+  if (budget !== undefined) {
+    return `${fmt(used)}/${fmt(budget)}t`;
+  }
+  return `${fmt(used)}t`;
+}
+
+function formatCompactTokenCount(value: number): string {
+  if (value < 1_000) return `${value}`;
+  if (value < 1_000_000) {
+    return `${Number.isInteger(value / 1_000) ? value / 1_000 : (value / 1_000).toFixed(1)}k`;
+  }
+  return `${Number.isInteger(value / 1_000_000) ? value / 1_000_000 : (value / 1_000_000).toFixed(1)}m`;
+}
+
+function formatCompactWorkspace(ws: string): string {
+  // Replace the home directory with ~ for readability.
+  const home = process.env.HOME;
+  let normalized = ws;
+  if (home && ws.startsWith(`${home}/`)) {
+    normalized = `~/${ws.slice(home.length + 1)}`;
+  }
+  // Keep only the last path segment so full absolute paths do not
+  // dominate the primary row.  Users who need the full path can open
+  // the monitor view.
+  const segments = normalized.split("/").filter(Boolean);
+  if (segments.length <= 1) return normalized;
+  return segments[segments.length - 1];
+}
+
+function formatCompactBranch(branch: string): string {
+  // Strip noisy prefix groups (e.g. "goal/uuid/short-name" → "short-name").
+  const keep = branch.split("/").pop() ?? branch;
+  return keep;
+}
+
 export class GoalListController {
   private selected = 0;
   private tabIndex = 0;
@@ -83,16 +210,9 @@ export class GoalListController {
     visible.forEach((goal, index) => {
       const selected = index === this.selected;
       const marker = selected ? theme.fg("accent", "▶") : " ";
-      const status = selected ? theme.fg("accent", goal.status) : goal.status;
-      const branch = goal.branch ?? goal.ref ?? "-";
-      const workspace = goal.executionWorkspace ?? "legacy";
-      const tokens = goal.tokenBudget === undefined ? String(goal.tokensUsed) : `${goal.tokensUsed}/${goal.tokenBudget}`;
-      lines.push(
-        truncateToWidth(
-          `${marker} ${goal.shortGoalId} ${status}/${goal.activityState ?? "-"} ${goal.timeUsedSeconds}s ${tokens} ${goal.workspaceStatus ?? "?"} ${branch} ${workspace} — ${goal.objectiveSummary}`,
-          width,
-        ),
-      );
+      const raw = formatGoalListState(goal);
+      const state = selected ? theme.fg("accent", raw) : raw;
+      lines.push(formatGoalListRow(goal, marker, state, width));
     });
     return lines;
   }
