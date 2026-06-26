@@ -49,7 +49,7 @@ import {
   type BackgroundGoalSessionHandle,
   type BackgroundGoalSessionLauncher,
 } from "./background-session.js";
-import { GoalListController, formatGoalListMetrics, formatGoalListState, formatGoalListSummary, formatGoalListWhere } from "./goal-list-ui.js";
+import { GoalListController, formatGoalListRow, formatGoalListState } from "./goal-list-ui.js";
 import { normalizePiModelArg } from "./model-args.js";
 import { GoalMonitorController, type GoalMonitorDagSnapshot, type GoalMonitorRunnerOperation, type GoalMonitorSelection } from "./monitor-ui.js";
 import { PI_GOAL_SESSION_ENTRY_TYPE, PiSessionGoalMirrorStore } from "./session-store.js";
@@ -2750,15 +2750,7 @@ async function resolveGoalReferenceOrDefault(runtime: GoalRuntime, ctx: Extensio
 }
 
 function formatGoalListOption(goal: GoalSummary): string {
-  const state = formatGoalListState(goal);
-  const metrics = formatGoalListMetrics(goal);
-  const where = formatGoalListWhere(goal);
-  const summary = formatGoalListSummary(goal);
-  const parts = [goal.shortGoalId, state];
-  if (metrics) parts.push(metrics);
-  if (where) parts.push(where);
-  parts.push(`— ${summary}`);
-  return parts.join(" ");
+  return formatGoalListRow(goal, " ", formatGoalListState(goal), 160).trim();
 }
 
 async function formatGoalSummaryDetails(runtime: GoalRuntime, goal: GoalSummary): Promise<string> {

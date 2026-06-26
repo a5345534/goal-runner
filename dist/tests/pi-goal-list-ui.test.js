@@ -169,7 +169,7 @@ test("formatGoalListMetrics includes tokens when tokensUsed > 0 regardless of bu
     const result = formatGoalListMetrics(goal);
     assert.ok(result.includes("t"), `expected token field in "${result}"`);
 });
-// ── formatGoalListWhere: long workspace/branch summarization ────────
+// ── formatGoalListWhere: workspace-only summarization ───────────────
 test("formatGoalListWhere summarizes long workspace to last path segment", () => {
     const home = process.env.HOME ?? "/home/user";
     const longWorkspace = `${home}/projects/active/goal-workspace/.worktrees/goal-e45-improve-list-layout`;
@@ -186,29 +186,22 @@ test("formatGoalListWhere summarizes long workspace to last path segment", () =>
     assert.ok(result.length > 0, "where must be non-empty when workspace is set");
     assert.ok(result.length < longWorkspace.length, `where "${result}" must be shorter than raw workspace`);
 });
-test("formatGoalListWhere summarizes long branch/ref to last segment", () => {
-    const goal = fullSummary({
+test("formatGoalListWhere omits branch/ref when workspace is absent", () => {
+    const branchOnly = fullSummary({
         goalId: "branch111",
         branch: "goal/0e1bdb70-9fc4-40aa-b114-3b21dd4eddab/add-goal-list-regression-tests",
         executionWorkspace: undefined,
     });
-    const result = formatGoalListWhere(goal);
-    assert.ok(result.startsWith("@"), `where "${result}" must start with @`);
-    assert.ok(!result.includes("0e1bdb70"), `where "${result}" MUST NOT include raw uuid`);
-    assert.ok(result.includes("add-goal-list-regression-tests"), `where "${result}" must include short name`);
-    assert.ok(result.length < "goal/0e1bdb70-9fc4-40aa-b114-3b21dd4eddab/add-goal-list-regression-tests".length, `where "${result}" must be shorter than raw branch`);
-});
-test("formatGoalListWhere uses ref when branch is absent", () => {
-    const goal = fullSummary({
+    const refOnly = fullSummary({
         goalId: "refonly11",
         branch: undefined,
         ref: "feature/my-change",
         executionWorkspace: undefined,
     });
-    const result = formatGoalListWhere(goal);
-    assert.ok(result === "@my-change" || result.endsWith("my-change"), `expected ref-derived where, got "${result}"`);
+    assert.equal(formatGoalListWhere(branchOnly), "");
+    assert.equal(formatGoalListWhere(refOnly), "");
 });
-test("formatGoalListWhere combines workspace and branch", () => {
+test("formatGoalListWhere uses only workspace even when branch is present", () => {
     const home = process.env.HOME ?? "/home/user";
     const goal = fullSummary({
         goalId: "combined1",
@@ -216,9 +209,9 @@ test("formatGoalListWhere combines workspace and branch", () => {
         branch: "feature/add-widget",
     });
     const result = formatGoalListWhere(goal);
-    assert.ok(result.includes("@"), "must contain branch marker");
-    assert.ok(!result.includes(home), "must not contain raw home path");
-    assert.ok(result.includes("add-widget"), "must include short branch name");
+    assert.equal(result, "my-project");
+    assert.ok(!result.includes("@"), "must not contain branch marker");
+    assert.ok(!result.includes("add-widget"), "must not include branch name");
 });
 test("formatGoalListWhere deduplicates matching goal worktree and branch slugs", () => {
     const home = process.env.HOME ?? "/home/user";
@@ -234,16 +227,16 @@ test("formatGoalListWhere deduplicates matching goal worktree and branch slugs",
     assert.ok(!result.includes("goal-e45"), `where must strip goal prefix: ${result}`);
     assert.ok(!result.includes("implement-the-approved-openspec-change"), `where must strip boilerplate slug: ${result}`);
 });
-test("formatGoalListWhere strips goal branch boilerplate before combining", () => {
+test("formatGoalListWhere ignores noisy branch boilerplate", () => {
     const goal = fullSummary({
         goalId: "goal-0bc",
         executionWorkspace: "goal-runner",
         branch: "goal/goal-0bc-expensecategorycode-header-line-downstream",
     });
     const result = formatGoalListWhere(goal);
-    assert.equal(result, "goal-runner@expensecategorycode-header-line-downstream");
+    assert.equal(result, "goal-runner");
 });
-test("formatGoalListWhere returns empty string when no workspace or branch", () => {
+test("formatGoalListWhere returns empty string when no workspace", () => {
     const goal = fullSummary({
         goalId: "nowhere11",
         executionWorkspace: undefined,
@@ -261,7 +254,7 @@ test("formatGoalListWhere summarizes single-segment paths unchanged", () => {
     const result = formatGoalListWhere(goal);
     assert.equal(result, "my-project");
 });
-// ── formatGoalListSummary: objective boilerplate stripping ──────────
+// ── formatGoalListSummary: goal name extraction ────────────────────
 test("formatGoalListSummary strips OpenSpec boilerplate prefix", () => {
     const goal = fullSummary({
         goalId: "boilerpl1",
@@ -272,14 +265,30 @@ test("formatGoalListSummary strips OpenSpec boilerplate prefix", () => {
     assert.ok(!result.toLowerCase().includes("implement the approved openspec change"), `summary "${result}" MUST NOT contain boilerplate`);
     assert.ok(result.includes("improve-goal-list-triage-layout"), `summary "${result}" must preserve change name`);
 });
-test("formatGoalListSummary compresses goal-runner OpenSpec objective suffix", () => {
+test("formatGoalListSummary keeps only the OpenSpec change name before suffix details", () => {
     const goal = fullSummary({
         goalId: "suffix11",
         objective: "Implement the approved OpenSpec change improve-goal-list-triage-layout in goal-runner: make Pi /goal list primary rows compact and high-signal",
         objectiveSummary: "Implement the approved OpenSpec change improve-goal-list-triage-layout in goal-runner: make Pi /goal list primary rows compact and high-signal",
     });
     const result = formatGoalListSummary(goal);
-    assert.equal(result, "improve-goal-list-triage-layout: make Pi /goal list primary rows compact and high-signal");
+    assert.equal(result, "improve-goal-list-triage-layout");
+});
+test("formatGoalListSummary trims generic colon descriptions", () => {
+    const goal = fullSummary({
+        goalId: "colon111",
+        objective: "Fix 6 Slice 02 spec-compliance discrepancies: branch naming, delivery file path, audit event name",
+        objectiveSummary: "Fix 6 Slice 02 spec-compliance discrepancies: branch naming, delivery file path, audit event name",
+    });
+    assert.equal(formatGoalListSummary(goal), "Fix 6 Slice 02 spec-compliance discrepancies");
+});
+test("formatGoalListSummary extracts explicit slug from implement-the-change objectives", () => {
+    const goal = fullSummary({
+        goalId: "govern11",
+        objective: "Implement the add-governance-policy change for AOS v3 Core: create @aos/governance package",
+        objectiveSummary: "Implement the add-governance-policy change for AOS v3 Core: create @aos/governance package",
+    });
+    assert.equal(formatGoalListSummary(goal), "add-governance-policy");
 });
 test("formatGoalListSummary passes through normal objectives unchanged", () => {
     const goal = fullSummary({
@@ -328,22 +337,21 @@ test("formatGoalListRow at 80 columns does not contain duplicated status", () =>
     assert.ok(!row.includes("active/"), `row "${row}" MUST NOT contain duplicated status marker`);
     assert.ok(!row.includes("idle-eligible"), `row "${row}" MUST NOT contain raw idle-eligible`);
 });
-test("formatGoalListRow at 80 columns does not contain all-zero metrics as dominant content", () => {
-    // Use a goal that has zero metrics
+test("formatGoalListRow never shows metrics in the primary row", () => {
     const goal = fullSummary({
-        goalId: "zero-metr",
+        goalId: "busy-metr",
         objective: "Add a feature",
         objectiveSummary: "Add a feature",
         status: "complete",
         activityState: "complete",
-        timeUsedSeconds: 0,
-        tokensUsed: 0,
-        tokenBudget: undefined,
+        timeUsedSeconds: 3661,
+        tokensUsed: 15_000,
+        tokenBudget: 30_000,
     });
     const row = formatGoalListRow(goal, " ", "complete", 80);
-    assert.ok(!row.includes("0s"), `row "${row}" MUST NOT show 0s metric`);
-    assert.ok(!row.includes("0t"), `row "${row}" MUST NOT show 0t metric`);
-    assert.ok(row.includes("Add a feature"), `row "${row}" must show objective summary`);
+    assert.ok(!row.includes("1h"), `row "${row}" MUST NOT show runtime metric`);
+    assert.ok(!row.includes("15k"), `row "${row}" MUST NOT show token metric`);
+    assert.ok(row.includes("Add a feature"), `row "${row}" must show goal name`);
 });
 test("formatGoalListRow at 80 columns strips boilerplate and does not contain raw objective prefix", () => {
     const goal = fixtSummary();
@@ -353,16 +361,15 @@ test("formatGoalListRow at 80 columns strips boilerplate and does not contain ra
     // The row may have the summary truncated before "—" at narrow widths,
     // but the boilerplate prefix is gone — that is the key regression guard.
 });
-test("formatGoalListRow at 120 columns preserves meaningful change name visibility", () => {
+test("formatGoalListRow at 120 columns shows only id status workspace and goal name", () => {
     const goal = fixtSummary();
     const row = formatGoalListRow(goal, "▶", "active", 120);
-    // At 120 columns the meaningful change name prefix must be visible.
-    // The full name may be partially truncated if the prefix is long, but
-    // the distinguishing prefix (the change slug) must appear.
+    assert.match(row, /^▶ e45-fix1 active\s+improve-list-layout\s+improve-goal-list-triage-layout/, `row "${row}" must align id/status/workspace/goal-name columns`);
     assert.ok(row.includes("improve-goal-"), `row "${row}" must contain meaningful change name prefix`);
     assert.ok(!row.toLowerCase().includes("implement the approved openspec change"), `row "${row}" MUST NOT contain boilerplate`);
-    // At 120 cols the summary separator should be present
-    assert.ok(row.includes("—"), `row "${row}" must include summary separator at 120 cols`);
+    assert.ok(!row.includes("—"), `row "${row}" must not include a separator column`);
+    assert.ok(!row.includes("1h"), `row "${row}" must not include runtime metric`);
+    assert.ok(!row.includes("8.4k"), `row "${row}" must not include token metric`);
 });
 test("formatGoalListRow avoids duplicate noisy goal slug where labels", () => {
     const home = process.env.HOME ?? "/home/user";
@@ -384,7 +391,8 @@ test("formatGoalListRow avoids duplicate noisy goal slug where labels", () => {
     assert.ok(!row.includes("goal-e45"), `row must strip noisy goal slug prefix: ${row}`);
     assert.ok(!row.includes("implement-the-approved-openspec-change"), `row must strip branch slug boilerplate: ${row}`);
     assert.ok(row.includes("improve-g"), `row must keep compact where cue: ${row}`);
-    assert.ok(row.includes("improve-goal-list-triage-layout"), `row must keep meaningful objective summary: ${row}`);
+    assert.ok(row.includes("improve-goal-list-triage-layout"), `row must keep meaningful goal name: ${row}`);
+    assert.ok(!row.includes("make Pi /goal list"), `row must omit descriptive suffix: ${row}`);
 });
 test("formatGoalListRow at 120 columns still excludes full absolute workspace paths", () => {
     const goal = fixtSummary();
@@ -393,10 +401,11 @@ test("formatGoalListRow at 120 columns still excludes full absolute workspace pa
     assert.ok(!row120.includes(home), `120-col row MUST NOT contain home path`);
     assert.ok(!row120.includes("goal-workspace"), `120-col row MUST NOT contain full path segments`);
 });
-test("formatGoalListRow at 120 columns still excludes full long branch strings", () => {
+test("formatGoalListRow at 120 columns still excludes branch/ref labels", () => {
     const goal = fixtSummary();
     const row120 = formatGoalListRow(goal, "▶", "active", 120);
     assert.ok(!row120.includes("0e1bdb70"), `120-col row MUST NOT contain raw uuid from branch`);
+    assert.ok(!row120.includes("add-goal-list-regression-tests"), `120-col row MUST NOT contain branch name`);
 });
 test("formatGoalListRow at 120 columns still excludes duplicated status/activity", () => {
     const goal = fixtSummary();
@@ -404,7 +413,7 @@ test("formatGoalListRow at 120 columns still excludes duplicated status/activity
     assert.ok(!row120.includes("active/"), `120-col row MUST NOT duplicate status`);
     assert.ok(!row120.includes("idle-eligible"), `120-col row MUST NOT contain raw activity`);
 });
-test("formatGoalListRow at 120 columns still excludes all-zero metrics", () => {
+test("formatGoalListRow at 120 columns still excludes zero metrics", () => {
     const goal = fullSummary({
         goalId: "zero-120",
         objective: "Add a feature",
@@ -418,7 +427,7 @@ test("formatGoalListRow at 120 columns still excludes all-zero metrics", () => {
     const row120 = formatGoalListRow(goal, "▶", "complete", 120);
     assert.ok(!row120.includes("0s"), `120-col zero-metric row MUST NOT show 0s`);
     assert.ok(!row120.includes("0t"), `120-col zero-metric row MUST NOT show 0t`);
-    assert.ok(row120.includes("Add a feature"), `120-col row must show objective summary`);
+    assert.ok(row120.includes("Add a feature"), `120-col row must show goal name`);
 });
 test("formatGoalListRow at narrow widths still includes shortGoalId", () => {
     const goal = fixtSummary();

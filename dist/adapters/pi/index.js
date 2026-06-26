@@ -7,7 +7,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY, GoalRuntime, NativeGitWorkspaceManager, buildGoalDebugReport, createGoalDebugTracerFromEnv, SQLiteGoalStore, cleanupTerminalSubagentWorkspaces, createControllerValidationRunner, createNativeGitSubagentBranchIntegrator, createNativeGitSubagentWorkspaceAllocator, findRequiredSubagentIntegrationIssues, formatGoalDebugReport, parseGoalCommand, parseGoalDagFileContent, parseGoalModelRoutingConfigJson, parseTokenBudget, renderActiveGoalReminderPrompt, resolveControllerModelClass, resolveNativeGitCloseoutPolicy, resolveDefaultStateRoot, resolveGoalModelForHarness, selectModelScenarioForNode, } from "../../core/index.js";
 import { launchPiRpcBackgroundGoalSession, } from "./background-session.js";
-import { GoalListController, formatGoalListMetrics, formatGoalListState, formatGoalListSummary, formatGoalListWhere } from "./goal-list-ui.js";
+import { GoalListController, formatGoalListRow, formatGoalListState } from "./goal-list-ui.js";
 import { normalizePiModelArg } from "./model-args.js";
 import { GoalMonitorController } from "./monitor-ui.js";
 import { PI_GOAL_SESSION_ENTRY_TYPE, PiSessionGoalMirrorStore } from "./session-store.js";
@@ -2423,17 +2423,7 @@ async function resolveGoalReferenceOrDefault(runtime, ctx, reference) {
     return nonTerminal ?? summaries[0];
 }
 function formatGoalListOption(goal) {
-    const state = formatGoalListState(goal);
-    const metrics = formatGoalListMetrics(goal);
-    const where = formatGoalListWhere(goal);
-    const summary = formatGoalListSummary(goal);
-    const parts = [goal.shortGoalId, state];
-    if (metrics)
-        parts.push(metrics);
-    if (where)
-        parts.push(where);
-    parts.push(`— ${summary}`);
-    return parts.join(" ");
+    return formatGoalListRow(goal, " ", formatGoalListState(goal), 160).trim();
 }
 async function formatGoalSummaryDetails(runtime, goal) {
     return [

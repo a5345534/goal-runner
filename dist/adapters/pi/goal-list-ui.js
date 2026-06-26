@@ -1,6 +1,9 @@
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 const TABS = ["all", "active", "attention", "terminal"];
 const SORTS = ["recent", "status", "runtime", "tokens"];
+const GOAL_LIST_ID_COLUMN_WIDTH = 8;
+const GOAL_LIST_STATUS_COLUMN_WIDTH = 13;
+const GOAL_LIST_WORKSPACE_COLUMN_WIDTH = 24;
 // ---------------------------------------------------------------------------
 // Compact formatting helpers for /goal list primary rows
 // ---------------------------------------------------------------------------
@@ -27,23 +30,17 @@ export function formatGoalListMetrics(goal) {
     }
     return parts.join(" ");
 }
-/** Return a compact workspace/branch location label. */
+/** Return a compact workspace label. Branch/ref is intentionally omitted from list rows. */
 export function formatGoalListWhere(goal) {
-    const wsLabel = goal.executionWorkspace ? formatCompactWorkspace(goal.executionWorkspace) : "";
-    const branchLabel = goal.branch ?? goal.ref ? formatCompactBranch(goal.branch ?? goal.ref ?? "") : "";
-    if (wsLabel && branchLabel && wsLabel === branchLabel)
-        return wsLabel;
-    if (wsLabel && branchLabel)
-        return `${wsLabel}@${branchLabel}`;
-    if (wsLabel)
-        return wsLabel;
-    if (branchLabel)
-        return `@${branchLabel}`;
-    return "";
+    return goal.executionWorkspace ? formatCompactWorkspace(goal.executionWorkspace) : "";
 }
-/** Shorten common objective boilerplate to preserve the meaningful change phrase. */
+/** Shorten common objective boilerplate to preserve only the goal/change name. */
 export function formatGoalListSummary(goal) {
-    let summary = goal.objectiveSummary;
+    const original = goal.objectiveSummary.trim();
+    let summary = original;
+    const explicitChange = summary.match(/^Implement the ([a-z0-9][a-z0-9-]+) change\b/i);
+    if (explicitChange?.[1])
+        return explicitChange[1];
     // Strip the most common OpenSpec boilerplate prefix so the change name
     // (which is the useful scannable signal) occupies the remaining width.
     const boilerplatePrefixes = [
@@ -53,21 +50,23 @@ export function formatGoalListSummary(goal) {
     for (const pattern of boilerplatePrefixes) {
         summary = summary.replace(pattern, "");
     }
-    summary = summary.replace(/\s+in\s+goal-runner:\s+/i, ": ");
-    return summary.trim() || goal.objectiveSummary;
+    summary = summary
+        .replace(/\s+(?:in|across|for)\s+[^:]+:\s+.*$/i, "")
+        .replace(/\s+[—–-]\s+.*$/u, "")
+        .replace(/:\s+.*$/u, "")
+        .trim();
+    return summary || original || goal.objectiveSummary;
 }
-/** Build a compact primary row and apply final display-width truncation. */
+/** Build a compact primary row as: id, status, workspace, goal name. */
 export function formatGoalListRow(goal, marker, state, width) {
-    const parts = [marker, goal.shortGoalId, state];
-    const metrics = formatGoalListMetrics(goal);
-    if (metrics)
-        parts.push(metrics);
-    const where = formatGoalListWhere(goal);
-    if (where)
-        parts.push(where);
-    const summary = formatGoalListSummary(goal);
-    parts.push(`— ${summary}`);
-    return truncateToWidth(parts.join(" "), width);
+    const cells = [
+        marker,
+        padPlainCell(goal.shortGoalId, GOAL_LIST_ID_COLUMN_WIDTH),
+        padPlainCell(state, GOAL_LIST_STATUS_COLUMN_WIDTH),
+        padPlainCell(formatGoalListWhere(goal) || "-", GOAL_LIST_WORKSPACE_COLUMN_WIDTH),
+        formatGoalListSummary(goal),
+    ];
+    return truncateToWidth(cells.join(" "), width);
 }
 // ---------------------------------------------------------------------------
 // Internal compact-value formatters
@@ -96,6 +95,19 @@ function formatCompactTokenCount(value) {
     }
     return `${Number.isInteger(value / 1_000_000) ? value / 1_000_000 : (value / 1_000_000).toFixed(1)}m`;
 }
+function padPlainCell(value, width) {
+    const cell = truncatePlainCell(value, width);
+    const cellWidth = [...cell].length;
+    return `${cell}${" ".repeat(Math.max(0, width - cellWidth))}`;
+}
+function truncatePlainCell(value, width) {
+    const chars = [...value];
+    if (chars.length <= width)
+        return value;
+    if (width <= 1)
+        return chars.slice(0, width).join("");
+    return `${chars.slice(0, width - 1).join("")}…`;
+}
 function formatCompactWorkspace(ws) {
     // Replace the home directory with ~ for readability.
     const home = process.env.HOME;
@@ -108,11 +120,6 @@ function formatCompactWorkspace(ws) {
     // the monitor view.
     const segments = normalized.split("/").filter(Boolean);
     const keep = segments.length <= 1 ? normalized : (segments[segments.length - 1] ?? normalized);
-    return formatCompactGoalSlug(keep);
-}
-function formatCompactBranch(branch) {
-    // Strip noisy prefix groups (e.g. "goal/uuid/short-name" → "short-name").
-    const keep = branch.split("/").pop() ?? branch;
     return formatCompactGoalSlug(keep);
 }
 function formatCompactGoalSlug(value) {
@@ -187,8 +194,7 @@ export class GoalListController {
         visible.forEach((goal, index) => {
             const selected = index === this.selected;
             const marker = selected ? theme.fg("accent", "▶") : " ";
-            const raw = formatGoalListState(goal);
-            const state = selected ? theme.fg("accent", raw) : raw;
+            const state = formatGoalListState(goal);
             lines.push(formatGoalListRow(goal, marker, state, width));
         });
         return lines;

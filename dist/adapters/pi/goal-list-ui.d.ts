@@ -13,11 +13,11 @@ export interface GoalListThemeLike {
 export declare function formatGoalListState(goal: GoalSummary): string;
 /** Return a compact metric string, omitting all-zero runtime/token pairs. */
 export declare function formatGoalListMetrics(goal: GoalSummary): string;
-/** Return a compact workspace/branch location label. */
+/** Return a compact workspace label. Branch/ref is intentionally omitted from list rows. */
 export declare function formatGoalListWhere(goal: GoalSummary): string;
-/** Shorten common objective boilerplate to preserve the meaningful change phrase. */
+/** Shorten common objective boilerplate to preserve only the goal/change name. */
 export declare function formatGoalListSummary(goal: GoalSummary): string;
-/** Build a compact primary row and apply final display-width truncation. */
+/** Build a compact primary row as: id, status, workspace, goal name. */
 export declare function formatGoalListRow(goal: GoalSummary, marker: string, state: string, width: number): string;
 export declare class GoalListController {
     private readonly goals;
