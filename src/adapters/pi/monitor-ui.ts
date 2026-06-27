@@ -9,6 +9,7 @@ import type {
   ContinuationReservation,
   GoalDagNode,
   GoalLedgerEvent,
+  GoalModelResolution,
   GoalSubagentRecord,
   GoalSummary,
   HarnessState,
@@ -1313,7 +1314,47 @@ function formatRunnerLiveTitle(
   const modelArg = transcript.modelArg ?? runnerRuntime?.modelArg ?? node.preparedResources?.modelArg ?? node.modelArg;
   const thinkingLevel = transcript.thinkingLevel ?? runnerRuntime?.thinkingLevel ?? node.preparedResources?.thinkingLevel ?? node.thinkingLevel;
   const model = formatMonitorModel(scenario, modelArg, thinkingLevel);
-  return `Runner ${subagent.subagentId} model=${model} tokens=${formatCompactNumber(transcript.tokenTotal ?? 0)}`;
+  const suffix = buildModelFallbackSuffixFromNode(node);
+  const title = suffix ? `Runner ${subagent.subagentId} model=${model}${suffix} tokens=${formatCompactNumber(transcript.tokenTotal ?? 0)}`
+    : `Runner ${subagent.subagentId} model=${model} tokens=${formatCompactNumber(transcript.tokenTotal ?? 0)}`;
+  return title;
+}
+
+function buildModelFallbackSuffixFromNode(node: GoalDagNode): string | undefined {
+  const resolution = node.modelResolution ?? node.preparedResources?.modelResolution;
+  return resolution ? buildModelFallbackSuffix(resolution) : undefined;
+}
+
+function renderResolutionEvidenceLines(node: GoalDagNode): string[] {
+  const resolution = node.modelResolution ?? node.preparedResources?.modelResolution;
+  if (!resolution) return [];
+
+  const lines: string[] = [];
+
+  // Show attempted candidates chain
+  const attempts = resolution.attemptedCandidates;
+  if (attempts && attempts.length > 1) {
+    const chain = attempts.map((a) => {
+      const label = a.status === "succeeded" ? "✓" : a.status === "failed" ? "✕" : a.status === "skipped" ? "—" : "?";
+      return `${label}${a.model}`;
+    }).join(" → ");
+    lines.push(`Resolution chain: ${chain}`);
+  }
+
+  // Show switch events
+  const switches = resolution.switchEvents;
+  if (switches && switches.length > 0) {
+    for (const sw of switches) {
+      lines.push(`Switch: ${sw.fromModel} → ${sw.toModel} (${sw.reason})`);
+    }
+  }
+
+  // Show exhausted chain
+  if (resolution.exhaustedChain) {
+    lines.push("Chain exhausted: all candidates failed");
+  }
+
+  return lines;
 }
 
 function renderRunnerLiveLines(
@@ -1325,6 +1366,7 @@ function renderRunnerLiveLines(
   const integration = formatSubagentIntegration(subagent);
   const note = subagent.integrationStatus ?? subagent.selfReportedResult;
   const prepared = formatPreparedResources(node);
+  const resolutionLines = renderResolutionEvidenceLines(node);
   return [
     "RUNNER SUMMARY",
     `Status: ${renderRunnerStatus(subagent)}`,
@@ -1337,6 +1379,7 @@ function renderRunnerLiveLines(
     `Issue: ${formatMonitorValidationContract(node)}`,
     `Node: ${node.nodeId} (${node.status})`,
     node.preparedResources ? `prepared: ${prepared}` : undefined,
+    ...resolutionLines.length > 0 ? ["── Resolution ──", ...resolutionLines] : [],
     subagent.branch ? `branch: ${subagent.branch}` : undefined,
     subagent.workspacePath ? `workspace: ${shortenPath(subagent.workspacePath)}` : undefined,
     subagent.sessionFile ? `session: ${shortenPath(subagent.sessionFile)}` : undefined,
@@ -1456,6 +1499,23 @@ function formatMonitorTokens(goal: GoalSummary): string {
   return goal.tokenBudget === undefined ? formatCompactNumber(goal.tokensUsed) : `${formatCompactNumber(goal.tokensUsed)}/${formatCompactNumber(goal.tokenBudget)}`;
 }
 
+function buildModelFallbackSuffix(resolution: GoalModelResolution): string | undefined {
+  const switchCount = resolution.switchEvents?.length ?? 0;
+  const attemptCount = resolution.attemptedCandidates?.length;
+  const exhaustive = resolution.exhaustedChain;
+
+  // Only show suffix when there's meaningful fallback history
+  if (!attemptCount && !switchCount && !exhaustive) return undefined;
+
+  const parts: string[] = [];
+  if (exhaustive) parts.push("!");
+  else if (attemptCount && attemptCount > 1) parts.push(String(attemptCount));
+
+  if (switchCount > 0) parts.push(`s${switchCount}`);
+
+  return parts.length > 0 ? `[fb:${parts.join(",")}]` : undefined;
+}
+
 function formatNodeMonitorModel(
   node: GoalDagNode,
   _subagents: GoalSubagentRecord[] = [],
@@ -1482,8 +1542,13 @@ function formatNodeMonitorModel(
       ? normalizedCandidates.slice(0, 2).join(",")
       : `mixed(${normalizedCandidates.length})`;
 
-  if (options.stripProvider) return model || "-";
-  return formatMonitorModel(scenario, model, thinkingLevel);
+  // Add fallback suffix from modelResolution if present
+  const resolution = node.modelResolution ?? node.preparedResources?.modelResolution;
+  const suffix = resolution ? buildModelFallbackSuffix(resolution) : undefined;
+  const modelWithFallback = suffix ? `${model}${suffix}` : model;
+
+  if (options.stripProvider) return modelWithFallback || "-";
+  return formatMonitorModel(scenario, modelWithFallback, thinkingLevel);
 }
 
 function dedupeModelCandidates(

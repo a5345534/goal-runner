@@ -29,6 +29,7 @@ import {
 import type {
   GoalDagNode,
   GoalLedgerEvent,
+  GoalModelResolution,
   GoalSubagentRecord,
   GoalSummary,
   HarnessState,
@@ -1993,6 +1994,182 @@ test("formatRuntimeSummaryForOverview uses user-facing labels", () => {
   assert.doesNotMatch(label, /NOT-MATERIALIZED/);
   assert.doesNotMatch(label, /SUPPRESSED/);
   assert.doesNotMatch(label, /ACTIVE-TURN/);
+});
+
+test("goal monitor execution plan shows fallback suffix when resolution has multiple attempted candidates", () => {
+  const fallbackResolution: GoalModelResolution = {
+    schemaVersion: "1.0",
+    harness: "pi",
+    requested: { modelClass: "implementation", minimumRequirements: {} },
+    compliance: { satisfiesMinimum: true, downgraded: false, missingCapabilities: [] },
+    status: "resolved",
+    attemptedCandidates: [
+      { candidateIndex: 0, model: "gemini/gemini-2.5-pro", compliance: { satisfiesMinimum: true, downgraded: false, missingCapabilities: [] }, status: "failed", reason: "context_exceeded" },
+      { candidateIndex: 1, model: "deepseek/deepseek-v4-flash", compliance: { satisfiesMinimum: true, downgraded: false, missingCapabilities: [] }, status: "succeeded" },
+    ],
+    resolved: { model: "deepseek/deepseek-v4-flash", bindingSource: "test", candidateIndex: 1 },
+  };
+
+  const nodes: ReturnType<typeof dagNode>[] = [
+    dagNode({
+      nodeId: "fallback-node",
+      slug: "fallback-node",
+      status: "running",
+      modelArg: "deepseek/deepseek-v4-flash",
+      modelResolution: fallbackResolution,
+      createdAt: "2026-05-31T00:00:00.000Z",
+      updatedAt: "2026-05-31T00:00:01.000Z",
+    }),
+  ];
+
+  const controller = new GoalMonitorController(
+    summary("active"),
+    () => ({ lines: ["controller-tail"], entryCount: 1, messageCount: 1 }),
+    () => ({
+      nodes,
+      subagents: [],
+      refreshedAt: "2026-05-31T00:10:00.000Z",
+    }),
+  );
+
+  const rendered = controller.render(200, theme).join("\n");
+  // Fallback suffix should appear in the execution plan model column
+  // (2 attempts, no switches → [fb:2])
+  assert.match(rendered, /\[fb:2\]/);
+  assert.match(rendered, /fallback/);
+});
+
+test("goal monitor execution plan shows fallback suffix with switch count when resolution has switch events", () => {
+  const switchResolution: GoalModelResolution = {
+    schemaVersion: "1.0",
+    harness: "pi",
+    requested: { modelClass: "implementation", minimumRequirements: {} },
+    compliance: { satisfiesMinimum: true, downgraded: false, missingCapabilities: [] },
+    status: "resolved",
+    attemptedCandidates: [
+      { candidateIndex: 0, model: "gemini/gemini-2.5-pro", compliance: { satisfiesMinimum: true, downgraded: false, missingCapabilities: [] }, status: "failed", reason: "context_exceeded" },
+      { candidateIndex: 1, model: "deepseek/deepseek-v4-flash", compliance: { satisfiesMinimum: true, downgraded: false, missingCapabilities: [] }, status: "succeeded" },
+    ],
+    switchEvents: [
+      { fromCandidateIndex: 0, fromModel: "gemini/gemini-2.5-pro", toCandidateIndex: 1, toModel: "deepseek/deepseek-v4-flash", reason: "context_exceeded" },
+    ],
+    resolved: { model: "deepseek/deepseek-v4-flash", bindingSource: "test", candidateIndex: 1 },
+  };
+
+  const nodes: ReturnType<typeof dagNode>[] = [
+    dagNode({
+      nodeId: "switch-node",
+      slug: "switch-node",
+      status: "running",
+      modelArg: "deepseek/deepseek-v4-flash",
+      modelResolution: switchResolution,
+      createdAt: "2026-05-31T00:00:00.000Z",
+      updatedAt: "2026-05-31T00:00:01.000Z",
+    }),
+  ];
+
+  const controller = new GoalMonitorController(
+    summary("active"),
+    () => ({ lines: ["controller-tail"], entryCount: 1, messageCount: 1 }),
+    () => ({
+      nodes,
+      subagents: [],
+      refreshedAt: "2026-05-31T00:10:00.000Z",
+    }),
+  );
+
+  const rendered = controller.render(200, theme).join("\n");
+  // Fallback suffix with switch count should appear
+  // (may be truncated by shortenMiddle, so match partial suffix)
+  assert.match(rendered, /:2,s1\]/);
+});
+
+test("goal monitor execution plan shows fallback exhaustion suffix when chain exhausted", () => {
+  const exhaustedResolution: GoalModelResolution = {
+    schemaVersion: "1.0",
+    harness: "pi",
+    requested: { modelClass: "implementation", minimumRequirements: {} },
+    compliance: { satisfiesMinimum: false, downgraded: false, missingCapabilities: [] },
+    status: "blocked",
+    attemptedCandidates: [
+      { candidateIndex: 0, model: "gemini/gemini-2.5-pro", compliance: { satisfiesMinimum: true, downgraded: false, missingCapabilities: [] }, status: "failed", reason: "context_exceeded" },
+      { candidateIndex: 1, model: "deepseek/deepseek-v4-flash", compliance: { satisfiesMinimum: true, downgraded: false, missingCapabilities: [] }, status: "failed", reason: "provider_limit" },
+    ],
+    switchEvents: [
+      { fromCandidateIndex: 0, fromModel: "gemini/gemini-2.5-pro", toCandidateIndex: 1, toModel: "deepseek/deepseek-v4-flash", reason: "context_exceeded" },
+    ],
+    exhaustedChain: true,
+    reason: "all candidates exhausted",
+  };
+
+  const nodes: ReturnType<typeof dagNode>[] = [
+    dagNode({
+      nodeId: "exhausted-node",
+      slug: "exhausted-node",
+      status: "blocked",
+      modelArg: "deepseek/deepseek-v4-flash",
+      modelResolution: exhaustedResolution,
+      createdAt: "2026-05-31T00:00:00.000Z",
+      updatedAt: "2026-05-31T00:00:01.000Z",
+    }),
+  ];
+
+  const controller = new GoalMonitorController(
+    summary("active"),
+    () => ({ lines: ["controller-tail"], entryCount: 1, messageCount: 1 }),
+    () => ({
+      nodes,
+      subagents: [],
+      refreshedAt: "2026-05-31T00:10:00.000Z",
+    }),
+  );
+
+  const rendered = controller.render(200, theme).join("\n");
+  // Fallback with exhaustion indicator should appear
+  // (may be truncated by shortenMiddle, so match partial suffix)
+  assert.match(rendered, /:!,s1\]/);
+});
+
+test("goal monitor execution plan model column shows fallback suffix for multiple attempt chains", () => {
+  const switchResolution: GoalModelResolution = {
+    schemaVersion: "1.0",
+    harness: "pi",
+    requested: { modelClass: "implementation", minimumRequirements: {} },
+    compliance: { satisfiesMinimum: true, downgraded: false, missingCapabilities: [] },
+    status: "resolved",
+    attemptedCandidates: [
+      { candidateIndex: 0, model: "gemini/gemini-2.5-pro", compliance: { satisfiesMinimum: true, downgraded: false, missingCapabilities: [] }, status: "failed", reason: "context_exceeded" },
+      { candidateIndex: 1, model: "deepseek/deepseek-v4-flash", compliance: { satisfiesMinimum: true, downgraded: false, missingCapabilities: [] }, status: "succeeded" },
+    ],
+    switchEvents: [
+      { fromCandidateIndex: 0, fromModel: "gemini/gemini-2.5-pro", toCandidateIndex: 1, toModel: "deepseek/deepseek-v4-flash", reason: "context_exceeded" },
+    ],
+    resolved: { model: "deepseek/deepseek-v4-flash", bindingSource: "test", candidateIndex: 1 },
+  };
+
+  const node = dagNode({
+    nodeId: "chain-node",
+    slug: "chain-node",
+    status: "running",
+    modelArg: "deepseek/deepseek-v4-flash",
+    modelResolution: switchResolution,
+  });
+
+  const controller = new GoalMonitorController(
+    summary("active"),
+    () => ({ lines: ["controller-tail"], entryCount: 1, messageCount: 1 }),
+    () => ({
+      nodes: [node],
+      subagents: [],
+      refreshedAt: "2026-05-31T00:10:00.000Z",
+    }),
+  );
+
+  const rendered = controller.render(200, theme).join("\n");
+  // Fallback suffix with switch count and attempt count should appear
+  // (may be truncated by shortenMiddle, so match partial suffix)
+  assert.match(rendered, /:2,s1\]/);
+  assert.match(rendered, /chain/);
 });
 
 test("EXTENDED_MONITOR_HEALTH_LABELS covers all extended health values", () => {

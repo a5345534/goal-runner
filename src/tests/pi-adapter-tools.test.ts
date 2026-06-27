@@ -799,6 +799,8 @@ test("Pi session start refreshes completed goal-owned session status", async () 
   const originSessionKey = `pi:${originFile}`;
   const executionSessionKey = `pi:${executionFile}`;
   const objective = "Finished owner goal";
+  const previousMaxSubagents = process.env.AGENT_GOAL_PI_MAX_SUBAGENTS;
+  delete process.env.AGENT_GOAL_PI_MAX_SUBAGENTS;
 
   const seedStore = new SQLiteGoalStore();
   const seedRuntime = new GoalRuntime({ store: seedStore });
@@ -905,6 +907,8 @@ test("Pi session start refreshes completed goal-owned session status", async () 
   } finally {
     if (previousStateHome === undefined) delete process.env.AGENT_GOAL_STATE_HOME;
     else process.env.AGENT_GOAL_STATE_HOME = previousStateHome;
+    if (previousMaxSubagents === undefined) delete process.env.AGENT_GOAL_PI_MAX_SUBAGENTS;
+    else process.env.AGENT_GOAL_PI_MAX_SUBAGENTS = previousMaxSubagents;
     rmSync(dir, { recursive: true, force: true });
   }
 });
