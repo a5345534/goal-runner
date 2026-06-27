@@ -104,7 +104,13 @@ export type GoalLedgerEventType =
   | "goal_blocked"
   | "goal_budget_limited"
   | "goal_usage_limited"
-  | GoalControllerAuditLedgerEventType;
+  | GoalControllerAuditLedgerEventType
+  // ── Durable candidate fallback events ──
+  | "candidate_selected"
+  | "candidate_retried"
+  | "candidate_switched"
+  | "candidate_exhausted"
+  | "candidate_blocked";
 
 export interface GoalLedgerEvent {
   eventId?: string;

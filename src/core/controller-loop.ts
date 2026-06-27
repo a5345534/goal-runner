@@ -5,7 +5,7 @@ import { renderExecutorGuardrailLines } from "./executor-prompt.js";
 import { hasSubagentBranchOrWorkspaceEvidence, nodeRequiresSubagentIntegration, requiredSubagentIntegrationTerminalSuccess } from "./integration.js";
 import { attachPreparedResourcesToNode, recordAdapterObservationOnNode, recordRecoveryDecisionOnNode, supersedePreparedResourcesOnNode, withGoalDagNodeLifecyclePhase } from "./lifecycle.js";
 import type { HarnessSubagentAdapter, StartGoalSubagentOptions } from "./subagent-adapter.js";
-import type { GoalAdapterObservationRecord, GoalControllerActionAttemptRecord, GoalControllerTypedEventCategory, GoalDagNode, GoalLedgerEvent, GoalNodePreparedResources, GoalOrchestrationState, GoalRecord, GoalRecoveryDecisionRecord, GoalSubagentRecord } from "./types.js";
+import type { GoalAdapterObservationRecord, GoalControllerActionAttemptRecord, GoalControllerTypedEventCategory, GoalDagNode, GoalDagNodeLifecyclePhase, GoalLedgerEvent, GoalNodePreparedResources, GoalOrchestrationState, GoalRecord, GoalRecoveryDecisionRecord, GoalSubagentRecord } from "./types.js";
 import {
   applyAuditActions,
   buildControllerAuditSnapshot,
@@ -765,7 +765,18 @@ async function tryAutoRecoverFailedNode(
   }
 
   const isContext = isContextExceededError(errorMessage);
+  const isModelSwitchable = isModelSwitchableFailure(errorMessage);
   const oldModel = node.modelArg ?? subagent.workspacePath ?? "unknown";
+
+  // ── Durable candidate fallback: try to switch to next candidate for model-switchable failures ──
+  if (isModelSwitchable && hasCandidateChain(node)) {
+    const switched = await tryCandidateSwitchForModelFailure(
+      runtime, adapter, node, subagent, state, result, options, tickStartedAt,
+      errorMessage, retryCount, maxRetries,
+    );
+    if (switched) return true;
+    // If candidate switch returned false without handling, fall through to blocking logic below.
+  }
 
   if (isContext) {
     const summary = `Model resolution blocked automatic context fallback after ${oldModel}: ${errorMessage}`;
@@ -3121,6 +3132,442 @@ function validationFailureSignature(validation: GoalControllerValidationResult):
 function normalizeValidationFailureSignature(value?: string): string | undefined {
   const normalized = value?.replace(/\s+/g, " ").trim();
   return normalized ? normalized : undefined;
+}
+
+// ── Durable candidate fallback helpers ──
+
+/**
+ * Read the active candidate index from the node's prepared resources metadata.
+ * Defaults to 0 (first candidate) when no switch has occurred.
+ */
+function getActiveCandidateIndex(node: GoalDagNode): number {
+  const value = node.preparedResources?.metadata?.activeCandidateIndex;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+}
+
+/**
+ * Read the per-candidate retry count from prepared resources metadata.
+ * Defaults to 0.
+ */
+function getCandidateRetryCount(node: GoalDagNode): number {
+  const value = node.preparedResources?.metadata?.candidateRetryCount;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+}
+
+/**
+ * Returns the maximum number of attempts allowed on a single candidate
+ * before switching. Defaults to 1 (switch after one failure).
+ */
+function getAttemptsPerCandidate(node: GoalDagNode): number {
+  const value = node.preparedResources?.metadata?.attemptsPerCandidate;
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) return Math.floor(value);
+  return 1;
+}
+
+/**
+ * Returns true when the node's model resolution has a candidate chain
+ * with more than one candidate, enabling candidate switching.
+ */
+function hasCandidateChain(node: GoalDagNode): boolean {
+  const resolution = node.modelResolution ?? node.preparedResources?.modelResolution;
+  return Boolean(resolution?.attemptedCandidates && resolution.attemptedCandidates.length > 1);
+}
+
+/**
+ * Returns the next candidate index after the current one, or undefined
+ * when the chain is exhausted.
+ */
+function getNextCandidateIndex(node: GoalDagNode): number | undefined {
+  const resolution = node.modelResolution ?? node.preparedResources?.modelResolution;
+  if (!resolution?.attemptedCandidates || resolution.attemptedCandidates.length <= 1) return undefined;
+  const current = getActiveCandidateIndex(node);
+  const next = current + 1;
+  return next < resolution.attemptedCandidates.length ? next : undefined;
+}
+
+/**
+ * Returns the concrete model id for a given candidate index in the chain.
+ */
+function getCandidateModelForIndex(node: GoalDagNode, index: number): string | undefined {
+  const resolution = node.modelResolution ?? node.preparedResources?.modelResolution;
+  return resolution?.attemptedCandidates?.[index]?.model;
+}
+
+/**
+ * Returns true when the error message indicates a failure category that
+ * is safe to resolve by switching to a different model candidate.
+ * Provider limits, deterministic blockers, and missing-session errors
+ * are NOT switchable.
+ */
+function isModelSwitchableFailure(message: string): boolean {
+  return isContextExceededError(message) || isTransientError(message);
+}
+
+/**
+ * Creates a copy of the node with updated candidate state (index, retry
+ * count, modelArg) persisted in preparedResources.metadata.
+ */
+function withUpdatedCandidateState(
+  node: GoalDagNode,
+  candidateIndex: number,
+  candidateRetryCount: number,
+  modelArg?: string,
+  tickStartedAt?: string,
+): GoalDagNode {
+  const now = tickStartedAt ?? new Date().toISOString();
+  const patched = withNodePatch(node, {
+    modelArg: modelArg ?? node.modelArg,
+    updatedAt: now,
+  });
+  return {
+    ...patched,
+    preparedResources: {
+      ...(patched.preparedResources ?? {}),
+      modelArg: modelArg ?? patched.preparedResources?.modelArg ?? patched.modelArg,
+      updatedAt: now,
+      metadata: {
+        ...(patched.preparedResources?.metadata ?? {}),
+        activeCandidateIndex: candidateIndex,
+        candidateRetryCount: candidateRetryCount,
+      },
+    },
+  };
+}
+
+/**
+ * Persist candidate state in the ledger and in preparedResources metadata.
+ * Used by the candidate-switch branch of tryAutoRecoverFailedNode.
+ */
+async function recordCandidateEvent(
+  runtime: GoalControllerRuntimePort,
+  goalId: string,
+  eventType: string,
+  details: Record<string, unknown>,
+  at?: string,
+): Promise<void> {
+  await recordControllerEvent(runtime, goalId, eventType, details, at);
+}
+
+/**
+ * Try to handle a model-switchable failure (context-exceeded or transient)
+ * by retrying the same candidate or switching to the next candidate in the
+ * model resolution chain.
+ *
+ * Returns true when the failure was handled (blocked, retried, or switched).
+ * Returns false when the node has no usable candidate chain and the caller
+ * should fall through to its default blocking logic.
+ */
+async function tryCandidateSwitchForModelFailure(
+  runtime: GoalControllerRuntimePort,
+  adapter: HarnessSubagentAdapter,
+  node: GoalDagNode,
+  subagent: GoalSubagentRecord,
+  state: GoalOrchestrationState,
+  result: GoalControllerTickResult,
+  options: GoalControllerTickOptions,
+  tickStartedAt: string,
+  errorMessage: string,
+  retryCount: number,
+  maxRetries: number,
+): Promise<boolean> {
+  const candidateIndex = getActiveCandidateIndex(node);
+  const candidateRetryCount = getCandidateRetryCount(node);
+  const attemptsPerCandidate = getAttemptsPerCandidate(node);
+  const candidateModel = getCandidateModelForIndex(node, candidateIndex) ?? node.modelArg ?? "unknown";
+  const nextIndex = getNextCandidateIndex(node);
+  const nextModel = nextIndex !== undefined ? getCandidateModelForIndex(node, nextIndex) : undefined;
+
+  // Record the retry event
+  await recordCandidateEvent(runtime, node.goalId, "candidate_retried", {
+    nodeId: node.nodeId,
+    subagentId: subagent.subagentId,
+    candidateIndex,
+    candidateModel,
+    candidateRetryCount: candidateRetryCount + 1,
+    attemptsPerCandidate,
+    error: errorMessage,
+    retryTotal: retryCount + 1,
+    maxRetries,
+  }, tickStartedAt);
+
+  const nextRetryCount = candidateRetryCount + 1;
+
+  // If we still have retries left on this candidate, retry in-place
+  if (nextRetryCount < attemptsPerCandidate) {
+    const candidateSummary = `in-place candidate ${candidateIndex}/${candidateModel} retry ${nextRetryCount}/${attemptsPerCandidate}: ${errorMessage}`;
+    const recoveryPrompt = isContextExceededError(errorMessage)
+      ? buildCandidateRetryPrompt(node, subagent, errorMessage, nextRetryCount, attemptsPerCandidate, candidateIndex, candidateModel)
+      : buildRecoveryPrompt(node, errorMessage, retryCount, maxRetries);
+    let recovered: GoalSubagentRecord;
+    try {
+      recovered = await sendGoalSubagentPromptWithTimeout(runtime, options, adapter, subagent, recoveryPrompt, tickStartedAt);
+    } catch (dispatchError) {
+      const dispatchMsg = dispatchError instanceof Error ? dispatchError.message : String(dispatchError);
+      await degradePromptDispatchFailure(runtime, node, subagent, result, tickStartedAt, `${candidateSummary}; prompt dispatch failed: ${dispatchMsg}`, dispatchError);
+      return true;
+    }
+    const runningSubagent = withSubagentPatch(recovered, {
+      status: "running",
+      integrationStatus: candidateSummary,
+      retryCount: retryCount + 1,
+      updatedAt: tickStartedAt,
+      lastActivityAt: tickStartedAt,
+    });
+    const runningNode = withUpdatedCandidateState(node, candidateIndex, nextRetryCount, undefined, tickStartedAt);
+    const patchedRunningNode = {
+      ...runningNode,
+      status: "running" as const,
+      lastValidationSummary: candidateSummary,
+      updatedAt: tickStartedAt,
+    };
+    await runtime.saveGoalSubagent(runningSubagent);
+    await runtime.saveGoalDagNode(patchedRunningNode);
+    await recordControllerEvent(runtime, subagent.goalId, "recovery.sent", {
+      nodeId: node.nodeId,
+      subagentId: subagent.subagentId,
+      mode: "candidate-retry",
+      candidateIndex,
+      candidateModel,
+      candidateRetry: nextRetryCount,
+      attemptsPerCandidate,
+      retry: retryCount + 1,
+      maxRetries,
+      reason: errorMessage,
+    }, tickStartedAt);
+    result.followups.push(runningSubagent);
+    result.synced.push(runningSubagent);
+    return true;
+  }
+
+  // Candidate retries exhausted — try to switch to next candidate
+  if (nextIndex === undefined || !nextModel) {
+    // All candidates exhausted
+    const summary = `Candidate chain exhausted after candidate ${candidateIndex}/${candidateModel} (${retryCount + 1} attempt(s)): ${errorMessage}`;
+    const blockedSubagent = withSubagentPatch(subagent, { status: "blocked", integrationStatus: summary, retryCount, updatedAt: tickStartedAt });
+    const blockedNode = withUpdatedCandidateState(node, candidateIndex, nextRetryCount, undefined, tickStartedAt);
+    const patchedBlockedNode = {
+      ...blockedNode,
+      status: "blocked" as const,
+      lastValidationSummary: summary,
+      updatedAt: tickStartedAt,
+    };
+    await runtime.saveGoalSubagent(blockedSubagent);
+    await runtime.saveGoalDagNode(patchedBlockedNode);
+    await recordCandidateEvent(runtime, node.goalId, "candidate_exhausted", {
+      nodeId: node.nodeId,
+      subagentId: subagent.subagentId,
+      candidateIndex,
+      candidateModel,
+      totalAttempts: retryCount + 1,
+      error: errorMessage,
+    }, tickStartedAt);
+    result.blocked.push(patchedBlockedNode);
+    result.synced.push(blockedSubagent);
+    return true;
+  }
+
+  // ── Switch to next candidate: start a replacement subagent with the new model ──
+  const switchSummary = `candidate switch attempt from ${candidateIndex}/${candidateModel} to ${nextIndex}/${nextModel} after ${candidateRetryCount + 1} retries: ${errorMessage}`;
+
+  await recordCandidateEvent(runtime, node.goalId, "candidate_selected", {
+    nodeId: node.nodeId,
+    subagentId: subagent.subagentId,
+    candidateIndex: nextIndex,
+    candidateModel: nextModel,
+  }, tickStartedAt);
+
+  // Terminalize the current subagent
+  const terminalSubagent = withSubagentPatch(subagent, {
+    status: "failed",
+    integrationStatus: `candidate switched from ${candidateIndex}/${candidateModel} to ${nextIndex}/${nextModel}: ${errorMessage}`,
+    retryCount: retryCount + 1,
+    updatedAt: tickStartedAt,
+  });
+  await runtime.saveGoalSubagent(terminalSubagent);
+  result.synced.push(terminalSubagent);
+
+  // Build the prompt for the new candidate
+  const switchPrompt = buildCandidateSwitchPrompt(node, errorMessage, nextIndex, nextModel, maxRetries);
+
+  // Prepare resources with the new candidate's modelArg
+  const replacementSubagentId = uniqueReplacementSubagentId(state.subagents, subagent.subagentId, retryCount + 1);
+  const reuseResources = recoveryPreparedResources(node, subagent, tickStartedAt, {
+    subagentId: replacementSubagentId,
+    clearSession: true,
+    modelArg: nextModel,
+    metadata: {
+      candidateSwitchFrom: candidateIndex,
+      candidateSwitchTo: nextIndex,
+      candidateSwitchReason: errorMessage,
+      activeCandidateIndex: nextIndex,
+      candidateRetryCount: 0,
+      attemptsPerCandidate,
+    },
+  });
+
+  const allocation = hasConcretePreparedResource(reuseResources)
+    ? undefined
+    : await options.workspaceAllocator?.({ goalId: node.goalId, node, state, adapterId: adapter.adapterId, tickStartedAt });
+
+  const allocatedSubagentId = allocation?.subagentId && allocation.subagentId !== subagent.subagentId ? allocation.subagentId : undefined;
+  const effectiveSubagentId = allocatedSubagentId ?? replacementSubagentId;
+
+  const preparedResources: GoalNodePreparedResources = {
+    ...reuseResources,
+    subagentId: effectiveSubagentId,
+    adapterId: adapter.adapterId,
+    workspacePath: reuseResources.workspacePath ?? allocation?.cwd,
+    branch: reuseResources.branch ?? allocation?.branch,
+    ref: reuseResources.ref ?? allocation?.ref,
+    modelArg: nextModel,
+    modelScenario: metadataString(allocation?.metadata, "modelScenario") ?? reuseResources.modelScenario,
+    modelClass: metadataString(allocation?.metadata, "modelClass") ?? reuseResources.modelClass,
+    modelResolution: reuseResources.modelResolution,
+    thinkingLevel: metadataString(allocation?.metadata, "thinkingLevel") ?? reuseResources.thinkingLevel ?? node.thinkingLevel,
+    metadata: { ...(reuseResources.metadata ?? {}), ...(allocation?.metadata ?? {}) },
+    updatedAt: tickStartedAt,
+  };
+
+  const startOptions: StartGoalSubagentOptions = {
+    subagentId: effectiveSubagentId,
+    cwd: preparedResources.workspacePath,
+    branch: preparedResources.branch,
+    ref: preparedResources.ref,
+    systemPrompt: allocation?.systemPrompt ?? options.systemPrompt,
+    initialPrompt: switchPrompt,
+    preparedResources,
+    metadata: { ...(options.metadata ?? {}), ...(preparedResources.metadata ?? {}) },
+    now: tickStartedAt,
+    thinkingLevel: preparedResources.thinkingLevel ?? node.thinkingLevel,
+  };
+
+  let started: GoalSubagentRecord;
+  try {
+    started = await startGoalSubagentWithTimeout(runtime, options, adapter, node, startOptions, tickStartedAt);
+  } catch (launchError) {
+    const launchMsg = launchError instanceof Error ? launchError.message : String(launchError);
+    const summary = `candidate switch launch failed (${candidateIndex}→${nextIndex}, ${candidateModel}→${nextModel}): ${launchMsg}`;
+    const blockedNode = {
+      ...withUpdatedCandidateState(node, nextIndex, 0, nextModel, tickStartedAt),
+      status: "blocked" as const,
+      lifecyclePhase: "terminal" as GoalDagNodeLifecyclePhase,
+      lastValidationSummary: summary,
+      updatedAt: tickStartedAt,
+    };
+    await runtime.saveGoalDagNode(blockedNode);
+    await recordControllerEvent(runtime, node.goalId, "recovery.blocked", {
+      nodeId: node.nodeId,
+      subagentId: effectiveSubagentId,
+      reason: summary,
+    }, tickStartedAt);
+    result.blocked.push(blockedNode);
+    return true;
+  }
+
+  // Record switch event
+  await recordCandidateEvent(runtime, node.goalId, "candidate_switched", {
+    nodeId: node.nodeId,
+    previousSubagentId: subagent.subagentId,
+    subagentId: started.subagentId,
+    fromCandidateIndex: candidateIndex,
+    fromCandidateModel: candidateModel,
+    toCandidateIndex: nextIndex,
+    toCandidateModel: nextModel,
+    reason: errorMessage,
+  }, tickStartedAt);
+
+  const replacement = withSubagentPatch(started, {
+    retryCount: retryCount + 1,
+    integrationStatus: switchSummary,
+    lastActivityAt: tickStartedAt,
+    updatedAt: tickStartedAt,
+  });
+  await runtime.saveGoalSubagent(replacement);
+
+  const switchedNode = withUpdatedCandidateState(node, nextIndex, 0, nextModel, tickStartedAt);
+  const patchedSwitchedNode = {
+    ...switchedNode,
+    preparedResources: {
+      ...switchedNode.preparedResources!,
+      sessionId: replacement.sessionId ?? switchedNode.preparedResources?.sessionId,
+      sessionFile: replacement.sessionFile ?? switchedNode.preparedResources?.sessionFile,
+      workspacePath: replacement.workspacePath ?? switchedNode.preparedResources?.workspacePath,
+      branch: replacement.branch ?? switchedNode.preparedResources?.branch,
+      ref: replacement.ref ?? switchedNode.preparedResources?.ref,
+    },
+    status: "running" as const,
+    lifecyclePhase: "runnerActive" as GoalDagNodeLifecyclePhase,
+    lastValidationSummary: switchSummary,
+    updatedAt: tickStartedAt,
+  } as GoalDagNode;
+  await runtime.saveGoalDagNode(patchedSwitchedNode);
+
+  await recordControllerEvent(runtime, node.goalId, "recovery.candidateSwitched", {
+    nodeId: node.nodeId,
+    previousSubagentId: subagent.subagentId,
+    subagentId: replacement.subagentId,
+    fromCandidateIndex: candidateIndex,
+    fromCandidateModel: candidateModel,
+    toCandidateIndex: nextIndex,
+    toCandidateModel: nextModel,
+    workspacePath: replacement.workspacePath,
+    branch: replacement.branch,
+  }, tickStartedAt);
+
+  result.started.push(replacement);
+  return true;
+}
+
+/**
+ * Builds a prompt that instructs the subagent to retry its work on the same
+ * candidate (same model) after a model-switchable failure.
+ */
+function buildCandidateRetryPrompt(
+  node: GoalDagNode,
+  subagent: GoalSubagentRecord,
+  errorMessage: string,
+  candidateRetry: number,
+  attemptsPerCandidate: number,
+  candidateIndex: number,
+  candidateModel: string,
+): string {
+  return [
+    `[SYSTEM RECOVERY: CANDIDATE_RETRY]`,
+    `The previous attempt on candidate ${candidateIndex} (model: ${candidateModel}) encountered a temporary failure.`,
+    `Error: ${errorMessage}`,
+    `This is candidate retry ${candidateRetry}/${attemptsPerCandidate}. Preserve the current workspace and session context.`,
+    `Do not discard prior work. First inspect only what is needed to resume safely (git status/diff and the failing command output).`,
+    `Then continue the DAG node objective: "${node.objective}"`,
+    `When done, report exactly: SUBAGENT_RESULT: <summary of changes, verification, and remaining risks>`,
+    `If blocked, report exactly: SUBAGENT_BLOCKED: <specific blocker and needed input/state change>`,
+  ].join("\n");
+}
+
+/**
+ * Builds a prompt for starting a replacement subagent on a new candidate
+ * (new model) after exhausting retries on the current candidate.
+ */
+function buildCandidateSwitchPrompt(
+  node: GoalDagNode,
+  errorMessage: string,
+  nextCandidateIndex: number,
+  nextModel: string,
+  maxRetries: number,
+): string {
+  return [
+    `[SYSTEM RECOVERY: CANDIDATE_SWITCH]`,
+    `The controller is switching to candidate ${nextCandidateIndex} (model: ${nextModel}) after exhausting retries on the previous model.`,
+    `Prior failure: ${errorMessage}`,
+    `This is a fresh session on the same workspace/branch. First inspect current state only as needed (git status/diff).`,
+    `Do not assume prior tool calls completed successfully. Preserve any useful existing workspace changes.`,
+    `Then continue the DAG node objective: "${node.objective}"`,
+    node.scope ? `Scope: ${node.scope}` : undefined,
+    node.expectedOutputs.length ? `Expected outputs: ${node.expectedOutputs.join(", ")}` : undefined,
+    node.validators.length ? `Validators: ${node.validators.join(", ")}` : undefined,
+    `When done, report exactly: SUBAGENT_RESULT: <summary of changes, verification, and remaining risks>`,
+    `If blocked, report exactly: SUBAGENT_BLOCKED: <specific blocker and needed input/state change>`,
+    `Candidate switch recovery attempt, max ${maxRetries} total retries.`,
+  ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
 function withNodePatch(node: GoalDagNode, patch: Partial<GoalDagNode>): GoalDagNode {

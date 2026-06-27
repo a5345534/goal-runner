@@ -1412,4 +1412,214 @@ test("controller loop can run bounded ticks and stop when idle", async () => {
     assert.equal(loop.ticks.length, 1);
     assert.equal(loop.ticks[0]?.changed, false);
 });
+// ── Durable candidate fallback tests ──
+function candidateChain(attemptedCandidates, retryPolicyAttempts) {
+    return {
+        schemaVersion: "1.0",
+        harness: "pi",
+        requested: { modelClass: "sonnet", minimumRequirements: {} },
+        compliance: { satisfiesMinimum: true, downgraded: false, missingCapabilities: [] },
+        status: "resolved",
+        attemptedCandidates: attemptedCandidates.map((c, i) => ({
+            candidateIndex: i,
+            model: c.model,
+            compliance: { satisfiesMinimum: true, downgraded: false, missingCapabilities: [] },
+            status: c.status,
+        })),
+        resolved: { model: attemptedCandidates[0]?.model ?? "model-a", bindingSource: "test", candidateIndex: 0 },
+    };
+}
+async function setupCandidateSwitchTest() {
+    const runtime = new GoalRuntime({
+        store: new MemoryGoalStore(),
+        config: { now: () => new Date(now), randomId: () => "goal-1" },
+    });
+    await runtime.createOrReplaceGoal("session-1", "Test goal");
+    const nodes = await runtime.planGoalDag("goal-1", [
+        { nodeId: "build", objective: "Build feature", modelArg: "model-a" },
+    ]);
+    const node = nodes[0];
+    return { runtime, node };
+}
+function modelSwitchableAdapter(errorMessage = "context_length_exceeded", states = {}) {
+    const adapter = new FakeSubagentAdapter();
+    for (const [key, state] of Object.entries(states)) {
+        adapter.states.set(key, state);
+    }
+    return adapter;
+}
+test("candidate fallback: no candidate chain preserves existing blocking behavior for context-exceeded", async () => {
+    const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", modelArg: "model-a" }]);
+    await runtime.saveGoalDagNode({ ...await runtime.getGoalDagNode("goal-1", "build"), status: "failed", updatedAt: now, lastValidationSummary: "context_length_exceeded" });
+    await runtime.saveGoalSubagent(subagent({ status: "failed", integrationStatus: "context_length_exceeded", workspacePath: "/repo/.worktrees/build" }));
+    const adapter = new FakeSubagentAdapter();
+    const tick = await runtime.runGoalControllerTick("goal-1", { adapter, maxAutoRetries: 2 });
+    // No candidate chain, so should block as before
+    assert.equal(tick.started.length, 0);
+    assert.equal(tick.followups.length, 0);
+    assert.equal(tick.failed.length, 0);
+    assert.equal(tick.blocked.length, 1);
+    const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
+    assert.equal(saved?.status, "blocked");
+    assert.match(saved?.integrationStatus ?? "", /context fallback/);
+});
+test("candidate fallback: non-switchable error (provider limit) preserves existing blocking behavior", async () => {
+    const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", modelArg: "model-a" }]);
+    await runtime.saveGoalDagNode({ ...await runtime.getGoalDagNode("goal-1", "build"), status: "failed", updatedAt: now, lastValidationSummary: "insufficient_quota" });
+    await runtime.saveGoalSubagent(subagent({ status: "failed", integrationStatus: "insufficient_quota", workspacePath: "/repo/.worktrees/build" }));
+    const adapter = new FakeSubagentAdapter();
+    // Set up a candidate chain - but since the error is non-switchable, should still block
+    const node = await runtime.getGoalDagNode("goal-1", "build");
+    await runtime.saveGoalDagNode({
+        ...node,
+        modelResolution: candidateChain([{ model: "model-a", status: "succeeded" }, { model: "model-b", status: "succeeded" }]),
+    });
+    const tick = await runtime.runGoalControllerTick("goal-1", { adapter, maxAutoRetries: 2 });
+    assert.equal(tick.started.length, 0);
+    assert.equal(tick.followups.length, 0);
+    assert.equal(tick.blocked.length, 1);
+    assert.match((await runtime.getGoalSubagent("goal-1", "subagent-1"))?.integrationStatus ?? "", /quota or billing limit/);
+});
+test("candidate fallback: switches to next candidate after context-exceeded on first candidate", async () => {
+    const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", modelArg: "model-a" }]);
+    const node = await runtime.getGoalDagNode("goal-1", "build");
+    await runtime.saveGoalDagNode({
+        ...node,
+        status: "failed",
+        updatedAt: now,
+        lastValidationSummary: "context_length_exceeded",
+        modelResolution: candidateChain([{ model: "model-a", status: "succeeded" }, { model: "model-b", status: "succeeded" }]),
+        preparedResources: {
+            subagentId: "subagent-1",
+            adapterId: "fake",
+            workspacePath: "/repo/.worktrees/build",
+            metadata: {
+                activeCandidateIndex: 0,
+                candidateRetryCount: 0,
+                attemptsPerCandidate: 1,
+            },
+        },
+    });
+    await runtime.saveGoalSubagent(subagent({
+        status: "failed",
+        integrationStatus: "context_length_exceeded",
+        workspacePath: "/repo/.worktrees/build",
+        retryCount: 1,
+    }));
+    const adapter = new FakeSubagentAdapter();
+    const tick = await runtime.runGoalControllerTick("goal-1", { adapter, maxAutoRetries: 2 });
+    // Should start a candidate-switched replacement subagent
+    assert.equal(tick.blocked.length, 0);
+    assert.equal(tick.started.length, 1);
+    assert.equal(tick.failed.length, 0);
+    assert.equal(adapter.starts.length, 1);
+    const startRequest = adapter.starts[0];
+    assert.match(startRequest?.initialPrompt ?? "", /CANDIDATE_SWITCH/);
+    assert.match(startRequest?.initialPrompt ?? "", /model-b/);
+});
+test("candidate fallback: retries same candidate when attemptsPerCandidate > 1", async () => {
+    const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", modelArg: "model-a" }]);
+    const node = await runtime.getGoalDagNode("goal-1", "build");
+    await runtime.saveGoalDagNode({
+        ...node,
+        status: "failed",
+        updatedAt: now,
+        lastValidationSummary: "context_length_exceeded",
+        modelResolution: candidateChain([{ model: "model-a", status: "succeeded" }, { model: "model-b", status: "succeeded" }]),
+        preparedResources: {
+            subagentId: "subagent-1",
+            adapterId: "fake",
+            workspacePath: "/repo/.worktrees/build",
+            metadata: {
+                activeCandidateIndex: 0,
+                candidateRetryCount: 0,
+                attemptsPerCandidate: 3,
+            },
+        },
+    });
+    await runtime.saveGoalSubagent(subagent({
+        status: "failed",
+        integrationStatus: "context_length_exceeded",
+        workspacePath: "/repo/.worktrees/build",
+        retryCount: 1,
+    }));
+    const adapter = new FakeSubagentAdapter();
+    const tick = await runtime.runGoalControllerTick("goal-1", { adapter, maxAutoRetries: 2 });
+    // Should retry the same candidate (not start a new one)
+    assert.equal(tick.blocked.length, 0);
+    assert.equal(tick.started.length, 0);
+    assert.equal(tick.followups.length, 1);
+    assert.equal(adapter.starts.length, 0);
+    assert.equal(adapter.prompts.length, 1);
+    assert.match(adapter.prompts[0]?.prompt ?? "", /CANDIDATE_RETRY/);
+    assert.match(adapter.prompts[0]?.prompt ?? "", /model-a/);
+});
+test("candidate fallback: blocks with exhaustion after all candidates exhausted", async () => {
+    const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", modelArg: "model-a" }]);
+    const node = await runtime.getGoalDagNode("goal-1", "build");
+    await runtime.saveGoalDagNode({
+        ...node,
+        status: "failed",
+        updatedAt: now,
+        lastValidationSummary: "context_length_exceeded",
+        modelResolution: candidateChain([{ model: "model-a", status: "succeeded" }, { model: "model-b", status: "succeeded" }]),
+        preparedResources: {
+            subagentId: "subagent-1",
+            adapterId: "fake",
+            workspacePath: "/repo/.worktrees/build",
+            metadata: {
+                activeCandidateIndex: 1,
+                candidateRetryCount: 1,
+                attemptsPerCandidate: 1,
+            },
+        },
+    });
+    await runtime.saveGoalSubagent(subagent({
+        status: "failed",
+        integrationStatus: "context_length_exceeded",
+        workspacePath: "/repo/.worktrees/build",
+        retryCount: 2,
+    }));
+    const adapter = new FakeSubagentAdapter();
+    const tick = await runtime.runGoalControllerTick("goal-1", { adapter, maxAutoRetries: 2 });
+    // All candidates exhausted - should block
+    assert.equal(tick.started.length, 0);
+    assert.equal(tick.followups.length, 0);
+    assert.equal(tick.blocked.length, 1);
+    assert.match((await runtime.getGoalSubagent("goal-1", "subagent-1"))?.integrationStatus ?? "", /Candidate chain exhausted/);
+});
+test("candidate fallback: persists candidate state in preparedResources metadata", async () => {
+    const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", modelArg: "model-a" }]);
+    const node = await runtime.getGoalDagNode("goal-1", "build");
+    await runtime.saveGoalDagNode({
+        ...node,
+        status: "failed",
+        updatedAt: now,
+        lastValidationSummary: "context_length_exceeded",
+        modelResolution: candidateChain([{ model: "model-a", status: "succeeded" }, { model: "model-b", status: "succeeded" }]),
+        preparedResources: {
+            subagentId: "subagent-1",
+            adapterId: "fake",
+            workspacePath: "/repo/.worktrees/build",
+            metadata: {
+                activeCandidateIndex: 0,
+                candidateRetryCount: 0,
+                attemptsPerCandidate: 2,
+            },
+        },
+    });
+    await runtime.saveGoalSubagent(subagent({
+        status: "failed",
+        integrationStatus: "context_length_exceeded",
+        workspacePath: "/repo/.worktrees/build",
+        retryCount: 1,
+    }));
+    const adapter = new FakeSubagentAdapter();
+    await runtime.runGoalControllerTick("goal-1", { adapter, maxAutoRetries: 2 });
+    // Should retry - candidateRetryCount should be incremented
+    const updatedNode = await runtime.getGoalDagNode("goal-1", "build");
+    assert.equal(updatedNode?.preparedResources?.metadata?.activeCandidateIndex, 0);
+    assert.equal(updatedNode?.preparedResources?.metadata?.candidateRetryCount, 1);
+    assert.equal(updatedNode?.preparedResources?.metadata?.attemptsPerCandidate, 2);
+});
 //# sourceMappingURL=controller-loop.test.js.map
