@@ -570,6 +570,69 @@ test("Pi controller poller promotes controller branch into target before complet
   }
 });
 
+test("Pi /goal blocks unsynced promotion target before launching controller", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "goal-promotion-preflight-pi-"));
+  const workspace = createGitWorkspace();
+  const previousStateHome = process.env.AGENT_GOAL_STATE_HOME;
+  process.env.AGENT_GOAL_STATE_HOME = dir;
+  writeFileSync(join(workspace, "local-only.txt"), "local only\n");
+  git(workspace, ["add", "local-only.txt"]);
+  git(workspace, ["commit", "-m", "feat: local target only"]);
+
+  let commandHandler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+  const launched: Array<{ cwd: string; sessionId?: string; sessionFile?: string; sessionName: string; modelArg?: string }> = [];
+  setPiBackgroundGoalSessionLauncherForTests(async (request) => {
+    launched.push(request);
+    throw new Error("controller launcher should not run when promotion target preflight blocks");
+  });
+  const pi = {
+    registerTool() {},
+    registerCommand(_name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) {
+      commandHandler = options.handler;
+    },
+    on() {},
+    appendEntry() {},
+    sendMessage() {},
+  };
+  const notifications: string[] = [];
+  const controllerCtx = {
+    hasUI: true,
+    cwd: workspace,
+    model: { provider: "test", id: "model" },
+    ui: {
+      notify(message: string) { notifications.push(message); },
+      setStatus() {},
+      setWidget() {},
+      confirm: async () => true,
+      editor: async () => undefined,
+      select: async () => undefined,
+      custom: async () => undefined,
+    },
+    sessionManager: {
+      getSessionFile: () => "/controller/session.jsonl",
+      getSessionName: () => "controller",
+    },
+    isIdle: () => true,
+    hasPendingMessages: () => false,
+  };
+
+  try {
+    goalPiExtension(pi as never);
+    assert.ok(commandHandler);
+    const handler = commandHandler;
+    await handler("Implement with unsynced target", controllerCtx as never);
+    assert.match(notifications.join("\n"), /promotion target preflight blocked: local target main has unpushed commits/);
+    assert.equal(launched.length, 0, "controller session must not launch after pre-start target-sync block");
+    assert.equal(existsSync(join(workspace, ".worktrees")), false, "preflight block must occur before controller worktree allocation");
+  } finally {
+    setPiBackgroundGoalSessionLauncherForTests();
+    if (previousStateHome === undefined) delete process.env.AGENT_GOAL_STATE_HOME;
+    else process.env.AGENT_GOAL_STATE_HOME = previousStateHome;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("Pi controller poller blocks promotion on dirty target and preserves worktrees", async () => {
   const dir = mkdtempSync(join(tmpdir(), "goal-poller-promote-blocked-"));
   const workspace = createGitWorkspace();

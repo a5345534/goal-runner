@@ -588,9 +588,15 @@ async function handlePiGoalCommand(
   }
 
   const isExplicitWorkspace = Boolean(workspaceFlags.workspace);
+  const autoBaseRef = workspaceFlags.branch ?? workspaceFlags.ref;
+  const autoWorkspaceManager = workspaceFlags.workspace ? undefined : new NativeGitWorkspaceManager({ defaultBaseRef: autoBaseRef, fetch: false });
+  if (autoWorkspaceManager) {
+    const targetPreflight = autoWorkspaceManager.preflightPromotionTargetBeforeControllerStart({ invocationCwd: ctx.cwd, baseRef: autoBaseRef });
+    if (targetPreflight.status === "blocked") throw new Error(targetPreflight.summary);
+  }
   const binding = workspaceFlags.workspace
     ? resolveWorkspaceBinding(workspaceFlags, ctx.cwd)
-    : allocatePiControllerWorkspace(ctx, command.objective, workspaceFlags.branch ?? workspaceFlags.ref);
+    : allocatePiControllerWorkspace(ctx, command.objective, autoBaseRef, autoWorkspaceManager);
   const validation = validateExecutionWorkspace(binding);
   if (!validation.ok) throw new Error(validation.message ?? "execution workspace validation failed");
   if (!validation.isGit) throw new Error("/goal orchestration requires a git workspace");
@@ -610,8 +616,9 @@ function allocatePiControllerWorkspace(
   ctx: ExtensionCommandContext,
   objective: string,
   baseRef?: string,
+  manager = new NativeGitWorkspaceManager({ defaultBaseRef: baseRef, fetch: false }),
 ): ResolvedWorkspaceBinding {
-  const allocation = new NativeGitWorkspaceManager({ defaultBaseRef: baseRef, fetch: false }).allocateControllerWorkspace({
+  const allocation = manager.allocateControllerWorkspace({
     invocationCwd: ctx.cwd,
     goalId: `goal-${randomUUID().replace(/-/g, "").slice(0, 12)}`,
     objective,

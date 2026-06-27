@@ -471,9 +471,16 @@ async function handlePiGoalCommand(runtime, ctx, args, backgroundGoalSessions, c
         throw new Error(`/goal ${command.kind} requires the explicit command form with optional goal-ref.`);
     }
     const isExplicitWorkspace = Boolean(workspaceFlags.workspace);
+    const autoBaseRef = workspaceFlags.branch ?? workspaceFlags.ref;
+    const autoWorkspaceManager = workspaceFlags.workspace ? undefined : new NativeGitWorkspaceManager({ defaultBaseRef: autoBaseRef, fetch: false });
+    if (autoWorkspaceManager) {
+        const targetPreflight = autoWorkspaceManager.preflightPromotionTargetBeforeControllerStart({ invocationCwd: ctx.cwd, baseRef: autoBaseRef });
+        if (targetPreflight.status === "blocked")
+            throw new Error(targetPreflight.summary);
+    }
     const binding = workspaceFlags.workspace
         ? resolveWorkspaceBinding(workspaceFlags, ctx.cwd)
-        : allocatePiControllerWorkspace(ctx, command.objective, workspaceFlags.branch ?? workspaceFlags.ref);
+        : allocatePiControllerWorkspace(ctx, command.objective, autoBaseRef, autoWorkspaceManager);
     const validation = validateExecutionWorkspace(binding);
     if (!validation.ok)
         throw new Error(validation.message ?? "execution workspace validation failed");
@@ -492,8 +499,8 @@ function parseDagStartTokenBudget(args) {
         return parseTokenBudget(tokens[1] ?? "");
     throw new Error("/goal --dag accepts only --tokens as an additional start flag; objective must come from the DAG file");
 }
-function allocatePiControllerWorkspace(ctx, objective, baseRef) {
-    const allocation = new NativeGitWorkspaceManager({ defaultBaseRef: baseRef, fetch: false }).allocateControllerWorkspace({
+function allocatePiControllerWorkspace(ctx, objective, baseRef, manager = new NativeGitWorkspaceManager({ defaultBaseRef: baseRef, fetch: false })) {
+    const allocation = manager.allocateControllerWorkspace({
         invocationCwd: ctx.cwd,
         goalId: `goal-${randomUUID().replace(/-/g, "").slice(0, 12)}`,
         objective,

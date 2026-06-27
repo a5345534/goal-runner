@@ -669,6 +669,150 @@ export class NativeGitWorkspaceManager {
             blockers,
         };
     }
+    preflightPromotionTargetBeforeControllerStart(request) {
+        const repoRoot = findGitRepositoryRoot(resolve(request.invocationCwd));
+        if (!repoRoot) {
+            return {
+                status: "blocked",
+                summary: `promotion target preflight blocked: invocation workspace is not inside a Git repository: ${resolve(request.invocationCwd)}`,
+                error: "not a Git repository",
+            };
+        }
+        let targetRef;
+        try {
+            targetRef = request.targetRef?.trim() || this.resolveBaseRef(repoRoot, request.baseRef);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            return {
+                status: "blocked",
+                summary: `promotion target preflight blocked: ${message}`,
+                error: message,
+            };
+        }
+        const targetBranch = normalizeLocalBranchRef(repoRoot, targetRef);
+        if (!targetBranch) {
+            return {
+                status: "blocked",
+                summary: `promotion target preflight blocked: cannot normalize promotion target ref: ${targetRef}`,
+                targetRef,
+            };
+        }
+        const targetWorktree = listGitWorktrees(repoRoot).find((item) => item.branch === targetBranch);
+        if (!targetWorktree) {
+            return {
+                status: "blocked",
+                summary: `promotion target preflight blocked: promotion target branch ${targetBranch} does not have a checked-out worktree; cannot safely promote after controller work`,
+                targetRef,
+                targetBranch,
+            };
+        }
+        const targetHead = targetWorktree.head ?? safeGit(targetWorktree.worktreePath, ["rev-parse", "--verify", "HEAD"]);
+        if (!targetHead) {
+            return {
+                status: "blocked",
+                summary: `promotion target preflight blocked: target branch ${targetBranch} worktree has no HEAD`,
+                targetRef,
+                targetBranch,
+                targetWorkspacePath: targetWorktree.worktreePath,
+            };
+        }
+        const remoteName = this.options.remote;
+        const remoteUrl = safeGit(repoRoot, ["remote", "get-url", remoteName]);
+        if (!remoteUrl) {
+            return {
+                status: "skipped",
+                summary: `promotion target preflight skipped: remote ${remoteName} is not configured`,
+                targetRef,
+                targetBranch,
+                targetWorkspacePath: targetWorktree.worktreePath,
+                targetHead,
+                remoteName,
+                remoteBranch: targetBranch,
+            };
+        }
+        const fetchRefspec = `refs/heads/${targetBranch}:refs/remotes/${remoteName}/${targetBranch}`;
+        try {
+            git(repoRoot, ["fetch", remoteName, fetchRefspec]);
+        }
+        catch (error) {
+            const message = gitErrorMessage(error);
+            return {
+                status: "blocked",
+                summary: `promotion target preflight blocked: failed to fetch remote target branch ${remoteName}/${targetBranch}: ${message}`,
+                targetRef,
+                targetBranch,
+                targetWorkspacePath: targetWorktree.worktreePath,
+                targetHead,
+                remoteName,
+                remoteBranch: targetBranch,
+                error: message,
+            };
+        }
+        const remoteHead = safeGit(repoRoot, ["rev-parse", "--verify", `refs/remotes/${remoteName}/${targetBranch}`]);
+        if (!remoteHead) {
+            return {
+                status: "blocked",
+                summary: `promotion target preflight blocked: cannot resolve remote target branch ${remoteName}/${targetBranch}`,
+                targetRef,
+                targetBranch,
+                targetWorkspacePath: targetWorktree.worktreePath,
+                targetHead,
+                remoteName,
+                remoteBranch: targetBranch,
+            };
+        }
+        if (targetHead === remoteHead) {
+            return {
+                status: "passed",
+                summary: `promotion target preflight passed: target ${targetBranch} is already at remote ${remoteName}/${targetBranch}`,
+                targetRef,
+                targetBranch,
+                targetWorkspacePath: targetWorktree.worktreePath,
+                targetHead,
+                targetRemoteHead: remoteHead,
+                remoteName,
+                remoteBranch: targetBranch,
+            };
+        }
+        if (gitIsAncestor(repoRoot, targetHead, remoteHead)) {
+            return {
+                status: "passed",
+                summary: `promotion target preflight passed: target ${targetBranch} is behind ${remoteName}/${targetBranch}; final promotion will fast-forward before merging`,
+                targetRef,
+                targetBranch,
+                targetWorkspacePath: targetWorktree.worktreePath,
+                targetHead,
+                targetRemoteHead: remoteHead,
+                remoteName,
+                remoteBranch: targetBranch,
+            };
+        }
+        if (gitIsAncestor(repoRoot, remoteHead, targetHead)) {
+            return {
+                status: "blocked",
+                summary: `promotion target preflight blocked: local target ${targetBranch} has unpushed commits; push, reset, or choose a synced target before starting a goal`,
+                targetRef,
+                targetBranch,
+                targetWorkspacePath: targetWorktree.worktreePath,
+                targetHead,
+                targetRemoteHead: remoteHead,
+                remoteName,
+                remoteBranch: targetBranch,
+            };
+        }
+        return {
+            status: "blocked",
+            summary: `promotion target preflight blocked: target ${targetBranch} and ${remoteName}/${targetBranch} have diverged; reconcile before starting a goal`,
+            targetRef,
+            targetBranch,
+            targetWorkspacePath: targetWorktree.worktreePath,
+            targetHead,
+            targetRemoteHead: remoteHead,
+            remoteName,
+            remoteBranch: targetBranch,
+        };
+    }
     normalizePromotionTarget(request, policy) {
         const controllerWorkspacePath = resolve(request.controllerWorkspacePath);
         const repoRoot = findGitRepositoryRoot(controllerWorkspacePath);
