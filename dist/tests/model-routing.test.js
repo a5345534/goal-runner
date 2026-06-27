@@ -107,7 +107,7 @@ test("model class env JSON overrides bundled catalog", () => {
         harness: "pi",
         modelClass: "implementation",
         env: { AGENT_GOAL_MODEL_CLASS_CATALOG_JSON: JSON.stringify(classCatalog) },
-    }), /Model resolution blocked for implementation: binding does not satisfy minimum capabilities/);
+    }), /Model resolution blocked for implementation: (all candidates exhausted|binding does not satisfy minimum capabilities)/);
 });
 test("model binding env file overrides bundled binding catalog", () => {
     const dir = mkdtempSync(join(tmpdir(), "goal-binding-env-"));
@@ -132,7 +132,7 @@ test("model binding env file overrides bundled binding catalog", () => {
             },
         }));
         const parsed = readModelBindingCatalogFromEnvOrBundled("pi", { AGENT_GOAL_MODEL_BINDING_FILE: file });
-        assert.equal(parsed.bindings.implementation?.model, "local/custom-implementation");
+        assert.equal(parsed.bindings.implementation?.candidates[0]?.model, "local/custom-implementation");
         const resolution = resolveGoalModelForHarness({
             harness: "pi",
             modelClass: "implementation",

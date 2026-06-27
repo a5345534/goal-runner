@@ -1,4 +1,4 @@
-import { type GoalModelBindingCatalog, type GoalModelClassCatalog, type GoalModelMinimumRequirements, type GoalModelResolution } from "goal-contract";
+import { type GoalModelBindingCatalog, type GoalModelClassCatalog, type GoalModelMinimumRequirements, type GoalModelNormalizedBindingCatalog, type GoalModelResolution } from "goal-contract";
 export interface GoalModelResolutionRequest {
     harness: string;
     role?: string;
@@ -23,6 +23,6 @@ export declare function buildBlockedGoalModelResolutionEvidence(input: {
     reason: string;
 }): GoalModelResolution;
 export declare function readModelClassCatalogFromEnvOrBundled(env?: NodeJS.ProcessEnv): GoalModelClassCatalog;
-export declare function readModelBindingCatalogFromEnvOrBundled(harness: string, env?: NodeJS.ProcessEnv): GoalModelBindingCatalog;
+export declare function readModelBindingCatalogFromEnvOrBundled(harness: string, env?: NodeJS.ProcessEnv): GoalModelNormalizedBindingCatalog;
 export declare function readBundledModelClassCatalog(): GoalModelClassCatalog;
-export declare function readBundledModelBindingCatalog(harness: string): GoalModelBindingCatalog;
+export declare function readBundledModelBindingCatalog(harness: string): GoalModelNormalizedBindingCatalog;

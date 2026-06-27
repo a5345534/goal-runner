@@ -3,11 +3,16 @@ import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import {
   evaluateGoalModelBindingCompliance,
+  evaluateGoalModelResolutionCandidates,
+  getGoalModelBindingCandidates,
+  normalizeGoalModelBindingCatalog,
   parseGoalModelBindingCatalogJson,
   parseGoalModelClassCatalogJson,
+  type GoalModelBinding,
   type GoalModelBindingCatalog,
   type GoalModelClassCatalog,
   type GoalModelMinimumRequirements,
+  type GoalModelNormalizedBindingCatalog,
   type GoalModelResolution,
 } from "goal-contract";
 
@@ -37,7 +42,10 @@ interface LoadedModelClassCatalog {
 }
 
 interface LoadedModelBindingCatalog {
-  catalog: GoalModelBindingCatalog;
+  /** Raw (v1 or v2) binding catalog used for candidate chain evaluation. */
+  rawCatalog: GoalModelBindingCatalog;
+  /** Normalized binding catalog with uniform `candidates[]` access. */
+  normalizedCatalog: GoalModelNormalizedBindingCatalog;
   source: string;
 }
 
@@ -47,13 +55,18 @@ const bindingCatalogCache = new Map<string, GoalModelBindingCatalog>();
 export function resolveGoalModelForHarness(request: GoalModelResolutionRequest): GoalModelResolutionResult {
   const classCatalog = request.classCatalog ?? loadModelClassCatalogFromEnvOrBundled(request.env).catalog;
   const bindingLoad = request.bindingCatalog
-    ? { catalog: request.bindingCatalog, source: request.bindingSource ?? "provided binding catalog" }
+    ? {
+        rawCatalog: request.bindingCatalog,
+        normalizedCatalog: normalizeGoalModelBindingCatalog(request.bindingCatalog),
+        source: request.bindingSource ?? "provided binding catalog",
+      }
     : loadModelBindingCatalogFromEnvOrBundled(request.harness, request.env);
-  const bindingCatalog = bindingLoad.catalog;
+  const rawCatalog = bindingLoad.rawCatalog;
+  const normalizedCatalog = bindingLoad.normalizedCatalog;
   const expectedHarness = normalizeHarness(request.harness);
-  if (bindingCatalog.harness !== expectedHarness) {
+  if (normalizedCatalog.harness !== expectedHarness) {
     throw new Error(
-      `Model resolution blocked: binding catalog harness ${JSON.stringify(bindingCatalog.harness)} does not match requested harness ${JSON.stringify(expectedHarness)}`,
+      `Model resolution blocked: binding catalog harness ${JSON.stringify(normalizedCatalog.harness)} does not match requested harness ${JSON.stringify(expectedHarness)}`,
     );
   }
 
@@ -61,14 +74,33 @@ export function resolveGoalModelForHarness(request: GoalModelResolutionRequest):
   if (!modelClass) {
     throw new Error(`Model resolution blocked: unknown modelClass ${JSON.stringify(request.modelClass)}`);
   }
-  const binding = bindingCatalog.bindings[request.modelClass];
-  if (!binding) {
-    throw new Error(`Model resolution blocked: no ${bindingCatalog.harness} binding for modelClass ${JSON.stringify(request.modelClass)}`);
+
+  const rawBinding: GoalModelBinding | undefined = rawCatalog.bindings[request.modelClass];
+  if (!rawBinding) {
+    throw new Error(`Model resolution blocked: no ${normalizedCatalog.harness} binding for modelClass ${JSON.stringify(request.modelClass)}`);
   }
-  const compliance = evaluateGoalModelBindingCompliance(modelClass, binding);
+
+  const normalizedBinding = normalizedCatalog.bindings[request.modelClass]!;
+  const firstCandidate = normalizedBinding.candidates[0]!;
+
+  // Evaluate candidate chain using the contract's first-match-wins fallback logic
+  const candidateEvaluation = evaluateGoalModelResolutionCandidates(modelClass, rawBinding);
+  const resolvedIndex = candidateEvaluation.resolvedCandidateIndex;
+  const resolved = resolvedIndex !== undefined ? normalizedBinding.candidates[resolvedIndex] : firstCandidate;
+
+  // Determine the final compliance status from the resolved candidate
+  const resolvedCompliance = resolvedIndex !== undefined
+    ? candidateEvaluation.attemptedCandidates[resolvedIndex]!.compliance
+    : candidateEvaluation.attemptedCandidates[0]?.compliance ?? { satisfiesMinimum: false, downgraded: false, missingCapabilities: [] };
+
+  const status: GoalModelResolution["status"] =
+    resolvedIndex !== undefined
+      ? (resolvedCompliance.satisfiesMinimum ? "resolved" : "warn")
+      : "blocked";
+
   const evidence: GoalModelResolution = {
     schemaVersion: "1.0",
-    harness: bindingCatalog.harness,
+    harness: normalizedCatalog.harness,
     requested: {
       ...(request.role ? { role: request.role } : {}),
       ...(request.modelScenario ? { modelScenario: request.modelScenario } : {}),
@@ -76,24 +108,45 @@ export function resolveGoalModelForHarness(request: GoalModelResolutionRequest):
       minimumRequirements: { ...modelClass.minimumRequirements },
     },
     resolved: {
-      model: binding.model,
+      model: resolved.model,
       bindingSource: request.bindingSource ?? bindingLoad.source,
+      ...(resolvedIndex !== undefined ? { candidateIndex: resolvedIndex } : {}),
     },
     compliance: {
-      satisfiesMinimum: compliance.satisfiesMinimum,
-      downgraded: compliance.downgraded,
-      missingCapabilities: [...compliance.missingCapabilities],
+      satisfiesMinimum: resolvedCompliance.satisfiesMinimum,
+      downgraded: resolvedCompliance.downgraded,
+      missingCapabilities: [...resolvedCompliance.missingCapabilities],
     },
-    status: compliance.status,
-    ...(compliance.status === "resolved"
-      ? {}
-      : { reason: `binding does not satisfy minimum capabilities: ${compliance.missingCapabilities.join(", ") || "unknown"}` }),
+    attemptedCandidates: candidateEvaluation.attemptedCandidates.length > 0
+      ? candidateEvaluation.attemptedCandidates
+      : undefined,
+    switchEvents: candidateEvaluation.switchEvents.length > 0
+      ? candidateEvaluation.switchEvents
+      : undefined,
+    exhaustedChain: candidateEvaluation.exhaustedChain || undefined,
+    status,
+    ...(status === "resolved" ? {} : { reason: buildBlockedReason(candidateEvaluation) }),
   };
 
   if (evidence.status === "blocked") {
-    throw new Error(`Model resolution blocked for ${request.modelClass}: ${evidence.reason ?? "binding is under-capable"}`);
+    throw new Error(`Model resolution blocked for ${request.modelClass}: ${evidence.reason ?? "no eligible candidate"}`);
   }
-  return { modelArg: binding.model, evidence };
+
+  return { modelArg: resolved.model, evidence };
+}
+
+function buildBlockedReason(candidateEvaluation: {
+  attemptedCandidates: Array<{ compliance: { missingCapabilities: string[] }; status: string; reason?: string }>;
+  exhaustedChain: boolean;
+}): string {
+  if (candidateEvaluation.exhaustedChain) {
+    return `all candidates exhausted: ${candidateEvaluation.attemptedCandidates.map((a) => a.reason ?? a.status).join("; ")}`;
+  }
+  const lastAttempt = candidateEvaluation.attemptedCandidates[candidateEvaluation.attemptedCandidates.length - 1];
+  if (lastAttempt) {
+    return `binding does not satisfy minimum capabilities: ${lastAttempt.compliance.missingCapabilities.join(", ") || "unknown"}`;
+  }
+  return "no eligible candidate";
 }
 
 export function buildBlockedGoalModelResolutionEvidence(input: {
@@ -130,8 +183,8 @@ export function readModelClassCatalogFromEnvOrBundled(env: NodeJS.ProcessEnv = p
 export function readModelBindingCatalogFromEnvOrBundled(
   harness: string,
   env: NodeJS.ProcessEnv = process.env,
-): GoalModelBindingCatalog {
-  return loadModelBindingCatalogFromEnvOrBundled(harness, env).catalog;
+): GoalModelNormalizedBindingCatalog {
+  return loadModelBindingCatalogFromEnvOrBundled(harness, env).normalizedCatalog;
 }
 
 export function readBundledModelClassCatalog(): GoalModelClassCatalog {
@@ -143,11 +196,13 @@ export function readBundledModelClassCatalog(): GoalModelClassCatalog {
   return catalog;
 }
 
-export function readBundledModelBindingCatalog(harness: string): GoalModelBindingCatalog {
+export function readBundledModelBindingCatalog(harness: string): GoalModelNormalizedBindingCatalog {
   const normalizedHarness = normalizeHarness(harness);
   const specifier = `goal-runner/catalogs/bindings/${normalizedHarness}.json`;
   const cached = bindingCatalogCache.get(specifier);
-  if (cached) return cached;
+  if (cached) {
+    return normalizeGoalModelBindingCatalog(cached);
+  }
   let resolved: string;
   try {
     resolved = require.resolve(specifier);
@@ -158,7 +213,7 @@ export function readBundledModelBindingCatalog(harness: string): GoalModelBindin
   }
   const catalog = parseGoalModelBindingCatalogJson(readFileSync(resolved, "utf8"), specifier);
   bindingCatalogCache.set(specifier, catalog);
-  return catalog;
+  return normalizeGoalModelBindingCatalog(catalog);
 }
 
 function loadModelClassCatalogFromEnvOrBundled(env: NodeJS.ProcessEnv | undefined): LoadedModelClassCatalog {
@@ -193,22 +248,54 @@ function loadModelBindingCatalogFromEnvOrBundled(
       throw new Error(`Model resolution blocked: AGENT_GOAL_MODEL_BINDING_FILE not found: ${resolved}`);
     }
     const source = `AGENT_GOAL_MODEL_BINDING_FILE:${resolved}`;
-    const catalog = parseGoalModelBindingCatalogJson(readFileSync(resolved, "utf8"), source);
-    return { catalog: assertBindingCatalogHarness(catalog, normalizedHarness, source), source };
+    const rawCatalog = parseGoalModelBindingCatalogJson(readFileSync(resolved, "utf8"), source);
+    return {
+      rawCatalog: assertBindingCatalogHarness(rawCatalog, normalizedHarness, source),
+      normalizedCatalog: normalizeGoalModelBindingCatalog(rawCatalog),
+      source,
+    };
   }
 
   const bindingJson = env?.AGENT_GOAL_MODEL_BINDING_JSON;
   if (bindingJson?.trim()) {
     const source = "AGENT_GOAL_MODEL_BINDING_JSON";
-    const catalog = parseGoalModelBindingCatalogJson(bindingJson, source);
-    return { catalog: assertBindingCatalogHarness(catalog, normalizedHarness, source), source };
+    const rawCatalog = parseGoalModelBindingCatalogJson(bindingJson, source);
+    return {
+      rawCatalog: assertBindingCatalogHarness(rawCatalog, normalizedHarness, source),
+      normalizedCatalog: normalizeGoalModelBindingCatalog(rawCatalog),
+      source,
+    };
   }
 
   const source = `goal-runner/catalogs/bindings/${normalizedHarness}.json`;
+  const rawCatalog = assertBindingCatalogHarness(
+    loadRawBundledModelBindingCatalog(normalizedHarness),
+    normalizedHarness,
+    source,
+  );
   return {
-    catalog: assertBindingCatalogHarness(readBundledModelBindingCatalog(normalizedHarness), normalizedHarness, source),
+    rawCatalog,
+    normalizedCatalog: normalizeGoalModelBindingCatalog(rawCatalog),
     source,
   };
+}
+
+function loadRawBundledModelBindingCatalog(harness: string): GoalModelBindingCatalog {
+  const normalizedHarness = normalizeHarness(harness);
+  const specifier = `goal-runner/catalogs/bindings/${normalizedHarness}.json`;
+  const cached = bindingCatalogCache.get(specifier);
+  if (cached) return cached;
+  let resolved: string;
+  try {
+    resolved = require.resolve(specifier);
+  } catch (error) {
+    throw new Error(
+      `Model resolution blocked: no bundled binding catalog for harness ${JSON.stringify(normalizedHarness)} (${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
+  const catalog = parseGoalModelBindingCatalogJson(readFileSync(resolved, "utf8"), specifier);
+  bindingCatalogCache.set(specifier, catalog);
+  return catalog;
 }
 
 function assertBindingCatalogHarness(
