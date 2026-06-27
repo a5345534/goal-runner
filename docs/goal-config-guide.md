@@ -115,19 +115,19 @@ define a fallback list of models for the `implementation` model class:
 }
 ```
 
-When the first candidate (`gemini/gemini-2.5-pro`) fails with a switchable error
-(e.g., context-exceeded), the resolution logic falls through to the next
-candidate.  If all candidates are exhausted, the node is blocked with the
-`exhaustedChain` flag.
+When the active candidate (`gemini/gemini-2.5-pro`) fails with a switchable
+runtime error (for example, context-exceeded), the controller retries it up to
+`attemptsPerCandidate` and then starts a replacement attempt with the next
+eligible candidate. If all candidates are exhausted, the node is blocked with
+the `exhaustedChain` flag.
 
 The monitor UI shows this fallback history:
 
-- **Execution Plan model column** — a compact suffix like `[fb:2]` (2 attempts),
-  `[fb:2,s1]` (2 attempts, 1 switch), or `[fb:!]` (chain exhausted) is appended
-  to the active model name.
+- **Execution Plan model column** — a compact suffix like `[fb:s1]` (1 runtime
+  switch), `[fb:!]` (chain exhausted), or `[fb:2,s1]` for legacy/diagnostic
+  evidence that includes multiple actual resolution attempts plus one switch.
 - **Runner live pane** — detail lines under a `── Resolution ──` header list the
-  full candidate chain (`✓candidate → ✕failed`) and any switch events with
-  reasons.
+  full candidate plan and any switch events with reasons.
 
 ## Related
 
