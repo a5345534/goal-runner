@@ -72,16 +72,44 @@ define a fallback list of models for the `implementation` model class:
   "bindings": {
     "implementation": {
       "candidates": [
-        { "model": "gemini/gemini-2.5-pro", "retryPolicy": { "maxRetries": 1 } },
-        { "model": "deepseek/deepseek-v4-flash", "retryPolicy": { "maxRetries": 2 } },
-        { "model": "openai-codex/gpt-5.3-codex-spark" }
+        {
+          "model": "gemini/gemini-2.5-pro",
+          "declaredCapabilities": {
+            "reasoning": "high",
+            "contextWindowTokens": 1000000,
+            "toolUse": "required",
+            "structuredOutput": "preferred",
+            "formatFollowing": "high",
+            "sourceCitation": "preferred",
+            "privacy": "cloud-ok"
+          }
+        },
+        {
+          "model": "deepseek/deepseek-v4-flash",
+          "declaredCapabilities": {
+            "reasoning": "high",
+            "contextWindowTokens": 1000000,
+            "toolUse": "required",
+            "structuredOutput": "preferred",
+            "formatFollowing": "high",
+            "sourceCitation": "preferred",
+            "privacy": "cloud-ok"
+          }
+        },
+        {
+          "model": "openai-codex/gpt-5.3-codex-spark",
+          "declaredCapabilities": {
+            "reasoning": "medium",
+            "contextWindowTokens": 128000,
+            "toolUse": "required",
+            "structuredOutput": "preferred",
+            "formatFollowing": "high",
+            "sourceCitation": "preferred",
+            "privacy": "cloud-ok"
+          }
+        }
       ],
-      "declaredCapabilities": {
-        "reasoning": "high",
-        "contextWindowTokens": 1000000,
-        "toolUse": "required",
-        "structuredOutput": "preferred"
-      }
+      "retryPolicy": { "attemptsPerCandidate": 2 }
     }
   }
 }

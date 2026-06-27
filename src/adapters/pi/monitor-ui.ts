@@ -1331,14 +1331,20 @@ function renderResolutionEvidenceLines(node: GoalDagNode): string[] {
 
   const lines: string[] = [];
 
-  // Show attempted candidates chain
-  const attempts = resolution.attemptedCandidates;
-  if (attempts && attempts.length > 1) {
-    const chain = attempts.map((a) => {
-      const label = a.status === "succeeded" ? "✓" : a.status === "failed" ? "✕" : a.status === "skipped" ? "—" : "?";
-      return `${label}${a.model}`;
-    }).join(" → ");
-    lines.push(`Resolution chain: ${chain}`);
+  // Show full candidate plan when available; fall back to attempted candidates
+  const plan = resolution.candidatePlan;
+  if (plan && plan.length > 1) {
+    const chain = plan.map((candidate) => `${candidate.eligible ? "✓" : "—"}${candidate.model}`).join(" → ");
+    lines.push(`Candidate plan: ${chain}`);
+  } else {
+    const attempts = resolution.attemptedCandidates;
+    if (attempts && attempts.length > 1) {
+      const chain = attempts.map((a) => {
+        const label = a.status === "succeeded" ? "✓" : a.status === "failed" ? "✕" : a.status === "skipped" ? "—" : "?";
+        return `${label}${a.model}`;
+      }).join(" → ");
+      lines.push(`Resolution chain: ${chain}`);
+    }
   }
 
   // Show switch events

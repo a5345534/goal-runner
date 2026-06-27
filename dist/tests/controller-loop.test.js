@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { GoalRuntime, MemoryGoalStore, createDefaultControllerExceptionHandler, } from "../core/index.js";
+import { GoalRuntime, MemoryGoalStore, createDefaultControllerExceptionHandler, resolveGoalModelForHarness, } from "../core/index.js";
 const now = "2026-06-02T00:00:00.000Z";
 class FakeSubagentAdapter {
     adapterId = "fake";
@@ -1426,6 +1426,13 @@ function candidateChain(attemptedCandidates, retryPolicyAttempts) {
             compliance: { satisfiesMinimum: true, downgraded: false, missingCapabilities: [] },
             status: c.status,
         })),
+        candidatePlan: attemptedCandidates.map((c, i) => ({
+            candidateIndex: i,
+            model: c.model,
+            compliance: { satisfiesMinimum: true, downgraded: false, missingCapabilities: [] },
+            eligible: true,
+        })),
+        ...(retryPolicyAttempts ? { retryPolicy: { attemptsPerCandidate: retryPolicyAttempts } } : {}),
         resolved: { model: attemptedCandidates[0]?.model ?? "model-a", bindingSource: "test", candidateIndex: 0 },
     };
 }
@@ -1516,6 +1523,94 @@ test("candidate fallback: switches to next candidate after context-exceeded on f
     const startRequest = adapter.starts[0];
     assert.match(startRequest?.initialPrompt ?? "", /CANDIDATE_SWITCH/);
     assert.match(startRequest?.initialPrompt ?? "", /model-b/);
+});
+test("candidate fallback: switches using resolver-produced candidatePlan", async () => {
+    const bindingCatalog = {
+        version: 2,
+        harness: "pi",
+        bindings: {
+            implementation: {
+                candidates: [
+                    { model: "model-a", declaredCapabilities: { reasoning: "high" } },
+                    { model: "model-b", declaredCapabilities: { reasoning: "high" } },
+                ],
+                retryPolicy: { attemptsPerCandidate: 1 },
+            },
+        },
+    };
+    const classCatalog = {
+        version: 1,
+        modelClasses: {
+            implementation: {
+                minimumRequirements: { reasoning: "high" },
+                fallbackPolicy: { allowDowngrade: false, onUnavailable: "block" },
+            },
+        },
+    };
+    const resolution = resolveGoalModelForHarness({
+        harness: "pi",
+        modelClass: "implementation",
+        classCatalog,
+        bindingCatalog,
+        bindingSource: "resolver-plan-test",
+    });
+    assert.equal(resolution.evidence.attemptedCandidates?.length, 1);
+    assert.equal(resolution.evidence.candidatePlan?.length, 2);
+    const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", modelArg: resolution.modelArg }]);
+    const node = await runtime.getGoalDagNode("goal-1", "build");
+    await runtime.saveGoalDagNode({
+        ...node,
+        status: "failed",
+        updatedAt: now,
+        lastValidationSummary: "context_length_exceeded",
+        modelResolution: resolution.evidence,
+        preparedResources: {
+            subagentId: "subagent-1",
+            adapterId: "fake",
+            workspacePath: "/repo/.worktrees/build",
+            metadata: { activeCandidateIndex: 0, candidateRetryCount: 0 },
+        },
+    });
+    await runtime.saveGoalSubagent(subagent({
+        status: "failed",
+        integrationStatus: "context_length_exceeded",
+        workspacePath: "/repo/.worktrees/build",
+        retryCount: 1,
+    }));
+    const adapter = new FakeSubagentAdapter();
+    const tick = await runtime.runGoalControllerTick("goal-1", { adapter, maxAutoRetries: 2 });
+    assert.equal(tick.started.length, 1);
+    assert.match(adapter.starts[0]?.initialPrompt ?? "", /CANDIDATE_SWITCH/);
+    assert.match(adapter.starts[0]?.initialPrompt ?? "", /model-b/);
+});
+test("candidate fallback: retryPolicy from resolver evidence controls same-candidate retry", async () => {
+    const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", modelArg: "model-a" }]);
+    const node = await runtime.getGoalDagNode("goal-1", "build");
+    await runtime.saveGoalDagNode({
+        ...node,
+        status: "failed",
+        updatedAt: now,
+        lastValidationSummary: "context_length_exceeded",
+        modelResolution: candidateChain([{ model: "model-a", status: "succeeded" }, { model: "model-b", status: "succeeded" }], 3),
+        preparedResources: {
+            subagentId: "subagent-1",
+            adapterId: "fake",
+            workspacePath: "/repo/.worktrees/build",
+            metadata: { activeCandidateIndex: 0, candidateRetryCount: 0 },
+        },
+    });
+    await runtime.saveGoalSubagent(subagent({
+        status: "failed",
+        integrationStatus: "context_length_exceeded",
+        workspacePath: "/repo/.worktrees/build",
+        retryCount: 1,
+    }));
+    const adapter = new FakeSubagentAdapter();
+    const tick = await runtime.runGoalControllerTick("goal-1", { adapter, maxAutoRetries: 2 });
+    assert.equal(tick.started.length, 0);
+    assert.equal(tick.followups.length, 1);
+    assert.equal(adapter.prompts.length, 1);
+    assert.match(adapter.prompts[0]?.prompt ?? "", /candidate retry 1\/3/i);
 });
 test("candidate fallback: retries same candidate when attemptsPerCandidate > 1", async () => {
     const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature", modelArg: "model-a" }]);

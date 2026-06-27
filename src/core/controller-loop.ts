@@ -3161,36 +3161,41 @@ function getCandidateRetryCount(node: GoalDagNode): number {
 function getAttemptsPerCandidate(node: GoalDagNode): number {
   const value = node.preparedResources?.metadata?.attemptsPerCandidate;
   if (typeof value === "number" && Number.isFinite(value) && value > 0) return Math.floor(value);
+  const configured = (node.modelResolution ?? node.preparedResources?.modelResolution)?.retryPolicy?.attemptsPerCandidate;
+  if (typeof configured === "number" && Number.isFinite(configured) && configured > 0) return Math.floor(configured);
   return 1;
 }
 
-/**
- * Returns true when the node's model resolution has a candidate chain
- * with more than one candidate, enabling candidate switching.
- */
-function hasCandidateChain(node: GoalDagNode): boolean {
+function candidatePlanEntries(node: GoalDagNode): Array<{ candidateIndex: number; model: string; eligible?: boolean }> {
   const resolution = node.modelResolution ?? node.preparedResources?.modelResolution;
-  return Boolean(resolution?.attemptedCandidates && resolution.attemptedCandidates.length > 1);
+  if (resolution?.candidatePlan?.length) return resolution.candidatePlan;
+  return resolution?.attemptedCandidates ?? [];
 }
 
 /**
- * Returns the next candidate index after the current one, or undefined
+ * Returns true when the node's model resolution has an eligible next candidate,
+ * enabling candidate switching after runtime model-switchable failures.
+ */
+function hasCandidateChain(node: GoalDagNode): boolean {
+  return candidatePlanEntries(node).filter((entry) => entry.eligible !== false).length > 1;
+}
+
+/**
+ * Returns the next eligible candidate index after the current one, or undefined
  * when the chain is exhausted.
  */
 function getNextCandidateIndex(node: GoalDagNode): number | undefined {
-  const resolution = node.modelResolution ?? node.preparedResources?.modelResolution;
-  if (!resolution?.attemptedCandidates || resolution.attemptedCandidates.length <= 1) return undefined;
   const current = getActiveCandidateIndex(node);
-  const next = current + 1;
-  return next < resolution.attemptedCandidates.length ? next : undefined;
+  return candidatePlanEntries(node)
+    .filter((entry) => entry.candidateIndex > current && entry.eligible !== false)
+    .sort((left, right) => left.candidateIndex - right.candidateIndex)[0]?.candidateIndex;
 }
 
 /**
  * Returns the concrete model id for a given candidate index in the chain.
  */
 function getCandidateModelForIndex(node: GoalDagNode, index: number): string | undefined {
-  const resolution = node.modelResolution ?? node.preparedResources?.modelResolution;
-  return resolution?.attemptedCandidates?.[index]?.model;
+  return candidatePlanEntries(node).find((entry) => entry.candidateIndex === index)?.model;
 }
 
 /**
@@ -3391,10 +3396,12 @@ async function tryCandidateSwitchForModelFailure(
 
   // Prepare resources with the new candidate's modelArg
   const replacementSubagentId = uniqueReplacementSubagentId(state.subagents, subagent.subagentId, retryCount + 1);
+  const switchedResolution = withRuntimeCandidateSwitchEvidence(node, candidateIndex, candidateModel, nextIndex, nextModel, errorMessage);
   const reuseResources = recoveryPreparedResources(node, subagent, tickStartedAt, {
     subagentId: replacementSubagentId,
     clearSession: true,
     modelArg: nextModel,
+    modelResolution: switchedResolution,
     metadata: {
       candidateSwitchFrom: candidateIndex,
       candidateSwitchTo: nextIndex,
@@ -3487,8 +3494,10 @@ async function tryCandidateSwitchForModelFailure(
   const switchedNode = withUpdatedCandidateState(node, nextIndex, 0, nextModel, tickStartedAt);
   const patchedSwitchedNode = {
     ...switchedNode,
+    modelResolution: switchedResolution ?? switchedNode.modelResolution,
     preparedResources: {
       ...switchedNode.preparedResources!,
+      modelResolution: switchedResolution ?? switchedNode.preparedResources?.modelResolution,
       sessionId: replacement.sessionId ?? switchedNode.preparedResources?.sessionId,
       sessionFile: replacement.sessionFile ?? switchedNode.preparedResources?.sessionFile,
       workspacePath: replacement.workspacePath ?? switchedNode.preparedResources?.workspacePath,
@@ -3516,6 +3525,37 @@ async function tryCandidateSwitchForModelFailure(
 
   result.started.push(replacement);
   return true;
+}
+
+function withRuntimeCandidateSwitchEvidence(
+  node: GoalDagNode,
+  fromCandidateIndex: number,
+  fromModel: string,
+  toCandidateIndex: number,
+  toModel: string,
+  reason: string,
+): GoalDagNode["modelResolution"] | undefined {
+  const resolution = node.modelResolution ?? node.preparedResources?.modelResolution;
+  if (!resolution) return undefined;
+  return {
+    ...resolution,
+    resolved: {
+      ...(resolution.resolved ?? { model: toModel }),
+      model: toModel,
+      candidateIndex: toCandidateIndex,
+    },
+    switchEvents: [
+      ...(resolution.switchEvents ?? []),
+      {
+        fromCandidateIndex,
+        fromModel,
+        toCandidateIndex,
+        toModel,
+        reason: `runtime_model_switchable_failure: ${truncateForPrompt(reason, 200)}`,
+      },
+    ],
+    exhaustedChain: undefined,
+  };
 }
 
 /**

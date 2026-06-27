@@ -131,6 +131,30 @@ test("resolver candidate order follows first-match-wins from attemptedCandidates
   assert.equal(result.evidence.attemptedCandidates[0]?.candidateIndex, 0);
   assert.equal(result.evidence.attemptedCandidates[0]?.model, "openai-codex/gpt-5.3-codex-context");
   assert.equal(result.evidence.attemptedCandidates[0]?.compliance.satisfiesMinimum, true);
+  assert.equal(result.evidence.candidatePlan?.length, 2);
+  assert.equal(result.evidence.candidatePlan?.[0]?.model, "openai-codex/gpt-5.3-codex-context");
+  assert.equal(result.evidence.candidatePlan?.[1]?.model, "openai-codex/gpt-5.3-codex-spark");
+});
+
+test("resolver preserves retryPolicy on resolution evidence", () => {
+  const binding: GoalModelBindingCatalog = {
+    version: 2,
+    harness: "pi",
+    bindings: {
+      implementation: {
+        candidates: [
+          { model: "model-a", declaredCapabilities: { reasoning: "high" } },
+          { model: "model-b", declaredCapabilities: { reasoning: "high" } },
+        ],
+        retryPolicy: { attemptsPerCandidate: 3 },
+      },
+    },
+  };
+  const result = resolveGoalModelForHarness(
+    request({ bindingCatalog: binding, bindingSource: "retry-policy-test" }),
+  );
+  assert.equal(result.evidence.retryPolicy?.attemptsPerCandidate, 3);
+  assert.equal(result.evidence.candidatePlan?.length, 2);
 });
 
 test("resolver reports candidate index 1 when first candidate fails minimum", () => {

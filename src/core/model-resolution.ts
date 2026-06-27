@@ -123,6 +123,10 @@ export function resolveGoalModelForHarness(request: GoalModelResolutionRequest):
     switchEvents: candidateEvaluation.switchEvents.length > 0
       ? candidateEvaluation.switchEvents
       : undefined,
+    candidatePlan: candidateEvaluation.candidatePlan.length > 0
+      ? candidateEvaluation.candidatePlan
+      : undefined,
+    retryPolicy: candidateEvaluation.retryPolicy,
     exhaustedChain: candidateEvaluation.exhaustedChain || undefined,
     status,
     ...(status === "resolved" ? {} : { reason: buildBlockedReason(candidateEvaluation) }),

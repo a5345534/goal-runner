@@ -677,6 +677,7 @@ function buildPiGoalControllerLoopOptions(ctx, goal, binding, modelRouting = rea
                     modelClass: selection.modelClass,
                     modelResolution: resolution.evidence,
                     modelScenarioReason: selection.reason,
+                    ...(resolution.evidence.retryPolicy?.attemptsPerCandidate ? { attemptsPerCandidate: resolution.evidence.retryPolicy.attemptsPerCandidate } : {}),
                     thinkingLevel: request.node.thinkingLevel ?? fallbackThinkingLevel,
                 },
             };
