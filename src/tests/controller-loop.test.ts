@@ -690,6 +690,42 @@ test("controller safety net blocks downstream when upstream integration fails", 
   assert.equal(savedSubagent?.integrationState, "failed");
 });
 
+test("controller blocks idle subagents with failed integration instead of leaving stale running nodes", async () => {
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
+  const original = await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode;
+  await runtime.saveGoalDagNode({
+    ...original,
+    status: "running",
+    lifecyclePhase: "runnerActive",
+    lastValidationSummary: "integration follow-up required: post-merge validation failed",
+    updatedAt: now,
+  });
+  await runtime.saveGoalSubagent(subagent({
+    status: "idle",
+    workspacePath: "/repo/.worktrees/build",
+    branch: "feat/build",
+    integrationState: "failed",
+    integrationStatus: "post-merge validation failed",
+  }));
+  const adapter = new FakeSubagentAdapter();
+  adapter.states.set("subagent-1", { status: "idle", lastActivityAt: now, error: "post-merge validation failed" });
+
+  const tick = await runtime.runGoalControllerTick("goal-1", {
+    adapter,
+    workspaceAllocator: ({ node }) => ({ subagentId: `subagent-${node.nodeId}`, cwd: `/repo/.worktrees/${node.slug}`, branch: `feat/${node.slug}` }),
+  });
+
+  assert.equal(tick.blocked.length, 1);
+  const savedNode = await runtime.getGoalDagNode("goal-1", "build");
+  assert.equal(savedNode?.status, "blocked");
+  assert.equal(savedNode?.lifecyclePhase, "terminal");
+  assert.match(savedNode?.lastValidationSummary ?? "", /integration failed while subagent is idle/);
+  assert.match(savedNode?.lastValidationSummary ?? "", /post-merge validation failed/);
+  const savedSubagent = await runtime.getGoalSubagent("goal-1", "subagent-1");
+  assert.equal(savedSubagent?.status, "blocked");
+  assert.equal(savedSubagent?.integrationState, "failed");
+});
+
 test("controller propagates terminal dependency blockers to downstream planned nodes", async () => {
   const { runtime } = await runtimeWithPlan([
     { nodeId: "build", objective: "Build feature" },

@@ -44,6 +44,17 @@ function commitSubmoduleChange(parent: string, submodule: string, relativePath: 
   execFileSync("git", ["commit", "-m", "bump aos-core"], { cwd: parent, stdio: "ignore" });
 }
 
+function withFileProtocolAllowed<T>(fn: () => T): T {
+  const previous = process.env.GIT_ALLOW_PROTOCOL;
+  process.env.GIT_ALLOW_PROTOCOL = previous ? `${previous}:file` : "file";
+  try {
+    return fn();
+  } finally {
+    if (previous === undefined) delete process.env.GIT_ALLOW_PROTOCOL;
+    else process.env.GIT_ALLOW_PROTOCOL = previous;
+  }
+}
+
 function request(overrides: Partial<GoalControllerValidationRequest> = {}): GoalControllerValidationRequest {
   return {
     goalId: "goal-1",
@@ -75,6 +86,20 @@ function request(overrides: Partial<GoalControllerValidationRequest> = {}): Goal
     ...overrides,
   };
 }
+
+test("controller validation initializes Git submodules before validators", () => withFileProtocolAllowed(() => {
+  const { parent, submodule } = initSubmoduleValidationWorkspace("goal-validation-submodules-");
+  rmSync(submodule, { recursive: true, force: true });
+  const base = request();
+
+  const result = runControllerValidation(request({
+    node: { ...base.node, validators: ["test -f aos-core/README.md"] },
+    subagent: { ...base.subagent, workspacePath: parent },
+  }));
+
+  assert.equal(result.status, "passed");
+  assert.match(result.validationSignals?.join("\n") ?? "", /submodule initialization passed before controller validation/);
+}));
 
 test("controller validation runner fails skipped validators when explicitly disabled", () => {
   const dir = mkdtempSync(join(tmpdir(), "goal-validation-"));
@@ -455,8 +480,8 @@ test("controller validation runner fails closed when changed submodule gitlink d
     );
 
     assert.equal(result.status, "failed");
-    assert.match(result.summary ?? "", /changed submodule gitlink aos-core cannot be validated/);
-    assert.match(result.summary ?? "", /missing commit\(s\)|not initialized/);
+    assert.match(result.summary ?? "", /workspace preparation failed/);
+    assert.match(result.summary ?? "", /submodule initialization failed before controller validation/);
   } finally {
     rmSync(dirname(parent), { recursive: true, force: true });
   }

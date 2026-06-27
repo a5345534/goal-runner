@@ -31,6 +31,8 @@ export interface ControllerValidationArtifactLockResult {
 }
 
 export interface ControllerValidationRunResult {
+  workspacePreparationSignals: string[];
+  workspacePreparationFailures: string[];
   missingOutputs: string[];
   skippedValidators: string[];
   commandResults: ControllerValidationCommandResult[];
@@ -78,20 +80,23 @@ export function runControllerValidation(
     };
   }
 
+  const workspacePreparation = prepareValidationWorkspace(request.subagent.workspacePath);
   const result: ControllerValidationRunResult = {
-    missingOutputs: expectedOutputsMissing(request),
+    workspacePreparationSignals: workspacePreparation.validationSignals,
+    workspacePreparationFailures: workspacePreparation.ok ? [] : [workspacePreparation.summary],
+    missingOutputs: workspacePreparation.ok ? expectedOutputsMissing(request) : [],
     skippedValidators: [],
     commandResults: [],
-    artifactLockResults: checkArtifactLocks(request),
+    artifactLockResults: workspacePreparation.ok ? checkArtifactLocks(request) : [],
     satisfiedEvidence: [],
     missingEvidence: [],
-    policyFailures: [...highRiskValidationPolicyFailures(request), ...scopePolicyFailures(request)],
+    policyFailures: [...highRiskValidationPolicyFailures(request), ...(workspacePreparation.ok ? scopePolicyFailures(request) : [])],
   };
 
   const executeValidators = options.executeValidators !== false;
-  if (executeValidators) {
+  if (workspacePreparation.ok && executeValidators) {
     result.commandResults = request.node.validators.map((command) => runValidatorCommand(command, request.subagent.workspacePath, options));
-  } else {
+  } else if (workspacePreparation.ok) {
     result.skippedValidators = [...request.node.validators];
   }
 
@@ -104,6 +109,7 @@ export function runControllerValidation(
   const validationSignals = buildValidationSignals(request, result);
   const skippedValidatorsBlockPass = result.skippedValidators.length > 0;
   const ok =
+    result.workspacePreparationFailures.length === 0 &&
     result.missingOutputs.length === 0 &&
     failedCommands.length === 0 &&
     failedLocks.length === 0 &&
@@ -119,6 +125,7 @@ export function runControllerValidation(
   }
 
   const summaryParts = [
+    result.workspacePreparationFailures.length ? `workspace preparation failed: ${result.workspacePreparationFailures.join(", ")}` : undefined,
     result.missingOutputs.length ? `missing outputs: ${result.missingOutputs.join(", ")}` : undefined,
     failedCommands.length ? `failed validators: ${failedCommands.map((item) => item.command).join(", ")}` : undefined,
     failedLocks.length ? `artifact locks changed or missing: ${failedLocks.map((item) => item.path).join(", ")}` : undefined,
@@ -132,6 +139,67 @@ export function runControllerValidation(
     validationSignals,
     followupPrompt: options.renderFollowupPrompt?.(request, result) ?? defaultFollowupPrompt(request, result),
   };
+}
+
+interface ValidationWorkspacePreparationResult {
+  ok: boolean;
+  summary: string;
+  validationSignals: string[];
+}
+
+function prepareValidationWorkspace(workspacePath: string | undefined): ValidationWorkspacePreparationResult {
+  if (!workspacePath || !existsSync(resolve(workspacePath, ".gitmodules"))) {
+    return { ok: true, summary: "", validationSignals: [] };
+  }
+
+  const beforeSubmoduleStatus = safeExec("git", ["submodule", "status", "--recursive"], workspacePath);
+  const sync = safeExecResult("git", ["submodule", "sync", "--recursive"], workspacePath);
+  if (!sync.ok) {
+    const summary = `submodule sync failed before controller validation: ${sync.error ?? "unknown error"}`;
+    return { ok: false, summary, validationSignals: [summary] };
+  }
+
+  const update = safeExecResult("git", ["submodule", "update", "--init", "--recursive"], workspacePath);
+  if (!update.ok) {
+    const summary = `submodule initialization failed before controller validation: ${update.error ?? "unknown error"}`;
+    return { ok: false, summary, validationSignals: [summary] };
+  }
+
+  const afterSubmoduleStatus = safeExec("git", ["submodule", "status", "--recursive"], workspacePath);
+  if (!beforeSubmoduleStatus.trim() && !afterSubmoduleStatus.trim()) {
+    return { ok: true, summary: "", validationSignals: [] };
+  }
+
+  const remaining = [
+    ...validationSubmodulePathsWithPrefix(afterSubmoduleStatus, "-"),
+    ...validationSubmodulePathsWithPrefix(afterSubmoduleStatus, "+"),
+  ];
+  if (remaining.length > 0) {
+    const summary = `submodule initialization incomplete before controller validation: ${[...new Set(remaining)].sort().join(", ")} still differs from recorded gitlinks`;
+    return { ok: false, summary, validationSignals: [summary] };
+  }
+
+  const initialized = validationSubmodulePathsWithPrefix(beforeSubmoduleStatus, "-");
+  const updated = validationSubmodulePathsWithPrefix(beforeSubmoduleStatus, "+");
+  const details = [
+    initialized.length ? `initialized ${initialized.join(", ")}` : undefined,
+    updated.length ? `updated ${updated.join(", ")}` : undefined,
+  ].filter((part): part is string => Boolean(part)).join("; ");
+  const summary = details
+    ? `submodule initialization passed before controller validation: ${details}`
+    : "submodule initialization passed before controller validation";
+  return { ok: true, summary, validationSignals: [summary] };
+}
+
+function validationSubmodulePathsWithPrefix(statusOutput: string, prefix: string): string[] {
+  const paths: string[] = [];
+  for (const line of statusOutput.split(/\r?\n/)) {
+    if (!line.trim() || line[0] !== prefix) continue;
+    const match = line.slice(1).trim().match(/^[0-9a-fA-F]+\s+(\S+)/);
+    const submodulePath = match?.[1];
+    if (submodulePath && !paths.includes(submodulePath)) paths.push(submodulePath);
+  }
+  return paths.sort();
 }
 
 function expectedOutputsMissing(request: GoalControllerValidationRequest): string[] {
@@ -582,6 +650,8 @@ function auditReportPaths(request: GoalControllerValidationRequest): string[] {
 
 function buildValidationSignals(request: GoalControllerValidationRequest, result: ControllerValidationRunResult): string[] {
   const signals: string[] = [];
+  signals.push(...result.workspacePreparationSignals);
+  for (const failure of result.workspacePreparationFailures) signals.push(`workspace preparation failure: ${failure}`);
   for (const output of result.missingOutputs) signals.push(`missing output: ${output}`);
   for (const lock of result.artifactLockResults) {
     signals.push(`${lock.ok ? "passed" : "failed"} artifact lock: ${lock.path}${lock.actualSha256 ? ` sha256=${lock.actualSha256}` : ""}${lock.error ? ` error=${lock.error}` : ""}`);
@@ -607,6 +677,7 @@ function defaultFollowupPrompt(request: GoalControllerValidationRequest, result:
   const failedLocks = result.artifactLockResults.filter((item) => !item.ok);
   return [
     `Controller validation for DAG node ${request.node.nodeId} did not pass.`,
+    result.workspacePreparationFailures.length ? `Controller could not prepare the validation workspace: ${result.workspacePreparationFailures.join(", ")}. Ensure Git submodules are fetchable and can be initialized, or ask the controller/user for repository access help.` : undefined,
     result.missingOutputs.length ? `Create or fix the missing expected outputs: ${result.missingOutputs.join(", ")}.` : undefined,
     failedCommands.length ? `Fix the failing validators: ${failedCommands.map((item) => item.command).join(", ")}.` : undefined,
     failedLocks.length ? `Restore or explicitly revise the locked validation artifacts: ${failedLocks.map((item) => item.path).join(", ")}.` : undefined,

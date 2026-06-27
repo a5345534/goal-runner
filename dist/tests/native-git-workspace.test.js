@@ -1080,6 +1080,9 @@ test("native git integrator initializes submodules before post-merge validators"
         const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
         const controller = manager.allocateControllerWorkspace({ invocationCwd: parent, goalId: "goal-abcdef12", objective: "Controller" });
         const allocation = manager.allocateSubagentWorkspace({ invocationCwd: parent, controllerWorkspacePath: controller.worktreePath, goalId: "goal-abcdef12", nodeId: "post-merge-submodule" });
+        assert.equal(existsSync(join(controller.worktreePath, "deps", "sub", "sub.txt")), true);
+        assert.equal(existsSync(join(allocation.worktreePath, "deps", "sub", "sub.txt")), true);
+        git(controller.worktreePath, ["submodule", "deinit", "-f", "deps/sub"]);
         assert.equal(existsSync(join(controller.worktreePath, "deps", "sub", "sub.txt")), false);
         writeFileSync(join(allocation.worktreePath, "feature.txt"), "implemented\n");
         git(allocation.worktreePath, ["add", "feature.txt"]);
@@ -1374,7 +1377,11 @@ test("native git integrator rejects dirty subagent worktrees with follow-up prom
 test("native git integrator resolves submodule gitlink conflicts with a submodule merge commit", () => {
     const root = mkdtempSync(join(tmpdir(), "goal-native-submodule-integrate-"));
     const previousTrustedPatterns = process.env[TRUSTED_SUBMODULE_URL_PATTERNS_ENV];
+    const previousAllowProtocol = process.env.GIT_ALLOW_PROTOCOL;
     try {
+        process.env.GIT_ALLOW_PROTOCOL = previousAllowProtocol?.split(":").includes("file")
+            ? previousAllowProtocol
+            : [previousAllowProtocol, "file"].filter(Boolean).join(":");
         const subRemote = join(root, "aos-core.git");
         const subSeed = join(root, "aos-core-seed");
         const parent = join(root, "parent");
@@ -1448,6 +1455,10 @@ test("native git integrator resolves submodule gitlink conflicts with a submodul
             delete process.env[TRUSTED_SUBMODULE_URL_PATTERNS_ENV];
         else
             process.env[TRUSTED_SUBMODULE_URL_PATTERNS_ENV] = previousTrustedPatterns;
+        if (previousAllowProtocol === undefined)
+            delete process.env.GIT_ALLOW_PROTOCOL;
+        else
+            process.env.GIT_ALLOW_PROTOCOL = previousAllowProtocol;
         rmSync(root, { recursive: true, force: true });
     }
 });

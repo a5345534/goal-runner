@@ -104,6 +104,7 @@ export class NativeGitWorkspaceManager {
             if (existsSync(worktreePath) || gitRefExists(repoRoot, branch))
                 continue;
             git(repoRoot, ["worktree", "add", "-b", branch, worktreePath, baseRef]);
+            initializeNewNativeGitWorktreeSubmodules(repoRoot, worktreePath, branch, false);
             return {
                 repoRoot,
                 worktreePath,
@@ -153,6 +154,7 @@ export class NativeGitWorkspaceManager {
             if (existsSync(worktreePath) || gitRefExists(repoRoot, branch))
                 continue;
             git(repoRoot, ["worktree", "add", "-b", branch, worktreePath, baseRef]);
+            initializeNewNativeGitWorktreeSubmodules(repoRoot, worktreePath, branch, false);
             return {
                 repoRoot,
                 worktreePath,
@@ -185,6 +187,7 @@ export class NativeGitWorkspaceManager {
             const dirty = gitStatusPorcelain(resolvedWorktree);
             if (dirty)
                 throw new Error(`bound subagent worktree has uncommitted changes; cannot reuse safely:\n${dirty}`);
+            initializeNativeGitWorktreeSubmodules(resolvedWorktree);
             return {
                 repoRoot: request.repoRoot,
                 worktreePath: resolvedWorktree,
@@ -197,10 +200,12 @@ export class NativeGitWorkspaceManager {
                 created: false,
             };
         }
-        if (gitRefExists(request.repoRoot, request.branch))
+        const branchExisted = gitRefExists(request.repoRoot, request.branch);
+        if (branchExisted)
             git(request.repoRoot, ["worktree", "add", resolvedWorktree, request.branch]);
         else
             git(request.repoRoot, ["worktree", "add", "-b", request.branch, resolvedWorktree, request.baseRef]);
+        initializeNewNativeGitWorktreeSubmodules(request.repoRoot, resolvedWorktree, request.branch, branchExisted);
         return {
             repoRoot: request.repoRoot,
             worktreePath: resolvedWorktree,
@@ -1469,6 +1474,7 @@ function preparePostMergeValidationSubmodules(cwd) {
     const beforeStatus = gitStatusPorcelain(cwd, { ignoreWorktreeRoot: true });
     const beforeIndexTree = safeGit(cwd, ["write-tree"]);
     try {
+        git(cwd, ["submodule", "sync", "--recursive"]);
         git(cwd, ["submodule", "update", "--init", "--recursive"]);
     }
     catch (error) {
@@ -1694,6 +1700,24 @@ function nativeGitSubmoduleCheckoutSyncBlocked(request, reason) {
         blockers: [{ path: request.targetWorkspacePath, reason }],
         error: reason,
     };
+}
+function initializeNewNativeGitWorktreeSubmodules(repoRoot, worktreePath, branch, preserveBranch) {
+    try {
+        initializeNativeGitWorktreeSubmodules(worktreePath);
+    }
+    catch (error) {
+        safeGit(repoRoot, ["worktree", "remove", "--force", worktreePath]);
+        if (!preserveBranch)
+            safeGit(repoRoot, ["branch", "-D", branch]);
+        rmRecursiveSafe(worktreePath);
+        throw new Error(`cannot initialize submodules for native Git worktree ${worktreePath}: ${gitErrorMessage(error)}`);
+    }
+}
+function initializeNativeGitWorktreeSubmodules(worktreePath) {
+    if (!existsSync(resolve(worktreePath, ".gitmodules")))
+        return;
+    git(worktreePath, ["submodule", "sync", "--recursive"]);
+    git(worktreePath, ["submodule", "update", "--init", "--recursive"]);
 }
 function gitStatusPorcelain(cwd, options = {}) {
     const output = safeGit(cwd, ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"]);

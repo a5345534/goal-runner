@@ -21,6 +21,8 @@ export interface ControllerValidationArtifactLockResult {
     error?: string;
 }
 export interface ControllerValidationRunResult {
+    workspacePreparationSignals: string[];
+    workspacePreparationFailures: string[];
     missingOutputs: string[];
     skippedValidators: string[];
     commandResults: ControllerValidationCommandResult[];

@@ -989,6 +989,27 @@ async function reconcileSubagentOutcomes(runtime, goalId, options, result, tickS
         const node = nodesById.get(subagent.nodeId);
         if (!node)
             continue;
+        if (subagent.status === "idle" && subagent.integrationState === "failed" && node.status === "running" && node.lifecyclePhase === "runnerActive") {
+            const detail = subagent.integrationStatus ?? subagent.integrationError ?? node.lastValidationSummary ?? "integration failed";
+            const summary = `integration failed while subagent is idle: ${detail}`;
+            const blockedNode = withNodePatch(node, { status: "blocked", lifecyclePhase: "terminal", lastValidationSummary: summary, updatedAt: tickStartedAt });
+            const blockedSubagent = withSubagentPatch(subagent, {
+                status: "blocked",
+                integrationStatus: summary,
+                integrationError: subagent.integrationError ?? summary,
+                updatedAt: tickStartedAt,
+            });
+            await runtime.saveGoalDagNode(blockedNode);
+            await runtime.saveGoalSubagent(blockedSubagent);
+            await recordControllerEvent(runtime, node.goalId, "integration.idleFailed", {
+                nodeId: node.nodeId,
+                subagentId: subagent.subagentId,
+                summary,
+            }, tickStartedAt);
+            result.blocked.push(blockedNode);
+            result.synced.push(blockedSubagent);
+            continue;
+        }
         if (subagent.status === "blocked") {
             const integrationRetried = await tryRetryBlockedIntegration(runtime, options, state, node, subagent, result, tickStartedAt);
             if (integrationRetried)
