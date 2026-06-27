@@ -2614,8 +2614,9 @@ function candidatePlanEntries(node) {
     return resolution?.attemptedCandidates ?? [];
 }
 /**
- * Returns true when the node's model resolution has an eligible next candidate,
- * enabling candidate switching after runtime model-switchable failures.
+ * Returns true when the node's model resolution describes a multi-candidate
+ * fallback chain. The current candidate may already be the final candidate;
+ * callers use getNextCandidateIndex() to distinguish switch vs exhaustion.
  */
 function hasCandidateChain(node) {
     return candidatePlanEntries(node).filter((entry) => entry.eligible !== false).length > 1;
