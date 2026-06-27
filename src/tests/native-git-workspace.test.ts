@@ -867,6 +867,73 @@ test("native git promotion syncs remote target before merging controller", () =>
   }
 });
 
+test("native git promotion target preflight blocks local target with unpushed commits before controller work", () => {
+  const repo = createRepo();
+  const root = mkdtempSync(join(tmpdir(), "goal-promotion-preflight-ahead-"));
+  try {
+    const remote = join(root, "origin.git");
+    git(root, ["init", "--bare", remote]);
+    git(repo, ["remote", "add", "origin", remote]);
+    git(repo, ["push", "-u", "origin", "main"]);
+    git(remote, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+    writeFileSync(join(repo, "local-only.txt"), "local only\n");
+    git(repo, ["add", "local-only.txt"]);
+    git(repo, ["commit", "-m", "feat: local target only"]);
+    const localHead = git(repo, ["rev-parse", "HEAD"]);
+    const remoteHead = git(repo, ["rev-parse", "origin/main"]);
+
+    const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+    const result = manager.preflightPromotionTargetBeforeControllerStart({ invocationCwd: repo, baseRef: "main" });
+
+    assert.equal(result.status, "blocked");
+    assert.match(result.summary, /promotion target preflight blocked: local target main has unpushed commits/);
+    assert.equal(result.targetBranch, "main");
+    assert.equal(result.targetHead, localHead);
+    assert.equal(result.targetRemoteHead, remoteHead);
+    assert.equal(existsSync(join(repo, ".worktrees")), false, "preflight must not allocate a controller worktree");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("native git promotion target preflight allows remote-ahead target without mutating local target", () => {
+  const repo = createRepo();
+  const root = mkdtempSync(join(tmpdir(), "goal-promotion-preflight-behind-"));
+  try {
+    const remote = join(root, "origin.git");
+    const upstream = join(root, "upstream");
+    git(root, ["init", "--bare", remote]);
+    git(repo, ["remote", "add", "origin", remote]);
+    git(repo, ["push", "-u", "origin", "main"]);
+    git(remote, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+    const originalLocalHead = git(repo, ["rev-parse", "HEAD"]);
+
+    git(root, ["clone", remote, upstream]);
+    git(upstream, ["config", "user.email", "goal@example.test"]);
+    git(upstream, ["config", "user.name", "Goal Test"]);
+    writeFileSync(join(upstream, "remote.txt"), "remote advanced\n");
+    git(upstream, ["add", "remote.txt"]);
+    git(upstream, ["commit", "-m", "feat: remote target advance"]);
+    git(upstream, ["push", "origin", "main"]);
+    const remoteHead = git(upstream, ["rev-parse", "HEAD"]);
+
+    const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+    const result = manager.preflightPromotionTargetBeforeControllerStart({ invocationCwd: repo, baseRef: "main" });
+
+    assert.equal(result.status, "passed");
+    assert.match(result.summary, /target main is behind origin\/main; final promotion will fast-forward/);
+    assert.equal(result.targetHead, originalLocalHead);
+    assert.equal(result.targetRemoteHead, remoteHead);
+    assert.equal(git(repo, ["rev-parse", "HEAD"]), originalLocalHead, "preflight must not fast-forward the target branch");
+    assert.throws(() => git(repo, ["show", "HEAD:remote.txt"]));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("native git promotion blocks diverged target before creating promotion commits", () => {
   const repo = createRepo();
   const root = mkdtempSync(join(tmpdir(), "goal-promotion-diverged-"));

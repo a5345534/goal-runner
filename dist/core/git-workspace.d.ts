@@ -248,6 +248,26 @@ export interface NativeGitTargetBranchSyncResult {
     remoteHead?: string;
     error?: string;
 }
+export interface NativeGitPromotionTargetPreflightRequest {
+    /** Directory where the user invoked /goal before an auto-allocated controller worktree is created. */
+    invocationCwd: string;
+    /** Optional caller-supplied base ref; when omitted the manager resolves the normal controller base ref. */
+    baseRef?: string;
+    /** Optional explicit promotion target ref; defaults to the resolved base ref. */
+    targetRef?: string;
+}
+export interface NativeGitPromotionTargetPreflightResult {
+    status: "passed" | "skipped" | "blocked";
+    summary: string;
+    targetRef?: string;
+    targetBranch?: string;
+    targetWorkspacePath?: string;
+    targetHead?: string;
+    targetRemoteHead?: string;
+    remoteName?: string;
+    remoteBranch?: string;
+    error?: string;
+}
 export interface NativeGitParentPushRequest {
     targetWorkspacePath: string;
     remoteName: string;
@@ -302,6 +322,7 @@ export declare class NativeGitWorkspaceManager {
     integrateSubagentBranch(request: NativeGitSubagentBranchIntegrationRequest): NativeGitSubagentBranchIntegrationResult;
     promoteControllerBranch(request: NativeGitControllerBranchPromotionRequest): NativeGitControllerBranchPromotionResult;
     ensureSubmoduleGitlinksDurablyPublished(request: NativeGitSubmodulePublishRequest): NativeGitSubmodulePublishResult;
+    preflightPromotionTargetBeforeControllerStart(request: NativeGitPromotionTargetPreflightRequest): NativeGitPromotionTargetPreflightResult;
     normalizePromotionTarget(request: NativeGitControllerBranchPromotionRequest, policy: NativeGitCloseoutPolicy): {
         ok: true;
         value: NormalizedPromotionTarget;
