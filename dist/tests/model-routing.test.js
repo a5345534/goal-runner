@@ -71,6 +71,15 @@ test("harness binding resolution returns concrete model evidence", () => {
     assert.equal(resolution.modelArg, "openai-codex/gpt-5.5");
     assert.equal(resolution.evidence.status, "resolved");
     assert.equal(resolution.evidence.requested.modelClass, "strict-reviewer");
+    const sparkResolution = resolveGoalModelForHarness({
+        harness: "pi",
+        role: "subagent",
+        modelScenario: "fast-docs",
+        modelClass: "spark",
+    });
+    assert.equal(sparkResolution.modelArg, "openai-codex/gpt-5.3-codex-spark");
+    assert.equal(sparkResolution.evidence.status, "resolved");
+    assert.equal(sparkResolution.evidence.requested.modelClass, "spark");
 });
 test("model class env JSON overrides bundled catalog", () => {
     const classCatalog = {
@@ -187,7 +196,7 @@ test("SQLite store persists DAG node model class, arg, and resolution evidence",
         const node = await secondRuntime.getGoalDagNode("goal-1", "docs-node");
         assert.equal(node?.modelScenario, "docs");
         assert.equal(node?.modelClass, "implementation");
-        assert.equal(node?.modelArg, "deepseek/deepseek-v4-pro");
+        assert.equal(node?.modelArg, "deepseek/deepseek-v4-flash");
         assert.equal(node?.modelResolution?.requested.modelClass, "implementation");
         assert.deepEqual(node?.workspace, { worktreeSlug: "docs-worktree", branch: "feat/docs-worktree", baseRef: "main" });
         secondStore.close();

@@ -1094,7 +1094,7 @@ test("Pi DAG model routing selects controller and subagent models", async () => 
         assert.equal(launched.length, 2);
         assert.equal(launched[0]?.modelArg, "openai-codex/gpt-5.5");
         assert.equal(launched[0]?.thinkingLevel, "xhigh");
-        assert.equal(launched[1]?.modelArg, "deepseek/deepseek-v4-pro");
+        assert.equal(launched[1]?.modelArg, "deepseek/deepseek-v4-flash");
         assert.equal(launched[1]?.thinkingLevel, "xhigh");
     }
     finally {

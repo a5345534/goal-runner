@@ -17,10 +17,10 @@
       "notes": "Default Pi controller binding for high-risk orchestration."
     },
     "implementation": {
-      "model": "deepseek/deepseek-v4-pro",
+      "model": "deepseek/deepseek-v4-flash",
       "declaredCapabilities": {
         "reasoning": "high",
-        "contextWindowTokens": 256000,
+        "contextWindowTokens": 1000000,
         "toolUse": "required",
         "structuredOutput": "preferred",
         "formatFollowing": "high",
@@ -46,7 +46,7 @@
       "model": "deepseek/deepseek-v4-flash",
       "declaredCapabilities": {
         "reasoning": "medium",
-        "contextWindowTokens": 256000,
+        "contextWindowTokens": 1000000,
         "toolUse": "required",
         "structuredOutput": "preferred",
         "formatFollowing": "medium",
@@ -69,10 +69,10 @@
       }
     },
     "spec-writer": {
-      "model": "deepseek/deepseek-v4-pro",
+      "model": "deepseek/deepseek-v4-flash",
       "declaredCapabilities": {
         "reasoning": "high",
-        "contextWindowTokens": 256000,
+        "contextWindowTokens": 1000000,
         "toolUse": "required",
         "structuredOutput": "strict",
         "formatFollowing": "high",
@@ -82,10 +82,10 @@
       }
     },
     "explainer-writer": {
-      "model": "deepseek/deepseek-v4-pro",
+      "model": "deepseek/deepseek-v4-flash",
       "declaredCapabilities": {
         "reasoning": "high",
-        "contextWindowTokens": 256000,
+        "contextWindowTokens": 1000000,
         "toolUse": "required",
         "structuredOutput": "preferred",
         "formatFollowing": "high",
@@ -93,6 +93,20 @@
         "costSensitivity": "medium",
         "privacy": "cloud-ok"
       }
+    },
+    "spark": {
+      "model": "openai-codex/gpt-5.3-codex-spark",
+      "declaredCapabilities": {
+        "reasoning": "medium",
+        "contextWindowTokens": 128000,
+        "toolUse": "required",
+        "structuredOutput": "preferred",
+        "formatFollowing": "high",
+        "sourceCitation": "preferred",
+        "costSensitivity": "high",
+        "privacy": "cloud-ok"
+      },
+      "notes": "Fast low-risk leaf-node binding for docs, mechanical edits, bounded tests, and evidence summarization without final judgment."
     }
   }
 }
