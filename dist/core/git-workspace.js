@@ -1427,6 +1427,9 @@ function runPostMergeValidationIfNeeded(request, controllerWorkspacePath) {
             validationSignals: ["post-merge validation required but no node validators are configured"],
         };
     }
+    const submodulePreparation = preparePostMergeValidationSubmodules(controllerWorkspacePath);
+    if (!submodulePreparation.ok)
+        return submodulePreparation;
     const beforeStatus = gitStatusPorcelain(controllerWorkspacePath, { ignoreWorktreeRoot: true });
     const beforeIndexTree = safeGit(controllerWorkspacePath, ["write-tree"]);
     const results = validators.map((command) => runPostMergeValidatorCommand(command, controllerWorkspacePath));
@@ -1435,27 +1438,83 @@ function runPostMergeValidationIfNeeded(request, controllerWorkspacePath) {
     const statusChanged = afterStatus !== beforeStatus;
     const indexChanged = Boolean(beforeIndexTree && afterIndexTree && beforeIndexTree !== afterIndexTree);
     const workspaceMutated = statusChanged || indexChanged;
-    const validationSignals = results.map((result) => result.ok
-        ? `post-merge validator passed: ${result.command}`
-        : `post-merge validator failed: ${result.command}${result.output ? `\n${result.output}` : ""}`);
+    const validationSignals = [
+        ...submodulePreparation.validationSignals,
+        ...results.map((result) => result.ok
+            ? `post-merge validator passed: ${result.command}`
+            : `post-merge validator failed: ${result.command}${result.output ? `\n${result.output}` : ""}`),
+    ];
     const failed = results.filter((result) => !result.ok);
+    const summaryPrefix = submodulePreparation.summary ? `${submodulePreparation.summary}; ` : "";
     if (workspaceMutated) {
         validationSignals.push(`post-merge validator mutated controller workspace: ${statusDeltaSummary(beforeStatus, afterStatus, indexChanged)}`);
         return {
             ok: false,
-            summary: `post-merge validation mutated controller workspace${failed.length ? ` and failed ${failed.length}/${results.length} validator(s)` : ""}: ${statusDeltaSummary(beforeStatus, afterStatus, indexChanged)}`,
+            summary: `${summaryPrefix}post-merge validation mutated controller workspace${failed.length ? ` and failed ${failed.length}/${results.length} validator(s)` : ""}: ${statusDeltaSummary(beforeStatus, afterStatus, indexChanged)}`,
             validationSignals,
             workspaceMutated: true,
         };
     }
     if (failed.length === 0) {
-        return { ok: true, summary: `post-merge validation passed (${results.length} validator(s))`, validationSignals };
+        return { ok: true, summary: `${summaryPrefix}post-merge validation passed (${results.length} validator(s))`, validationSignals };
     }
     return {
         ok: false,
-        summary: `post-merge validation failed (${failed.length}/${results.length} validator(s)): ${failed.map((result) => result.command).join(", ")}`,
+        summary: `${summaryPrefix}post-merge validation failed (${failed.length}/${results.length} validator(s)): ${failed.map((result) => result.command).join(", ")}`,
         validationSignals,
     };
+}
+function preparePostMergeValidationSubmodules(cwd) {
+    const beforeSubmoduleStatus = safeGit(cwd, ["submodule", "status", "--recursive"]);
+    const beforeStatus = gitStatusPorcelain(cwd, { ignoreWorktreeRoot: true });
+    const beforeIndexTree = safeGit(cwd, ["write-tree"]);
+    try {
+        git(cwd, ["submodule", "update", "--init", "--recursive"]);
+    }
+    catch (error) {
+        const afterStatus = gitStatusPorcelain(cwd, { ignoreWorktreeRoot: true });
+        const afterIndexTree = safeGit(cwd, ["write-tree"]);
+        const indexChanged = Boolean(beforeIndexTree && afterIndexTree && beforeIndexTree !== afterIndexTree);
+        const workspaceMutated = afterStatus !== beforeStatus || indexChanged;
+        const summary = `post-merge submodule initialization failed: ${gitErrorMessage(error)}`;
+        return {
+            ok: false,
+            summary,
+            validationSignals: [summary],
+            ...(workspaceMutated ? { workspaceMutated: true } : {}),
+        };
+    }
+    const afterSubmoduleStatus = safeGit(cwd, ["submodule", "status", "--recursive"]);
+    if (!beforeSubmoduleStatus.trim() && !afterSubmoduleStatus.trim()) {
+        return { ok: true, summary: "", validationSignals: [] };
+    }
+    const remaining = listChangedSubmoduleCheckoutPaths(cwd, { recursive: true });
+    if (remaining.length > 0) {
+        const summary = `post-merge submodule initialization incomplete: ${remaining.join(", ")} still differs from recorded gitlinks`;
+        return { ok: false, summary, validationSignals: [summary] };
+    }
+    const initialized = submodulePathsWithPrefix(beforeSubmoduleStatus, "-");
+    const mismatched = submodulePathsWithPrefix(beforeSubmoduleStatus, "+");
+    const details = [
+        initialized.length ? `initialized ${initialized.join(", ")}` : undefined,
+        mismatched.length ? `updated ${mismatched.join(", ")}` : undefined,
+    ].filter((part) => Boolean(part)).join("; ");
+    const summary = details
+        ? `post-merge submodule initialization passed: ${details}`
+        : "post-merge submodule initialization passed";
+    return { ok: true, summary, validationSignals: [summary] };
+}
+function submodulePathsWithPrefix(statusOutput, prefix) {
+    const paths = [];
+    for (const line of statusOutput.split(/\r?\n/)) {
+        if (!line.trim() || line[0] !== prefix)
+            continue;
+        const match = line.slice(1).trim().match(/^[0-9a-fA-F]+\s+(\S+)/);
+        const submodulePath = match?.[1];
+        if (submodulePath && !paths.includes(submodulePath))
+            paths.push(submodulePath);
+    }
+    return paths.sort();
 }
 function nodeRequiresPostMergeValidation(node) {
     if (!node)

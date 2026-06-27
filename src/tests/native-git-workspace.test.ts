@@ -208,6 +208,29 @@ function createCheckoutMismatchSubmoduleFixture(): { root: string; parent: strin
   return { root, parent, submodulePath, nextSha };
 }
 
+function createPostMergeValidationSubmoduleFixture(): { root: string; parent: string } {
+  const root = mkdtempSync(join(tmpdir(), "goal-native-post-merge-submodule-"));
+  const source = join(root, "sub-source");
+  const parent = join(root, "parent");
+
+  mkdirSync(source, { recursive: true });
+  git(source, ["init", "-b", "main"]);
+  git(source, ["config", "user.email", "goal@example.test"]);
+  git(source, ["config", "user.name", "Goal Test"]);
+  writeFileSync(join(source, "sub.txt"), "submodule validator input\n");
+  git(source, ["add", "sub.txt"]);
+  git(source, ["commit", "-m", "submodule fixture"]);
+
+  mkdirSync(parent, { recursive: true });
+  git(parent, ["init", "-b", "main"]);
+  git(parent, ["config", "user.email", "goal@example.test"]);
+  git(parent, ["config", "user.name", "Goal Test"]);
+  git(parent, ["commit", "--allow-empty", "-m", "initial"]);
+  gitWithFileProtocol(parent, ["submodule", "add", source, "deps/sub"]);
+  git(parent, ["commit", "-m", "add submodule"]);
+  return { root, parent };
+}
+
 test("native git submodule checkout sync updates clean mismatched submodule worktrees", () => {
   const { root, parent, submodulePath, nextSha } = createCheckoutMismatchSubmoduleFixture();
   try {
@@ -1193,6 +1216,57 @@ test("native git integrator normalizes post-merge gate names before committing i
     manager.cleanupWorkspace({ repoRoot: repo, worktreePath: controller.worktreePath, branch: controller.branch, force: true });
   } finally {
     rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("native git integrator initializes submodules before post-merge validators", () => {
+  const { root, parent } = createPostMergeValidationSubmoduleFixture();
+  const previousAllowProtocol = process.env.GIT_ALLOW_PROTOCOL;
+  try {
+    process.env.GIT_ALLOW_PROTOCOL = previousAllowProtocol?.split(":").includes("file")
+      ? previousAllowProtocol
+      : [previousAllowProtocol, "file"].filter(Boolean).join(":");
+
+    const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+    const controller = manager.allocateControllerWorkspace({ invocationCwd: parent, goalId: "goal-abcdef12", objective: "Controller" });
+    const allocation = manager.allocateSubagentWorkspace({ invocationCwd: parent, controllerWorkspacePath: controller.worktreePath, goalId: "goal-abcdef12", nodeId: "post-merge-submodule" });
+    assert.equal(existsSync(join(controller.worktreePath, "deps", "sub", "sub.txt")), false);
+
+    writeFileSync(join(allocation.worktreePath, "feature.txt"), "implemented\n");
+    git(allocation.worktreePath, ["add", "feature.txt"]);
+    git(allocation.worktreePath, ["commit", "-m", "implement feature"]);
+
+    const result = manager.integrateSubagentBranch({
+      controllerWorkspacePath: controller.worktreePath,
+      node: integrationNode({
+        nodeId: "post-merge-submodule",
+        slug: "post-merge-submodule",
+        validators: ["test -f deps/sub/sub.txt", "test -f feature.txt"],
+        completionGates: ["controller-validation", "native-git-integration", "post-merge-validation"],
+      }),
+      subagent: {
+        goalId: "goal-abcdef12",
+        nodeId: "post-merge-submodule",
+        subagentId: allocation.subagentId,
+        harnessAdapterId: "fake",
+        workspacePath: allocation.worktreePath,
+        branch: allocation.branch,
+        status: "controllerValidating",
+        prompts: [],
+        createdAt: "2026-06-02T00:00:00.000Z",
+        updatedAt: "2026-06-02T00:00:00.000Z",
+      },
+    });
+
+    assert.equal(result.status, "complete");
+    assert.match(result.summary, /post-merge submodule initialization passed/);
+    assert.match(result.validationSignals?.join("\n") ?? "", /post-merge validator passed: test -f deps\/sub\/sub\.txt/);
+    assert.equal(existsSync(join(controller.worktreePath, "deps", "sub", "sub.txt")), true);
+    assert.equal(git(controller.worktreePath, ["status", "--porcelain=v1", "--ignore-submodules=none"]), "");
+  } finally {
+    if (previousAllowProtocol === undefined) delete process.env.GIT_ALLOW_PROTOCOL;
+    else process.env.GIT_ALLOW_PROTOCOL = previousAllowProtocol;
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
