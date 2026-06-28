@@ -722,6 +722,18 @@ export class NativeGitWorkspaceManager {
     const sourceBranch = source.branch ?? request.subagent.branch;
     const sourceRef = source.ref ?? request.subagent.ref ?? sourceBranch;
     const sourceHead = source.head;
+    const preIntegrationCheckoutSync = this.syncSubmoduleWorktreesToHeadPins({ targetWorkspacePath: controllerWorkspacePath, recursive: true });
+    if (preIntegrationCheckoutSync.status === "blocked") {
+      return nativeGitIntegrationFailure(
+        request,
+        `controller submodule checkout sync failed before integration: ${preIntegrationCheckoutSync.summary}`,
+        { sourceBranch, sourceRef, sourceHead },
+        undefined,
+        submoduleCheckoutSyncValidationSignals(preIntegrationCheckoutSync),
+      );
+    }
+    const preIntegrationCheckoutSyncSummary = successfulSubmoduleCheckoutSyncSummary(preIntegrationCheckoutSync);
+    const preIntegrationCheckoutSyncSignals = submoduleCheckoutSyncValidationSignals(preIntegrationCheckoutSync);
     const controllerDirty = gitStatusPorcelain(controllerWorkspacePath, { ignoreWorktreeRoot: true });
     if (controllerDirty) {
       return nativeGitIntegrationFailure(
@@ -760,12 +772,12 @@ export class NativeGitWorkspaceManager {
       }
       return {
         status: "notRequired",
-        summary: appendIntegrationSummary(`subagent branch already matches controller HEAD ${shortSha(controllerHead)}`, postMergeValidation.summary),
+        summary: appendIntegrationSummary(appendIntegrationSummary(`subagent branch already matches controller HEAD ${shortSha(controllerHead)}`, preIntegrationCheckoutSyncSummary), postMergeValidation.summary),
         sourceBranch,
         sourceRef,
         sourceHead,
         integrationCommitSha: controllerHead,
-        validationSignals: postMergeValidation.validationSignals,
+        validationSignals: [...preIntegrationCheckoutSyncSignals, ...postMergeValidation.validationSignals],
         completedAt: new Date().toISOString(),
       };
     }
@@ -784,12 +796,12 @@ export class NativeGitWorkspaceManager {
       }
       return {
         status: "complete",
-        summary: appendIntegrationSummary(`subagent commit ${shortSha(sourceHead)} is already integrated in controller HEAD ${shortSha(controllerHead)}`, postMergeValidation.summary),
+        summary: appendIntegrationSummary(appendIntegrationSummary(`subagent commit ${shortSha(sourceHead)} is already integrated in controller HEAD ${shortSha(controllerHead)}`, preIntegrationCheckoutSyncSummary), postMergeValidation.summary),
         sourceBranch,
         sourceRef,
         sourceHead,
         integrationCommitSha: controllerHead,
-        validationSignals: postMergeValidation.validationSignals,
+        validationSignals: [...preIntegrationCheckoutSyncSignals, ...postMergeValidation.validationSignals],
         completedAt: new Date().toISOString(),
       };
     }
@@ -846,6 +858,20 @@ export class NativeGitWorkspaceManager {
         );
       }
 
+      const postMergeCheckoutSync = this.syncSubmoduleWorktreesToHeadPins({ targetWorkspacePath: controllerWorkspacePath, recursive: true });
+      if (postMergeCheckoutSync.status === "blocked") {
+        abortMergeAndCleanPostMergeValidationArtifacts(controllerWorkspacePath);
+        return nativeGitIntegrationFailure(
+          request,
+          `submodule checkout sync failed after merge: ${postMergeCheckoutSync.summary}`,
+          { sourceBranch, sourceRef, sourceHead },
+          undefined,
+          submoduleCheckoutSyncValidationSignals(postMergeCheckoutSync),
+        );
+      }
+      const postMergeCheckoutSyncSummary = successfulSubmoduleCheckoutSyncSummary(postMergeCheckoutSync);
+      const postMergeCheckoutSyncSignals = submoduleCheckoutSyncValidationSignals(postMergeCheckoutSync);
+
       const postMergeValidation = runPostMergeValidationIfNeeded(request, controllerWorkspacePath);
       if (!postMergeValidation.ok) {
         abortMergeAndCleanPostMergeValidationArtifacts(controllerWorkspacePath);
@@ -854,19 +880,19 @@ export class NativeGitWorkspaceManager {
           postMergeValidation.summary,
           { sourceBranch, sourceRef, sourceHead },
           buildPostMergeValidationFollowupPrompt(request, postMergeValidation.summary),
-          postMergeValidation.validationSignals,
+          [...preIntegrationCheckoutSyncSignals, ...postMergeCheckoutSyncSignals, ...postMergeValidation.validationSignals],
         );
       }
       git(controllerWorkspacePath, ["commit", "--no-edit"]);
       const integrationCommitSha = git(controllerWorkspacePath, ["rev-parse", "--verify", "HEAD"]);
       return {
         status: "complete",
-        summary: appendIntegrationSummary(appendIntegrationSummary(`merged subagent ${request.subagent.subagentId} ${shortSha(sourceHead)} into controller ${shortSha(integrationCommitSha)}`, submoduleMergeSummary), postMergeValidation.summary),
+        summary: appendIntegrationSummary(appendIntegrationSummary(appendIntegrationSummary(appendIntegrationSummary(`merged subagent ${request.subagent.subagentId} ${shortSha(sourceHead)} into controller ${shortSha(integrationCommitSha)}`, preIntegrationCheckoutSyncSummary), submoduleMergeSummary), postMergeCheckoutSyncSummary), postMergeValidation.summary),
         sourceBranch,
         sourceRef,
         sourceHead,
         integrationCommitSha,
-        validationSignals: postMergeValidation.validationSignals,
+        validationSignals: [...preIntegrationCheckoutSyncSignals, ...postMergeCheckoutSyncSignals, ...postMergeValidation.validationSignals],
         completedAt: new Date().toISOString(),
       };
     } catch (error) {
@@ -2311,6 +2337,18 @@ function nativeGitSubmoduleCheckoutSyncBlocked(
     blockers: [{ path: request.targetWorkspacePath, reason }],
     error: reason,
   };
+}
+
+function successfulSubmoduleCheckoutSyncSummary(result: NativeGitSubmoduleCheckoutSyncResult): string | undefined {
+  return result.status === "passed" ? result.summary : undefined;
+}
+
+function submoduleCheckoutSyncValidationSignals(result: NativeGitSubmoduleCheckoutSyncResult): string[] {
+  if (result.status === "skipped") return [];
+  return [
+    result.summary,
+    ...result.blockers.map((blocker) => `${blocker.path}: ${blocker.reason}`),
+  ];
 }
 
 function initializeNewNativeGitWorktreeSubmodules(repoRoot: string, worktreePath: string, branch: string, preserveBranch: boolean): void {

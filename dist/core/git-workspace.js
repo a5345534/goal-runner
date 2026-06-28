@@ -338,6 +338,12 @@ export class NativeGitWorkspaceManager {
         const sourceBranch = source.branch ?? request.subagent.branch;
         const sourceRef = source.ref ?? request.subagent.ref ?? sourceBranch;
         const sourceHead = source.head;
+        const preIntegrationCheckoutSync = this.syncSubmoduleWorktreesToHeadPins({ targetWorkspacePath: controllerWorkspacePath, recursive: true });
+        if (preIntegrationCheckoutSync.status === "blocked") {
+            return nativeGitIntegrationFailure(request, `controller submodule checkout sync failed before integration: ${preIntegrationCheckoutSync.summary}`, { sourceBranch, sourceRef, sourceHead }, undefined, submoduleCheckoutSyncValidationSignals(preIntegrationCheckoutSync));
+        }
+        const preIntegrationCheckoutSyncSummary = successfulSubmoduleCheckoutSyncSummary(preIntegrationCheckoutSync);
+        const preIntegrationCheckoutSyncSignals = submoduleCheckoutSyncValidationSignals(preIntegrationCheckoutSync);
         const controllerDirty = gitStatusPorcelain(controllerWorkspacePath, { ignoreWorktreeRoot: true });
         if (controllerDirty) {
             return nativeGitIntegrationFailure(request, `controller workspace has uncommitted changes; cannot integrate safely:\n${controllerDirty}`, { sourceBranch, sourceRef, sourceHead });
@@ -360,12 +366,12 @@ export class NativeGitWorkspaceManager {
             }
             return {
                 status: "notRequired",
-                summary: appendIntegrationSummary(`subagent branch already matches controller HEAD ${shortSha(controllerHead)}`, postMergeValidation.summary),
+                summary: appendIntegrationSummary(appendIntegrationSummary(`subagent branch already matches controller HEAD ${shortSha(controllerHead)}`, preIntegrationCheckoutSyncSummary), postMergeValidation.summary),
                 sourceBranch,
                 sourceRef,
                 sourceHead,
                 integrationCommitSha: controllerHead,
-                validationSignals: postMergeValidation.validationSignals,
+                validationSignals: [...preIntegrationCheckoutSyncSignals, ...postMergeValidation.validationSignals],
                 completedAt: new Date().toISOString(),
             };
         }
@@ -378,12 +384,12 @@ export class NativeGitWorkspaceManager {
             }
             return {
                 status: "complete",
-                summary: appendIntegrationSummary(`subagent commit ${shortSha(sourceHead)} is already integrated in controller HEAD ${shortSha(controllerHead)}`, postMergeValidation.summary),
+                summary: appendIntegrationSummary(appendIntegrationSummary(`subagent commit ${shortSha(sourceHead)} is already integrated in controller HEAD ${shortSha(controllerHead)}`, preIntegrationCheckoutSyncSummary), postMergeValidation.summary),
                 sourceBranch,
                 sourceRef,
                 sourceHead,
                 integrationCommitSha: controllerHead,
-                validationSignals: postMergeValidation.validationSignals,
+                validationSignals: [...preIntegrationCheckoutSyncSignals, ...postMergeValidation.validationSignals],
                 completedAt: new Date().toISOString(),
             };
         }
@@ -425,21 +431,28 @@ export class NativeGitWorkspaceManager {
                 abortMergeAndCleanPostMergeValidationArtifacts(controllerWorkspacePath);
                 return nativeGitIntegrationFailure(request, `submodule publish blocked: ${publish.summary}`, { sourceBranch, sourceRef, sourceHead }, `[SYSTEM FOLLOW-UP: SUBMODULE_PUBLISH_BLOCKED]\n${publish.summary}\n\nPush the referenced submodule SHAs to durable remote refs, or set ${TRUSTED_SUBMODULE_URL_PATTERNS_ENV} before starting a fresh controller process to allow retained-ref publish for trusted submodule URLs. Then retry integration.`, publish.blockers.map((b) => `${b.path}: ${b.reason}`));
             }
+            const postMergeCheckoutSync = this.syncSubmoduleWorktreesToHeadPins({ targetWorkspacePath: controllerWorkspacePath, recursive: true });
+            if (postMergeCheckoutSync.status === "blocked") {
+                abortMergeAndCleanPostMergeValidationArtifacts(controllerWorkspacePath);
+                return nativeGitIntegrationFailure(request, `submodule checkout sync failed after merge: ${postMergeCheckoutSync.summary}`, { sourceBranch, sourceRef, sourceHead }, undefined, submoduleCheckoutSyncValidationSignals(postMergeCheckoutSync));
+            }
+            const postMergeCheckoutSyncSummary = successfulSubmoduleCheckoutSyncSummary(postMergeCheckoutSync);
+            const postMergeCheckoutSyncSignals = submoduleCheckoutSyncValidationSignals(postMergeCheckoutSync);
             const postMergeValidation = runPostMergeValidationIfNeeded(request, controllerWorkspacePath);
             if (!postMergeValidation.ok) {
                 abortMergeAndCleanPostMergeValidationArtifacts(controllerWorkspacePath);
-                return nativeGitIntegrationFailure(request, postMergeValidation.summary, { sourceBranch, sourceRef, sourceHead }, buildPostMergeValidationFollowupPrompt(request, postMergeValidation.summary), postMergeValidation.validationSignals);
+                return nativeGitIntegrationFailure(request, postMergeValidation.summary, { sourceBranch, sourceRef, sourceHead }, buildPostMergeValidationFollowupPrompt(request, postMergeValidation.summary), [...preIntegrationCheckoutSyncSignals, ...postMergeCheckoutSyncSignals, ...postMergeValidation.validationSignals]);
             }
             git(controllerWorkspacePath, ["commit", "--no-edit"]);
             const integrationCommitSha = git(controllerWorkspacePath, ["rev-parse", "--verify", "HEAD"]);
             return {
                 status: "complete",
-                summary: appendIntegrationSummary(appendIntegrationSummary(`merged subagent ${request.subagent.subagentId} ${shortSha(sourceHead)} into controller ${shortSha(integrationCommitSha)}`, submoduleMergeSummary), postMergeValidation.summary),
+                summary: appendIntegrationSummary(appendIntegrationSummary(appendIntegrationSummary(appendIntegrationSummary(`merged subagent ${request.subagent.subagentId} ${shortSha(sourceHead)} into controller ${shortSha(integrationCommitSha)}`, preIntegrationCheckoutSyncSummary), submoduleMergeSummary), postMergeCheckoutSyncSummary), postMergeValidation.summary),
                 sourceBranch,
                 sourceRef,
                 sourceHead,
                 integrationCommitSha,
-                validationSignals: postMergeValidation.validationSignals,
+                validationSignals: [...preIntegrationCheckoutSyncSignals, ...postMergeCheckoutSyncSignals, ...postMergeValidation.validationSignals],
                 completedAt: new Date().toISOString(),
             };
         }
@@ -1700,6 +1713,17 @@ function nativeGitSubmoduleCheckoutSyncBlocked(request, reason) {
         blockers: [{ path: request.targetWorkspacePath, reason }],
         error: reason,
     };
+}
+function successfulSubmoduleCheckoutSyncSummary(result) {
+    return result.status === "passed" ? result.summary : undefined;
+}
+function submoduleCheckoutSyncValidationSignals(result) {
+    if (result.status === "skipped")
+        return [];
+    return [
+        result.summary,
+        ...result.blockers.map((blocker) => `${blocker.path}: ${blocker.reason}`),
+    ];
 }
 function initializeNewNativeGitWorktreeSubmodules(repoRoot, worktreePath, branch, preserveBranch) {
     try {

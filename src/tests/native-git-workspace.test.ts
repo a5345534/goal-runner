@@ -1634,6 +1634,116 @@ test("native git integrator resolves submodule gitlink conflicts with a submodul
   }
 });
 
+test("native git integrator keeps controller submodule checkout aligned with gitlink updates", () => {
+  const root = mkdtempSync(join(tmpdir(), "goal-native-submodule-sync-integration-"));
+  const previousAllowProtocol = process.env.GIT_ALLOW_PROTOCOL;
+  try {
+    process.env.GIT_ALLOW_PROTOCOL = previousAllowProtocol?.split(":").includes("file")
+      ? previousAllowProtocol
+      : [previousAllowProtocol, "file"].filter(Boolean).join(":");
+    const subRemote = join(root, "aos-core.git");
+    const subSeed = join(root, "aos-core-seed");
+    const parent = join(root, "parent");
+
+    git(root, ["init", "--bare", subRemote]);
+    mkdirSync(subSeed, { recursive: true });
+    git(subSeed, ["init", "-b", "main"]);
+    git(subSeed, ["config", "user.email", "goal@example.test"]);
+    git(subSeed, ["config", "user.name", "Goal Test"]);
+    writeFileSync(join(subSeed, "sub.txt"), "v1\n");
+    git(subSeed, ["add", "sub.txt"]);
+    git(subSeed, ["commit", "-m", "submodule v1"]);
+    const initialSha = git(subSeed, ["rev-parse", "HEAD"]);
+    git(subSeed, ["remote", "add", "origin", subRemote]);
+    git(subSeed, ["push", "origin", "HEAD:refs/heads/main"]);
+    git(subRemote, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+    mkdirSync(parent, { recursive: true });
+    git(parent, ["init", "-b", "main"]);
+    git(parent, ["config", "user.email", "goal@example.test"]);
+    git(parent, ["config", "user.name", "Goal Test"]);
+    git(parent, ["commit", "--allow-empty", "-m", "initial"]);
+    gitWithFileProtocol(parent, ["submodule", "add", subRemote, "aos-core"]);
+    git(parent, ["commit", "-am", "add aos-core submodule"]);
+
+    const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+    const controller = manager.allocateControllerWorkspace({ invocationCwd: parent, goalId: "goal-abcdef12", objective: "Controller" });
+    const allocation = manager.allocateSubagentWorkspace({ invocationCwd: parent, controllerWorkspacePath: controller.worktreePath, goalId: "goal-abcdef12", nodeId: "submodule-update" });
+
+    git(join(allocation.worktreePath, "aos-core"), ["config", "user.email", "goal@example.test"]);
+    git(join(allocation.worktreePath, "aos-core"), ["config", "user.name", "Goal Test"]);
+    writeFileSync(join(allocation.worktreePath, "aos-core", "sub.txt"), "v2\n");
+    git(join(allocation.worktreePath, "aos-core"), ["add", "sub.txt"]);
+    git(join(allocation.worktreePath, "aos-core"), ["commit", "-m", "submodule v2"]);
+    const nextSha = git(join(allocation.worktreePath, "aos-core"), ["rev-parse", "HEAD"]);
+    git(join(allocation.worktreePath, "aos-core"), ["push", "origin", "HEAD:refs/heads/main"]);
+    git(allocation.worktreePath, ["add", "aos-core"]);
+    git(allocation.worktreePath, ["commit", "-m", "bump aos-core"]);
+
+    const firstResult = manager.integrateSubagentBranch({
+      controllerWorkspacePath: controller.worktreePath,
+      subagent: {
+        goalId: "goal-abcdef12",
+        nodeId: "submodule-update",
+        subagentId: allocation.subagentId,
+        harnessAdapterId: "fake",
+        workspacePath: allocation.worktreePath,
+        branch: allocation.branch,
+        status: "controllerValidating",
+        prompts: [],
+        createdAt: "2026-06-02T00:00:00.000Z",
+        updatedAt: "2026-06-02T00:00:00.000Z",
+      },
+    });
+
+    assert.equal(firstResult.status, "complete");
+    assert.match(firstResult.summary, /submodule checkout sync passed/);
+    assert.equal(git(controller.worktreePath, ["rev-parse", "HEAD:aos-core"]), nextSha);
+    assert.equal(git(join(controller.worktreePath, "aos-core"), ["rev-parse", "HEAD"]), nextSha);
+    assert.equal(git(controller.worktreePath, ["status", "--porcelain=v1", "--ignore-submodules=none"]), "");
+
+    // Simulate a controller workspace left stale by an older runner version; the
+    // next integration must repair the clean gitlink mismatch instead of
+    // blocking as an unsafe dirty controller workspace.
+    git(join(controller.worktreePath, "aos-core"), ["checkout", "--detach", initialSha]);
+    assert.match(git(controller.worktreePath, ["status", "--porcelain=v1", "--ignore-submodules=none"]), /M aos-core/);
+
+    const followup = manager.allocateSubagentWorkspace({ invocationCwd: parent, controllerWorkspacePath: controller.worktreePath, goalId: "goal-abcdef12", nodeId: "followup" });
+    writeFileSync(join(followup.worktreePath, "followup.txt"), "ok\n");
+    git(followup.worktreePath, ["add", "followup.txt"]);
+    git(followup.worktreePath, ["commit", "-m", "followup change"]);
+
+    const followupResult = manager.integrateSubagentBranch({
+      controllerWorkspacePath: controller.worktreePath,
+      subagent: {
+        goalId: "goal-abcdef12",
+        nodeId: "followup",
+        subagentId: followup.subagentId,
+        harnessAdapterId: "fake",
+        workspacePath: followup.worktreePath,
+        branch: followup.branch,
+        status: "controllerValidating",
+        prompts: [],
+        createdAt: "2026-06-02T00:00:00.000Z",
+        updatedAt: "2026-06-02T00:00:00.000Z",
+      },
+    });
+
+    assert.equal(followupResult.status, "complete");
+    assert.match(followupResult.summary, /submodule checkout sync passed/);
+    assert.equal(git(join(controller.worktreePath, "aos-core"), ["rev-parse", "HEAD"]), nextSha);
+    assert.equal(git(controller.worktreePath, ["status", "--porcelain=v1", "--ignore-submodules=none"]), "");
+
+    manager.cleanupWorkspace({ repoRoot: parent, worktreePath: followup.worktreePath, branch: followup.branch, force: true });
+    manager.cleanupWorkspace({ repoRoot: parent, worktreePath: allocation.worktreePath, branch: allocation.branch, force: true });
+    manager.cleanupWorkspace({ repoRoot: parent, worktreePath: controller.worktreePath, branch: controller.branch, force: true });
+  } finally {
+    if (previousAllowProtocol === undefined) delete process.env.GIT_ALLOW_PROTOCOL;
+    else process.env.GIT_ALLOW_PROTOCOL = previousAllowProtocol;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("native git integrator aborts merge conflicts and reports follow-up", () => {
   const repo = createRepo();
   try {
