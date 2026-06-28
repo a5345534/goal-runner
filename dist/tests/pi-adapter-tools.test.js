@@ -44,6 +44,16 @@ function createGitWorkspace(options = {}) {
     }
     return repo;
 }
+function createGitSubmoduleRepo() {
+    const repo = mkdtempSync(join(tmpdir(), "goal-pi-submodule-"));
+    git(repo, ["init", "-b", "main"]);
+    git(repo, ["config", "user.email", "goal@example.test"]);
+    git(repo, ["config", "user.name", "Goal Test"]);
+    writeFileSync(join(repo, "README.md"), "# submodule\n");
+    git(repo, ["add", "README.md"]);
+    git(repo, ["commit", "-m", "initial submodule"]);
+    return repo;
+}
 test("Pi adapter keeps model-visible goal tools Codex-compatible", async () => {
     const dir = mkdtempSync(join(tmpdir(), "goal-tools-"));
     const previousStateHome = process.env.AGENT_GOAL_STATE_HOME;
@@ -482,10 +492,16 @@ test("Pi controller poller finalizes completed subagents and removes completed w
 test("Pi controller poller promotes controller branch into target before complete", async () => {
     const dir = mkdtempSync(join(tmpdir(), "goal-poller-promote-"));
     const workspace = createGitWorkspace();
+    const submodule = createGitSubmoduleRepo();
     const previousStateHome = process.env.AGENT_GOAL_STATE_HOME;
     const previousPollMs = process.env.AGENT_GOAL_PI_CONTROLLER_POLL_MS;
+    const previousAllowProtocol = process.env.GIT_ALLOW_PROTOCOL;
     process.env.AGENT_GOAL_STATE_HOME = dir;
     process.env.AGENT_GOAL_PI_CONTROLLER_POLL_MS = "10";
+    process.env.GIT_ALLOW_PROTOCOL = previousAllowProtocol?.split(":").includes("file") ? previousAllowProtocol : previousAllowProtocol ? `${previousAllowProtocol}:file` : "file";
+    git(workspace, ["-c", "protocol.file.allow=always", "submodule", "add", submodule, "shared-knowledge"]);
+    git(workspace, ["commit", "-am", "add shared knowledge submodule"]);
+    git(workspace, ["push"]);
     let commandHandler;
     const handlers = new Map();
     const launched = [];
@@ -561,6 +577,7 @@ test("Pi controller poller promotes controller branch into target before complet
         assert.equal(git(workspace, ["show", "HEAD:promoted.txt"]), "promoted");
         assert.equal(launched.length, 2);
         assert.notEqual(launched[0]?.cwd, workspace);
+        assert.match(git(workspace, ["submodule", "status", "--recursive"]), /^[ 0-9a-f]/, "fixture keeps an initialized submodule checkout");
         assert.equal(existsSync(launched[0]?.cwd ?? ""), false);
         assert.equal(existsSync(launched[1]?.cwd ?? ""), false);
         for (const handler of handlers.get("session_shutdown") ?? [])
@@ -576,8 +593,13 @@ test("Pi controller poller promotes controller branch into target before complet
             delete process.env.AGENT_GOAL_PI_CONTROLLER_POLL_MS;
         else
             process.env.AGENT_GOAL_PI_CONTROLLER_POLL_MS = previousPollMs;
+        if (previousAllowProtocol === undefined)
+            delete process.env.GIT_ALLOW_PROTOCOL;
+        else
+            process.env.GIT_ALLOW_PROTOCOL = previousAllowProtocol;
         rmSync(dir, { recursive: true, force: true });
         rmSync(workspace, { recursive: true, force: true });
+        rmSync(submodule, { recursive: true, force: true });
     }
 });
 test("Pi /goal blocks unsynced promotion target before launching controller", async () => {

@@ -1296,7 +1296,7 @@ function cleanupPiControllerWorkspaceIfSafe(manager, binding) {
     if (!isAutoAllocatedPiControllerWorkspace(binding))
         return undefined;
     try {
-        manager.cleanupWorkspace({ worktreePath: binding.workspace, branch: binding.branch });
+        manager.cleanupWorkspace({ worktreePath: binding.workspace, branch: binding.branch, force: true });
         return undefined;
     }
     catch (error) {

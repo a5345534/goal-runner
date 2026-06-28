@@ -1505,7 +1505,7 @@ function stopPiGoalBackgroundResources(goalId: string, options: { state?: GoalOr
 function cleanupPiControllerWorkspaceIfSafe(manager: NativeGitWorkspaceManager, binding: ResolvedWorkspaceBinding): string | undefined {
   if (!isAutoAllocatedPiControllerWorkspace(binding)) return undefined;
   try {
-    manager.cleanupWorkspace({ worktreePath: binding.workspace, branch: binding.branch });
+    manager.cleanupWorkspace({ worktreePath: binding.workspace, branch: binding.branch, force: true });
     return undefined;
   } catch (error) {
     return error instanceof Error ? error.message : String(error);

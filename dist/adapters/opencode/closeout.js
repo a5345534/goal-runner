@@ -106,7 +106,7 @@ export async function finalizeOpencodeGoalFromDagTerminalState(runtime, goalId, 
     if (finalization.changed && !closeoutBlockedReason && options.isAutoAllocatedControllerWorkspace?.(binding)) {
         try {
             const manager = new NativeGitWorkspaceManager({ fetch: false });
-            manager.cleanupWorkspace({ worktreePath: binding.workspace, branch: binding.branch });
+            manager.cleanupWorkspace({ worktreePath: binding.workspace, branch: binding.branch, force: true });
         }
         catch (error) {
             controllerCleanupError = error instanceof Error ? error.message : String(error);
