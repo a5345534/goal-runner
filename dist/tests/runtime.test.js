@@ -65,7 +65,7 @@ test("runtime can reset a blocked DAG node for manual retry", async () => {
     const runtime = new GoalRuntime({ store: new MemoryGoalStore() });
     const created = await runtime.createOrReplaceGoal("s1", "retry blocked DAG", { confirmReplace: false });
     const goalId = created.goal?.goalId ?? "";
-    await runtime.planGoalDag(goalId, [{ nodeId: "closeout-docs", objective: "Close out docs" }]);
+    await runtime.planGoalDag(goalId, [{ nodeId: "closeout-docs", objective: "Close out docs", workspace: { worktreeSlug: "closeout-docs" } }]);
     const node = await runtime.getGoalDagNode(goalId, "closeout-docs");
     assert.ok(node);
     await runtime.saveGoalDagNode({
@@ -80,7 +80,7 @@ test("runtime can reset a blocked DAG node for manual retry", async () => {
         nodeId: "closeout-docs",
         subagentId: "subagent-closeout-docs",
         harnessAdapterId: "fake",
-        status: "blocked",
+        status: "blockedTerminal",
         workspacePath: "/repo/.worktrees/closeout-docs",
         branch: "goal/closeout-docs",
         integrationState: "pending",
@@ -97,9 +97,11 @@ test("runtime can reset a blocked DAG node for manual retry", async () => {
     assert.equal(retried?.status, "planned");
     assert.equal(retried?.lifecyclePhase, undefined);
     assert.equal(retried?.preparedResources, undefined);
+    assert.equal(retried?.workspace?.worktreeSlug, "closeout-docs-retry-2");
     assert.match(retried?.lastValidationSummary ?? "", /manual retry requested/);
     const retired = await runtime.getGoalSubagent(goalId, "subagent-closeout-docs");
     assert.equal(retired?.status, "blockedTerminal");
+    assert.equal(retired?.integrationState, undefined);
     assert.match(retired?.integrationStatus ?? "", /superseded by manual node retry/);
     const ledger = await runtime.listLedgerEvents("s1", goalId);
     assert.equal(ledger.at(-1)?.type, "goal_node_retry_requested");

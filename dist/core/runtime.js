@@ -496,11 +496,18 @@ export class GoalRuntime {
         const subagents = await this.store.listGoalSubagents(goalId, nodeId);
         const retiredSubagentIds = [];
         for (const subagent of subagents) {
-            if (["complete", "blockedTerminal"].includes(subagent.status))
+            if (subagent.status === "complete")
                 continue;
             await this.store.saveGoalSubagent({
                 ...subagent,
                 status: "blockedTerminal",
+                integrationState: undefined,
+                integrationSourceBranch: undefined,
+                integrationSourceRef: undefined,
+                integrationSourceHead: undefined,
+                integrationCommitSha: undefined,
+                integrationError: undefined,
+                integrationCompletedAt: undefined,
                 integrationStatus: appendRetryNote(subagent.integrationStatus, `superseded by manual node retry at ${now}`),
                 updatedAt: now,
             });
@@ -508,6 +515,7 @@ export class GoalRuntime {
         }
         const retriedNode = {
             ...node,
+            workspace: retryWorkspaceForNode(node, subagents),
             status: "planned",
             lifecyclePhase: undefined,
             preparedResources: undefined,
@@ -947,6 +955,21 @@ export class GoalRuntime {
     nowIso(date = this.config.now()) {
         return date.toISOString();
     }
+}
+function retryWorkspaceForNode(node, subagents) {
+    const current = node.workspace;
+    const slug = current?.worktreeSlug?.trim();
+    if (!slug || current?.branch)
+        return current;
+    const baseSlug = slug.replace(/-retry-\d+$/i, "");
+    return { ...current, worktreeSlug: safeRetrySlug(`${baseSlug}-retry-${subagents.length + 1}`) };
+}
+function safeRetrySlug(value) {
+    return value
+        .toLowerCase()
+        .replace(/[^a-z0-9._-]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 80) || "retry-node";
 }
 function appendRetryNote(current, note) {
     return current ? `${current}; ${note}` : note;
