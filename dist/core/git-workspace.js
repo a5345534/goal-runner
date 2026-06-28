@@ -262,11 +262,13 @@ export class NativeGitWorkspaceManager {
             };
         }
         const blockers = [];
-        const rootDirty = gitStatusPorcelain(targetWorkspacePath, { ignoreWorktreeRoot: true });
-        for (const line of rootDirty.split(/\r?\n/).filter((item) => item.trim())) {
-            const dirtyPath = statusPath(line);
-            if (!pathTouchesAny(dirtyPath, changedPaths))
-                blockers.push({ path: dirtyPath, reason: `unrelated dirty root worktree status: ${line}` });
+        if (!request.allowRootWorktreeChanges) {
+            const rootDirty = gitStatusPorcelain(targetWorkspacePath, { ignoreWorktreeRoot: true });
+            for (const line of rootDirty.split(/\r?\n/).filter((item) => item.trim())) {
+                const dirtyPath = statusPath(line);
+                if (!pathTouchesAny(dirtyPath, changedPaths))
+                    blockers.push({ path: dirtyPath, reason: `unrelated dirty root worktree status: ${line}` });
+            }
         }
         for (const submodulePath of changedPaths) {
             const fullPath = resolve(targetWorkspacePath, submodulePath);
@@ -431,7 +433,11 @@ export class NativeGitWorkspaceManager {
                 abortMergeAndCleanPostMergeValidationArtifacts(controllerWorkspacePath);
                 return nativeGitIntegrationFailure(request, `submodule publish blocked: ${publish.summary}`, { sourceBranch, sourceRef, sourceHead }, `[SYSTEM FOLLOW-UP: SUBMODULE_PUBLISH_BLOCKED]\n${publish.summary}\n\nPush the referenced submodule SHAs to durable remote refs, or set ${TRUSTED_SUBMODULE_URL_PATTERNS_ENV} before starting a fresh controller process to allow retained-ref publish for trusted submodule URLs. Then retry integration.`, publish.blockers.map((b) => `${b.path}: ${b.reason}`));
             }
-            const postMergeCheckoutSync = this.syncSubmoduleWorktreesToHeadPins({ targetWorkspacePath: controllerWorkspacePath, recursive: true });
+            const postMergeCheckoutSync = this.syncSubmoduleWorktreesToHeadPins({
+                targetWorkspacePath: controllerWorkspacePath,
+                recursive: true,
+                allowRootWorktreeChanges: true,
+            });
             if (postMergeCheckoutSync.status === "blocked") {
                 abortMergeAndCleanPostMergeValidationArtifacts(controllerWorkspacePath);
                 return nativeGitIntegrationFailure(request, `submodule checkout sync failed after merge: ${postMergeCheckoutSync.summary}`, { sourceBranch, sourceRef, sourceHead }, undefined, submoduleCheckoutSyncValidationSignals(postMergeCheckoutSync));

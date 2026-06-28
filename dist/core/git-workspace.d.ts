@@ -298,6 +298,12 @@ export interface NativeGitRecursiveCheckoutVerificationResult {
 export interface NativeGitSubmoduleCheckoutSyncRequest {
     targetWorkspacePath: string;
     recursive?: boolean;
+    /**
+     * Permit unrelated root worktree/index changes while aligning submodule checkouts.
+     * Only use after the caller has already verified the root worktree was clean,
+     * such as during an in-progress no-commit merge whose root changes are expected.
+     */
+    allowRootWorktreeChanges?: boolean;
 }
 export interface NativeGitSubmoduleCheckoutSyncResult {
     status: "passed" | "blocked" | "skipped";

@@ -1501,7 +1501,8 @@ test("native git integrator keeps controller submodule checkout aligned with git
         git(join(allocation.worktreePath, "aos-core"), ["commit", "-m", "submodule v2"]);
         const nextSha = git(join(allocation.worktreePath, "aos-core"), ["rev-parse", "HEAD"]);
         git(join(allocation.worktreePath, "aos-core"), ["push", "origin", "HEAD:refs/heads/main"]);
-        git(allocation.worktreePath, ["add", "aos-core"]);
+        writeFileSync(join(allocation.worktreePath, "root-change.txt"), "merged root change\n");
+        git(allocation.worktreePath, ["add", "aos-core", "root-change.txt"]);
         git(allocation.worktreePath, ["commit", "-m", "bump aos-core"]);
         const firstResult = manager.integrateSubagentBranch({
             controllerWorkspacePath: controller.worktreePath,
@@ -1522,6 +1523,7 @@ test("native git integrator keeps controller submodule checkout aligned with git
         assert.match(firstResult.summary, /submodule checkout sync passed/);
         assert.equal(git(controller.worktreePath, ["rev-parse", "HEAD:aos-core"]), nextSha);
         assert.equal(git(join(controller.worktreePath, "aos-core"), ["rev-parse", "HEAD"]), nextSha);
+        assert.equal(git(controller.worktreePath, ["show", "HEAD:root-change.txt"]), "merged root change");
         assert.equal(git(controller.worktreePath, ["status", "--porcelain=v1", "--ignore-submodules=none"]), "");
         // Simulate a controller workspace left stale by an older runner version; the
         // next integration must repair the clean gitlink mismatch instead of

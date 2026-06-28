@@ -421,6 +421,12 @@ export interface NativeGitRecursiveCheckoutVerificationResult {
 export interface NativeGitSubmoduleCheckoutSyncRequest {
   targetWorkspacePath: string;
   recursive?: boolean;
+  /**
+   * Permit unrelated root worktree/index changes while aligning submodule checkouts.
+   * Only use after the caller has already verified the root worktree was clean,
+   * such as during an in-progress no-commit merge whose root changes are expected.
+   */
+  allowRootWorktreeChanges?: boolean;
 }
 
 export interface NativeGitSubmoduleCheckoutSyncResult {
@@ -643,10 +649,12 @@ export class NativeGitWorkspaceManager {
     }
 
     const blockers: Array<{ path: string; reason: string }> = [];
-    const rootDirty = gitStatusPorcelain(targetWorkspacePath, { ignoreWorktreeRoot: true });
-    for (const line of rootDirty.split(/\r?\n/).filter((item) => item.trim())) {
-      const dirtyPath = statusPath(line);
-      if (!pathTouchesAny(dirtyPath, changedPaths)) blockers.push({ path: dirtyPath, reason: `unrelated dirty root worktree status: ${line}` });
+    if (!request.allowRootWorktreeChanges) {
+      const rootDirty = gitStatusPorcelain(targetWorkspacePath, { ignoreWorktreeRoot: true });
+      for (const line of rootDirty.split(/\r?\n/).filter((item) => item.trim())) {
+        const dirtyPath = statusPath(line);
+        if (!pathTouchesAny(dirtyPath, changedPaths)) blockers.push({ path: dirtyPath, reason: `unrelated dirty root worktree status: ${line}` });
+      }
     }
 
     for (const submodulePath of changedPaths) {
@@ -858,7 +866,11 @@ export class NativeGitWorkspaceManager {
         );
       }
 
-      const postMergeCheckoutSync = this.syncSubmoduleWorktreesToHeadPins({ targetWorkspacePath: controllerWorkspacePath, recursive: true });
+      const postMergeCheckoutSync = this.syncSubmoduleWorktreesToHeadPins({
+        targetWorkspacePath: controllerWorkspacePath,
+        recursive: true,
+        allowRootWorktreeChanges: true,
+      });
       if (postMergeCheckoutSync.status === "blocked") {
         abortMergeAndCleanPostMergeValidationArtifacts(controllerWorkspacePath);
         return nativeGitIntegrationFailure(
