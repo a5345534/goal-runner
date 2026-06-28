@@ -566,4 +566,109 @@ test("Pi harness subagent adapter abort stops tracked detached session handle", 
     await adapter.abortSession({ subagent: subagent({ workspacePath: "/repo" }), reason: "controller cancelled" });
     assert.deepEqual(stopped, ["subagent-subagent-1"]);
 });
+// ── SUBAGENT_QUESTION detection tests ──
+test("Pi subagent session inspection detects SUBAGENT_QUESTION marker and returns needsFollowup", () => {
+    const state = readPiSubagentSessionState(subagent({ sessionFile: "/question-session" }), {
+        exists: () => true,
+        readFile: () => JSON.stringify({
+            type: "message",
+            message: {
+                role: "assistant",
+                content: [{
+                        type: "text",
+                        text: [
+                            "I've started implementing the attendance feature.",
+                            "",
+                            "SUBAGENT_QUESTION:",
+                            "- question: Which module should I add the new types to?",
+                            "- why it matters: Module boundary and import structure",
+                            "- options:",
+                            "  - A: Existing types.ts (simpler, but files grow)",
+                            "  - B: New types/ directory (cleaner but adds imports)",
+                            "- recommended default: A",
+                            "- blocking: no",
+                            "",
+                            "I'll wait for controller guidance before proceeding.",
+                        ].join("\n"),
+                    }],
+            },
+            timestamp: now,
+        }),
+    });
+    assert.equal(state.status, "needsFollowup", "question marker should trigger needsFollowup");
+    assert.ok(state.selfReportedResult?.startsWith("SUBAGENT_QUESTION:"), "selfReportedResult should contain SUBAGENT_QUESTION prefix");
+    assert.ok(state.selfReportedResult?.includes("Which module"), "selfReportedResult should contain the question text");
+    assert.equal(state.lastActivityAt, now);
+});
+test("Pi subagent session inspection detects SUBAGENT_QUESTION before RESULT marker priority", () => {
+    // QUESTION marker comes before RESULT - since we check RESULT first,
+    // the RESULT takes priority. But if QUESTION is the LAST marker...
+    const state = readPiSubagentSessionState(subagent({ sessionFile: "/question-before-result" }), {
+        exists: () => true,
+        readFile: () => JSON.stringify({
+            type: "message",
+            message: {
+                role: "assistant",
+                content: [{
+                        type: "text",
+                        text: [
+                            "SUBAGENT_QUESTION:",
+                            "- question: Should I add tests?",
+                            "- blocking: no",
+                            "- recommended default: yes",
+                            "",
+                            "Anyway, I'm done.",
+                            "SUBAGENT_RESULT: completed the feature",
+                        ].join("\n"),
+                    }],
+            },
+            timestamp: now,
+        }),
+    });
+    // RESULT marker takes priority over QUESTION when both are present
+    assert.equal(state.status, "selfReportedComplete", "RESULT should take priority over QUESTION");
+    assert.equal(state.selfReportedResult, "completed the feature");
+});
+test("Pi subagent session inspection detects blocking SUBAGENT_QUESTION", () => {
+    const state = readPiSubagentSessionState(subagent({ sessionFile: "/blocking-question" }), {
+        exists: () => true,
+        readFile: () => JSON.stringify({
+            type: "message",
+            message: {
+                role: "assistant",
+                content: [{
+                        type: "text",
+                        text: [
+                            "SUBAGENT_QUESTION:",
+                            "- question: This change affects public API contract",
+                            "- why it matters: Backward compatibility",
+                            "- options:",
+                            "  - A: Version the endpoint",
+                            "  - B: Keep backward compatible",
+                            "- recommended default: B",
+                            "- blocking: yes",
+                        ].join("\n"),
+                    }],
+            },
+            timestamp: now,
+        }),
+    });
+    assert.equal(state.status, "needsFollowup", "blocking question should trigger needsFollowup");
+    assert.ok(state.selfReportedResult?.startsWith("SUBAGENT_QUESTION:"), "should contain SUBAGENT_QUESTION prefix");
+    assert.ok(state.selfReportedResult?.includes("blocking: yes"), "should preserve blocking field");
+});
+test("renderPiSubagentInitialPrompt includes SUBAGENT_QUESTION guidance when implementation-discipline is active", () => {
+    const prompt = renderPiSubagentInitialPrompt({
+        goalId: "goal-1",
+        node: node({ qualityProfiles: ["implementation-discipline"] }),
+        subagentId: "subagent-1",
+        cwd: "/repo",
+        branch: "feat/attendance",
+        initialPrompt: "Implement attendance DocTypes",
+    });
+    assert.ok(prompt.includes("SUBAGENT_QUESTION"), "prompt should contain SUBAGENT_QUESTION guidance");
+    assert.ok(prompt.includes("controller will answer from context"), "prompt should explain triage flow");
+    assert.ok(prompt.includes("SUBAGENT_RESULT"), "prompt should preserve SUBAGENT_RESULT guidance");
+    assert.ok(prompt.includes("SUBAGENT_BLOCKED"), "prompt should preserve SUBAGENT_BLOCKED guidance");
+});
 //# sourceMappingURL=pi-subagent-adapter.test.js.map

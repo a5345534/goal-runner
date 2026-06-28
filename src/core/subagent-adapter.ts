@@ -1,5 +1,5 @@
 import { adapterObservationFromHarnessState } from "./lifecycle.js";
-import type { GoalAttemptCursor, GoalControllerActionAttemptRecord, GoalDagNode, GoalNodePreparedResources, GoalSubagentRecord, GoalSubagentStatus } from "./types.js";
+import type { GoalAttemptCursor, GoalControllerActionAttemptRecord, GoalDagNode, GoalNodePreparedResources, GoalSubagentQuestionOutcome, GoalSubagentRecord, GoalSubagentStatus } from "./types.js";
 
 export type HarnessSubagentSessionStatus =
   | "starting"
@@ -47,12 +47,48 @@ export interface HarnessSubagentStateRequest {
   metadata?: Record<string, unknown>;
 }
 
+/** Marker prefix for SUBAGENT_QUESTION, SUBAGENT_RESULT, and SUBAGENT_BLOCKED. */
+export const SUBAGENT_MARKER_PREFIXES = ["SUBAGENT_RESULT", "SUBAGENT_BLOCKED", "SUBAGENT_QUESTION"] as const;
+
+/**
+ * Regex that matches any SUBAGENT_* marker at the start of a line,
+ * optionally preceded by markdown heading/formatting.
+ */
+export const SUBAGENT_MARKER_RX = /(?:^|\n)\s*(?:#{1,6}\s*)?(?:[-*]\s*)?(?:\*\*)?SUBAGENT_(?:[A-Z_]+)(?:\*\*)?\s*:\s*/i;
+
+/**
+ * Regex for SUBAGENT_QUESTION marker specifically.
+ * Captures the question body text (everything until the next SUBAGENT_* marker or end of string).
+ */
+export const QUESTION_MARKER_RX = /(?:^|\n)\s*(?:#{1,6}\s*)?(?:[-*]\s*)?(?:\*\*)?SUBAGENT_QUESTION(?:\*\*)?\s*:\s*([\s\S]*?)(?=\n\s*(?:#{1,6}\s*)?(?:[-*]\s*)?(?:\*\*)?SUBAGENT_[A-Z_]+(?:\*\*)?\s*:|$)/i;
+
+/**
+ * Extract the text body of a SUBAGENT_QUESTION marker from assistant output.
+ * Returns undefined if no question marker is found.
+ */
+export function extractQuestionMarker(text: string | undefined): string | undefined {
+  if (!text) return undefined;
+  const match = text.match(QUESTION_MARKER_RX);
+  return match?.[1]?.trim() || undefined;
+}
+
+/**
+ * Check whether a status line signals question-pending state.
+ */
+export function isQuestionPendingState(subagent: GoalSubagentRecord): boolean {
+  return subagent.status === "needsFollowup" &&
+    subagent.selfReportedResult !== undefined &&
+    QUESTION_MARKER_RX.test(subagent.selfReportedResult);
+}
+
 export interface HarnessSubagentSessionState {
   status: HarnessSubagentSessionStatus;
   lastActivityAt?: string;
   selfReportedResult?: string;
   validationSignals?: string[];
   error?: string;
+  /** When a SUBAGENT_QUESTION is detected, the parsed question outcome (if triaged) or raw question text (if pending). */
+  questionOutcome?: GoalSubagentQuestionOutcome;
   metadata?: Record<string, unknown>;
 }
 

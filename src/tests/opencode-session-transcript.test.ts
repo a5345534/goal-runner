@@ -115,3 +115,38 @@ test("buildOpencodeCompletionEvidence returns empty signals for a pure status tr
   assert.deepEqual(evidence.commands, []);
   assert.deepEqual(evidence.toolNames, []);
 });
+
+test("summariseOpencodeSession detects SUBAGENT_QUESTION marker", () => {
+  const messages: OpencodeMessage[] = [
+    baseMessage({ id: "a1", role: "assistant", parts: [{ type: "text", text: [
+      "I have a question about the approach.",
+      "SUBAGENT_QUESTION:",
+      "- question: Which approach should I use?",
+      "- options:",
+      "  - A: Simple approach",
+      "  - B: Complex approach",
+      "- recommended default: A",
+      "- blocking: no",
+    ].join("\n") }] }),
+  ];
+  const snapshot = summariseOpencodeSession(messages);
+  assert.equal(snapshot.hasQuestionMarker, true);
+  assert.equal(snapshot.hasResultMarker, false);
+  assert.equal(snapshot.hasBlockedMarker, false);
+});
+
+test("summariseOpencodeSession prioritizes RESULT over QUESTION when both are present", () => {
+  const messages: OpencodeMessage[] = [
+    baseMessage({ id: "a1", role: "assistant", parts: [{ type: "text", text: [
+      "SUBAGENT_QUESTION:",
+      "- question: Which test framework?",
+      "- blocking: no",
+      "",
+      "SUBAGENT_RESULT: completed implementation",
+    ].join("\n") }] }),
+  ];
+  const snapshot = summariseOpencodeSession(messages);
+  assert.equal(snapshot.hasResultMarker, true, "result marker should be detected");
+  assert.equal(snapshot.hasQuestionMarker, true, "question marker should also be detected");
+  assert.equal(snapshot.hasBlockedMarker, false);
+});

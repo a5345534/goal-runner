@@ -1,6 +1,6 @@
 import type { GoalDagSchedulingPolicy } from "./dag-scheduler.js";
 import type { ControllerExceptionHandler } from "./exception-handler.js";
-import type { HarnessSubagentAdapter, StartGoalSubagentOptions } from "./subagent-adapter.js";
+import { type HarnessSubagentAdapter, type StartGoalSubagentOptions } from "./subagent-adapter.js";
 import type { GoalDagNode, GoalLedgerEvent, GoalOrchestrationState, GoalRecord, GoalSubagentRecord } from "./types.js";
 import { type GoalControllerAuditOptions, type GoalControllerAuditSnapshot } from "./controller-audit.js";
 export interface GoalControllerRuntimePort {

@@ -1,4 +1,34 @@
 import { adapterObservationFromHarnessState } from "./lifecycle.js";
+/** Marker prefix for SUBAGENT_QUESTION, SUBAGENT_RESULT, and SUBAGENT_BLOCKED. */
+export const SUBAGENT_MARKER_PREFIXES = ["SUBAGENT_RESULT", "SUBAGENT_BLOCKED", "SUBAGENT_QUESTION"];
+/**
+ * Regex that matches any SUBAGENT_* marker at the start of a line,
+ * optionally preceded by markdown heading/formatting.
+ */
+export const SUBAGENT_MARKER_RX = /(?:^|\n)\s*(?:#{1,6}\s*)?(?:[-*]\s*)?(?:\*\*)?SUBAGENT_(?:[A-Z_]+)(?:\*\*)?\s*:\s*/i;
+/**
+ * Regex for SUBAGENT_QUESTION marker specifically.
+ * Captures the question body text (everything until the next SUBAGENT_* marker or end of string).
+ */
+export const QUESTION_MARKER_RX = /(?:^|\n)\s*(?:#{1,6}\s*)?(?:[-*]\s*)?(?:\*\*)?SUBAGENT_QUESTION(?:\*\*)?\s*:\s*([\s\S]*?)(?=\n\s*(?:#{1,6}\s*)?(?:[-*]\s*)?(?:\*\*)?SUBAGENT_[A-Z_]+(?:\*\*)?\s*:|$)/i;
+/**
+ * Extract the text body of a SUBAGENT_QUESTION marker from assistant output.
+ * Returns undefined if no question marker is found.
+ */
+export function extractQuestionMarker(text) {
+    if (!text)
+        return undefined;
+    const match = text.match(QUESTION_MARKER_RX);
+    return match?.[1]?.trim() || undefined;
+}
+/**
+ * Check whether a status line signals question-pending state.
+ */
+export function isQuestionPendingState(subagent) {
+    return subagent.status === "needsFollowup" &&
+        subagent.selfReportedResult !== undefined &&
+        QUESTION_MARKER_RX.test(subagent.selfReportedResult);
+}
 export async function startGoalSubagent(adapter, node, options) {
     const subagentId = options.subagentId ?? `${node.nodeId}-${randomSuffix()}`;
     const startedAt = toIso(options.now ?? new Date());

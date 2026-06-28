@@ -11,6 +11,7 @@ const QUALITY_PROFILE_DISCIPLINE = {
     "docs-required": "update or identify required documentation/ADR/operator notes for the change",
     "observability-required": "preserve or add operational visibility; mention logs, metrics, traces, or monitorability evidence",
     "ship-preflight": "include release-readiness notes such as validation, rollback/safety plan, and known risks",
+    "implementation-discipline": "surfaces material ambiguity to the controller via SUBAGENT_QUESTION markers instead of silently assuming or directly asking the user",
 };
 export function qualityProfilesOf(value) {
     if (!value || typeof value !== "object")
