@@ -2,8 +2,8 @@ import type { ContinuationReservation, GoalDagNode, GoalLedgerEvent, GoalSubagen
 import { type PiBackgroundRunnerRecord } from "./runner-ops.js";
 import type { GoalListThemeLike } from "./goal-list-ui.js";
 export type GoalMonitorAction = "close" | "pause" | "resume" | "clear" | "openSession";
-export type GoalMonitorNodeOperation = "retryNode" | "continueNode";
-export type GoalMonitorRunnerOperation = "openSession" | "stop" | "kill" | "archive";
+export type GoalMonitorNodeOperation = "retryNode";
+export type GoalMonitorRunnerOperation = "openSession" | "continueSubagent" | "stop" | "kill" | "archive";
 export type GoalMonitorSelection = {
     kind: "action";
     action: GoalMonitorAction;

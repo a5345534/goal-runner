@@ -16,6 +16,9 @@ export type GoalCommand = {
     kind: "continueNode";
     nodeId: string;
 } | {
+    kind: "continueSubagent";
+    subagentId: string;
+} | {
     kind: "pause";
 } | {
     kind: "resume";

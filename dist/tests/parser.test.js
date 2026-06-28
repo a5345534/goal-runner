@@ -8,6 +8,7 @@ test("parse /goal forms", () => {
     assert.deepEqual(parseGoalCommand("clear"), { kind: "clear" });
     assert.deepEqual(parseGoalCommand("retry-node closeout-docs"), { kind: "retryNode", nodeId: "closeout-docs" });
     assert.deepEqual(parseGoalCommand("continue-node closeout-docs"), { kind: "continueNode", nodeId: "closeout-docs" });
+    assert.deepEqual(parseGoalCommand("continue-subagent subagent-closeout-docs"), { kind: "continueSubagent", subagentId: "subagent-closeout-docs" });
     assert.deepEqual(parseGoalCommand("edit"), { kind: "edit" });
     assert.deepEqual(parseGoalCommand("edit ship it"), { kind: "edit", objective: "ship it", tokenBudget: undefined });
     assert.deepEqual(parseGoalCommand(" finish migration "), { kind: "start", objective: "finish migration", tokenBudget: undefined });
@@ -24,6 +25,7 @@ test("parse token budgets", () => {
     assert.throws(() => parseGoalCommand("pause now"), /extra arguments/);
     assert.throws(() => parseGoalCommand("retry-node"), /requires exactly one DAG node id/);
     assert.throws(() => parseGoalCommand("continue-node"), /requires exactly one DAG node id/);
+    assert.throws(() => parseGoalCommand("continue-subagent"), /requires exactly one subagent id/);
 });
 test("objective validation trims and enforces 4000 chars", () => {
     assert.equal(validateGoalObjective("  hello  "), "hello");

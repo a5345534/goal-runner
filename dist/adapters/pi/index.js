@@ -107,7 +107,7 @@ export default function goalPiExtension(pi) {
         },
     });
     pi.registerCommand("goal", {
-        description: "Long-running orchestrated goal: /goal <objective>, /goal list, /goal status|monitor|debug|pause|resume|retry-node|continue-node|edit|budget|clear [goal-ref]",
+        description: "Long-running orchestrated goal: /goal <objective>, /goal list, /goal status|monitor|debug|pause|resume|retry-node|continue-node|continue-subagent|edit|budget|clear [goal-ref]",
         getArgumentCompletions: (prefix) => {
             const commands = [
                 "--tokens",
@@ -452,6 +452,12 @@ async function handlePiGoalCommand(runtime, ctx, args, backgroundGoalSessions, c
         const { goalRef, nodeId } = parseGoalNodeTargetArgs(first, tokens.slice(1));
         const goal = await resolveGoalReferenceOrDefault(runtime, ctx, goalRef);
         await continueTargetGoalNodeInPlace(runtime, ctx, goal, nodeId, controllerDefaults);
+        return;
+    }
+    if (first === "continue-subagent") {
+        const { goalRef, nodeId: subagentId } = parseGoalNodeTargetArgs(first, tokens.slice(1));
+        const goal = await resolveGoalReferenceOrDefault(runtime, ctx, goalRef);
+        await continueTargetGoalSubagentInPlace(runtime, ctx, goal, subagentId, controllerDefaults);
         return;
     }
     if (first === "pause" || first === "resume" || first === "clear") {
@@ -1868,7 +1874,8 @@ function parseGoalNodeTargetArgs(command, args) {
         return { nodeId: args[0] ?? "" };
     if (args.length === 2)
         return { goalRef: args[0], nodeId: args[1] ?? "" };
-    throw new Error(`/goal ${command} requires <node-id> or <goal-ref> <node-id>`);
+    const targetLabel = command === "continue-subagent" ? "subagent-id" : "node-id";
+    throw new Error(`/goal ${command} requires <${targetLabel}> or <goal-ref> <${targetLabel}>`);
 }
 async function editGoalFromCommand(runtime, ctx, args) {
     if (args.length === 0) {
@@ -1982,10 +1989,6 @@ async function pickGoalMonitorAction(runtime, ctx, goal) {
 async function runGoalMonitorNodeOperation(runtime, ctx, goal, operation, nodeId) {
     if (operation === "retryNode") {
         await retryTargetGoalNode(runtime, ctx, goal, nodeId);
-        return;
-    }
-    if (operation === "continueNode") {
-        await continueTargetGoalNodeInPlace(runtime, ctx, goal, nodeId);
     }
 }
 async function runGoalMonitorRunnerOperation(runtime, ctx, goal, operation, subagentId) {
@@ -2001,6 +2004,10 @@ async function runGoalMonitorRunnerOperation(runtime, ctx, goal, operation, suba
             return;
         }
         await ctx.switchSession(subagent.sessionFile);
+        return;
+    }
+    if (operation === "continueSubagent") {
+        await continueTargetGoalSubagentInPlace(runtime, ctx, goal, subagentId);
         return;
     }
     const inventory = readPiBackgroundRunnerInventory(goal.goalId, state.subagents);
@@ -2364,6 +2371,12 @@ async function retryTargetGoalNode(runtime, ctx, goal, nodeId, controllerDefault
 }
 async function continueTargetGoalNodeInPlace(runtime, ctx, goal, nodeId, controllerDefaults = {}) {
     const result = await runtime.continueGoalDagNodeInPlace(goal.goalId, nodeId);
+    ctx.ui.notify(result.message, "info");
+    const latestGoal = (await runtime.listGoalSummaries()).find((candidate) => candidate.goalId === goal.goalId) ?? goal;
+    await resumeTargetGoal(runtime, ctx, latestGoal, controllerDefaults);
+}
+async function continueTargetGoalSubagentInPlace(runtime, ctx, goal, subagentId, controllerDefaults = {}) {
+    const result = await runtime.continueGoalDagSubagentInPlace(goal.goalId, subagentId);
     ctx.ui.notify(result.message, "info");
     const latestGoal = (await runtime.listGoalSummaries()).find((candidate) => candidate.goalId === goal.goalId) ?? goal;
     await resumeTargetGoal(runtime, ctx, latestGoal, controllerDefaults);

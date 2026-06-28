@@ -6,6 +6,7 @@ export type GoalCommand =
   | { kind: "edit"; objective?: string; tokenBudget?: number }
   | { kind: "retryNode"; nodeId: string }
   | { kind: "continueNode"; nodeId: string }
+  | { kind: "continueSubagent"; subagentId: string }
   | { kind: "pause" }
   | { kind: "resume" }
   | { kind: "clear" };
@@ -68,6 +69,11 @@ export function parseGoalCommand(args = ""): GoalCommand {
     case "continueNode": {
       if (rest.length !== 1) throw new Error(`/goal ${first} requires exactly one DAG node id`);
       return { kind: "continueNode", nodeId: rest[0] ?? "" };
+    }
+    case "continue-subagent":
+    case "continueSubagent": {
+      if (rest.length !== 1) throw new Error(`/goal ${first} requires exactly one subagent id`);
+      return { kind: "continueSubagent", subagentId: rest[0] ?? "" };
     }
     case "pause":
       ensureNoExtraArgs(first, rest);

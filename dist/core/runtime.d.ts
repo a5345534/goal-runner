@@ -100,7 +100,10 @@ export declare class GoalRuntime {
     retryGoalDagNodeForSession(sessionKey: string, nodeId: string): Promise<GoalToolResult>;
     retryGoalDagNode(goalId: string, nodeId: string): Promise<GoalToolResult>;
     continueGoalDagNodeInPlaceForSession(sessionKey: string, nodeId: string): Promise<GoalToolResult>;
+    continueGoalDagSubagentInPlaceForSession(sessionKey: string, subagentId: string): Promise<GoalToolResult>;
     continueGoalDagNodeInPlace(goalId: string, nodeId: string): Promise<GoalToolResult>;
+    continueGoalDagSubagentInPlace(goalId: string, subagentId: string): Promise<GoalToolResult>;
+    private continueGoalDagNodeInPlaceInternal;
     getReservation(sessionKey: string): Promise<ContinuationReservation | undefined>;
     clearGoal(sessionKey: string): Promise<GoalToolResult>;
     toolGetGoal(sessionKey: string): Promise<GoalToolResult>;

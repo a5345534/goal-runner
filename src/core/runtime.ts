@@ -133,6 +133,8 @@ export class GoalRuntime {
         return this.retryGoalDagNodeForSession(sessionKey, command.nodeId);
       case "continueNode":
         return this.continueGoalDagNodeInPlaceForSession(sessionKey, command.nodeId);
+      case "continueSubagent":
+        return this.continueGoalDagSubagentInPlaceForSession(sessionKey, command.subagentId);
       case "pause":
         return this.pauseGoal(sessionKey);
       case "resume":
@@ -699,7 +701,22 @@ export class GoalRuntime {
     return this.continueGoalDagNodeInPlace(goal.goalId, nodeId);
   }
 
+  async continueGoalDagSubagentInPlaceForSession(sessionKey: string, subagentId: string): Promise<GoalToolResult> {
+    const goal = await this.requireGoal(sessionKey);
+    return this.continueGoalDagSubagentInPlace(goal.goalId, subagentId);
+  }
+
   async continueGoalDagNodeInPlace(goalId: string, nodeId: string): Promise<GoalToolResult> {
+    return this.continueGoalDagNodeInPlaceInternal(goalId, nodeId);
+  }
+
+  async continueGoalDagSubagentInPlace(goalId: string, subagentId: string): Promise<GoalToolResult> {
+    const subagent = await this.store.getGoalSubagent(goalId, subagentId);
+    if (!subagent) throw new Error(`subagent not found for goal ${goalId}: ${subagentId}`);
+    return this.continueGoalDagNodeInPlaceInternal(goalId, subagent.nodeId, subagentId);
+  }
+
+  private async continueGoalDagNodeInPlaceInternal(goalId: string, nodeId: string, preferredSubagentId?: string): Promise<GoalToolResult> {
     const goal = await this.getGoalById(goalId);
     if (!goal) throw new Error(`goal not found: ${goalId}`);
     const node = await this.store.getGoalDagNode(goalId, nodeId);
@@ -709,8 +726,11 @@ export class GoalRuntime {
     }
 
     const subagents = await this.store.listGoalSubagents(goalId, nodeId);
-    const subagent = selectSubagentForInPlaceContinuation(node, subagents);
-    if (!subagent) throw new Error(`DAG node ${nodeId} has no recorded subagent to continue; use retry-node to start a fresh subagent`);
+    const subagent = selectSubagentForInPlaceContinuation(node, subagents, preferredSubagentId);
+    if (!subagent) {
+      const target = preferredSubagentId ? `subagent ${preferredSubagentId}` : `DAG node ${nodeId}`;
+      throw new Error(`${target} has no recorded subagent to continue; use retry-node to start a fresh subagent`);
+    }
     if (!subagent.sessionFile) throw new Error(`DAG node ${nodeId} subagent ${subagent.subagentId} has no reusable session file; use retry-node to start a fresh subagent`);
 
     const now = this.nowIso();
@@ -763,7 +783,7 @@ export class GoalRuntime {
     });
     await this.store.clearReservation(goal.sessionKey);
     await this.callbacks.notifyGoalUpdated?.(updatedGoal);
-    return { goal: updatedGoal, message: `DAG node ${nodeId} queued for same-subagent continuation using ${subagent.subagentId}; retry count reset.` };
+    return { goal: updatedGoal, message: `Subagent ${subagent.subagentId} queued for same-subagent continuation on DAG node ${nodeId}; retry count reset.` };
   }
 
   async getReservation(sessionKey: string): Promise<ContinuationReservation | undefined> {
@@ -1224,7 +1244,8 @@ export class GoalRuntime {
   }
 }
 
-function selectSubagentForInPlaceContinuation(node: GoalDagNode, subagents: GoalSubagentRecord[]): GoalSubagentRecord | undefined {
+function selectSubagentForInPlaceContinuation(node: GoalDagNode, subagents: GoalSubagentRecord[], preferredSubagentId?: string): GoalSubagentRecord | undefined {
+  if (preferredSubagentId) return subagents.find((subagent) => subagent.subagentId === preferredSubagentId && subagent.status !== "complete");
   const preparedSubagentId = node.preparedResources?.subagentId;
   if (preparedSubagentId) {
     const prepared = subagents.find((subagent) => subagent.subagentId === preparedSubagentId && subagent.status !== "complete");

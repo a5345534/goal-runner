@@ -56,6 +56,12 @@ export function parseGoalCommand(args = "") {
                 throw new Error(`/goal ${first} requires exactly one DAG node id`);
             return { kind: "continueNode", nodeId: rest[0] ?? "" };
         }
+        case "continue-subagent":
+        case "continueSubagent": {
+            if (rest.length !== 1)
+                throw new Error(`/goal ${first} requires exactly one subagent id`);
+            return { kind: "continueSubagent", subagentId: rest[0] ?? "" };
+        }
         case "pause":
             ensureNoExtraArgs(first, rest);
             return { kind: "pause" };

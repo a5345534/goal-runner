@@ -182,7 +182,7 @@ export default function goalPiExtension(pi: ExtensionAPI) {
 
   pi.registerCommand("goal", {
     description:
-      "Long-running orchestrated goal: /goal <objective>, /goal list, /goal status|monitor|debug|pause|resume|retry-node|continue-node|edit|budget|clear [goal-ref]",
+      "Long-running orchestrated goal: /goal <objective>, /goal list, /goal status|monitor|debug|pause|resume|retry-node|continue-node|continue-subagent|edit|budget|clear [goal-ref]",
     getArgumentCompletions: (prefix: string) => {
       const commands = [
         "--tokens",
@@ -565,6 +565,12 @@ async function handlePiGoalCommand(
     const { goalRef, nodeId } = parseGoalNodeTargetArgs(first, tokens.slice(1));
     const goal = await resolveGoalReferenceOrDefault(runtime, ctx, goalRef);
     await continueTargetGoalNodeInPlace(runtime, ctx, goal, nodeId, controllerDefaults);
+    return;
+  }
+  if (first === "continue-subagent") {
+    const { goalRef, nodeId: subagentId } = parseGoalNodeTargetArgs(first, tokens.slice(1));
+    const goal = await resolveGoalReferenceOrDefault(runtime, ctx, goalRef);
+    await continueTargetGoalSubagentInPlace(runtime, ctx, goal, subagentId, controllerDefaults);
     return;
   }
   if (first === "pause" || first === "resume" || first === "clear") {
@@ -2118,7 +2124,8 @@ function ensureAtMostOneGoalRef(command: string, rest: string[]): void {
 function parseGoalNodeTargetArgs(command: string, args: string[]): { goalRef?: string; nodeId: string } {
   if (args.length === 1) return { nodeId: args[0] ?? "" };
   if (args.length === 2) return { goalRef: args[0], nodeId: args[1] ?? "" };
-  throw new Error(`/goal ${command} requires <node-id> or <goal-ref> <node-id>`);
+  const targetLabel = command === "continue-subagent" ? "subagent-id" : "node-id";
+  throw new Error(`/goal ${command} requires <${targetLabel}> or <goal-ref> <${targetLabel}>`);
 }
 
 async function editGoalFromCommand(runtime: GoalRuntime, ctx: ExtensionCommandContext, args: string[]): Promise<void> {
@@ -2233,10 +2240,6 @@ async function runGoalMonitorNodeOperation(
 ): Promise<void> {
   if (operation === "retryNode") {
     await retryTargetGoalNode(runtime, ctx, goal, nodeId);
-    return;
-  }
-  if (operation === "continueNode") {
-    await continueTargetGoalNodeInPlace(runtime, ctx, goal, nodeId);
   }
 }
 
@@ -2259,6 +2262,10 @@ async function runGoalMonitorRunnerOperation(
       return;
     }
     await ctx.switchSession(subagent.sessionFile);
+    return;
+  }
+  if (operation === "continueSubagent") {
+    await continueTargetGoalSubagentInPlace(runtime, ctx, goal, subagentId);
     return;
   }
 
@@ -2684,6 +2691,13 @@ async function retryTargetGoalNode(runtime: GoalRuntime, ctx: ExtensionCommandCo
 
 async function continueTargetGoalNodeInPlace(runtime: GoalRuntime, ctx: ExtensionCommandContext, goal: GoalSummary, nodeId: string, controllerDefaults: PiGoalControllerDefaults = {}): Promise<void> {
   const result = await runtime.continueGoalDagNodeInPlace(goal.goalId, nodeId);
+  ctx.ui.notify(result.message, "info");
+  const latestGoal = (await runtime.listGoalSummaries()).find((candidate) => candidate.goalId === goal.goalId) ?? goal;
+  await resumeTargetGoal(runtime, ctx, latestGoal, controllerDefaults);
+}
+
+async function continueTargetGoalSubagentInPlace(runtime: GoalRuntime, ctx: ExtensionCommandContext, goal: GoalSummary, subagentId: string, controllerDefaults: PiGoalControllerDefaults = {}): Promise<void> {
+  const result = await runtime.continueGoalDagSubagentInPlace(goal.goalId, subagentId);
   ctx.ui.notify(result.message, "info");
   const latestGoal = (await runtime.listGoalSummaries()).find((candidate) => candidate.goalId === goal.goalId) ?? goal;
   await resumeTargetGoal(runtime, ctx, latestGoal, controllerDefaults);
