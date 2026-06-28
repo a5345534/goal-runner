@@ -35,3 +35,4 @@ export declare class PiHarnessSubagentAdapter implements HarnessSubagentAdapter 
 export declare function createPiHarnessSubagentAdapter(options?: PiHarnessSubagentAdapterOptions): PiHarnessSubagentAdapter;
 export declare function renderPiSubagentInitialPrompt(request: HarnessSubagentStartRequest): string;
 export declare function readPiSubagentSessionState(subagent: GoalSubagentRecord, options?: PiSubagentSessionInspectionOptions): HarnessSubagentSessionState;
+export declare function extractQuestionMarkerFromPi(text: string | undefined): string | undefined;

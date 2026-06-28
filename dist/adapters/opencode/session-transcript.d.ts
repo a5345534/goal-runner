@@ -37,6 +37,7 @@ export interface OpencodeTranscriptSnapshot {
     hasAborted: boolean;
     hasBlockedMarker: boolean;
     hasResultMarker: boolean;
+    hasQuestionMarker: boolean;
     /** Last observed tool name, used by the post-stop guard. */
     lastToolName?: string;
     /** Last observed text snippet, used by audits and the goal reminder. */

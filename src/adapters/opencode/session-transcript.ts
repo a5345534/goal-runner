@@ -43,6 +43,7 @@ export interface OpencodeTranscriptSnapshot {
   hasAborted: boolean;
   hasBlockedMarker: boolean;
   hasResultMarker: boolean;
+  hasQuestionMarker: boolean;
   /** Last observed tool name, used by the post-stop guard. */
   lastToolName?: string;
   /** Last observed text snippet, used by audits and the goal reminder. */
@@ -57,6 +58,7 @@ export interface OpencodeReadOptions {
 
 const RESULT_MARKER = /(?:^|\n)\s*SUBAGENT_RESULT\s*:\s*([\s\S]*?)(?=\n\s*SUBAGENT_[A-Z_]+\s*:|$)/i;
 const BLOCKED_MARKER = /(?:^|\n)\s*SUBAGENT_BLOCKED\s*:\s*([\s\S]*?)(?=\n\s*SUBAGENT_[A-Z_]+\s*:|$)/i;
+const QUESTION_MARKER = /(?:^|\n)\s*SUBAGENT_QUESTION\s*:\s*([\s\S]*?)(?=\n\s*SUBAGENT_[A-Z_]+\s*:|$)/i;
 const STATUS_BLOCKED_MARKER = /(?:^|\n)\s*SUBAGENT_STATUS\s*:\s*blocked\b/i;
 
 export async function readOpencodeSessionTranscript(options: OpencodeReadOptions): Promise<OpencodeTranscriptSnapshot> {
@@ -78,6 +80,7 @@ export function summariseOpencodeSession(messages: OpencodeMessage[]): OpencodeT
     hasAborted: false,
     hasBlockedMarker: false,
     hasResultMarker: false,
+    hasQuestionMarker: false,
   };
   let lastAssistantText: string | undefined;
   let lastToolName: string | undefined;
@@ -95,6 +98,7 @@ export function summariseOpencodeSession(messages: OpencodeMessage[]): OpencodeT
     if (text) lastAssistantText = text;
     if (RESULT_MARKER.test(text ?? "")) snapshot.hasResultMarker = true;
     if (BLOCKED_MARKER.test(text ?? "") || STATUS_BLOCKED_MARKER.test(text ?? "")) snapshot.hasBlockedMarker = true;
+    if (QUESTION_MARKER.test(text ?? "")) snapshot.hasQuestionMarker = true;
     for (const part of message.parts ?? []) {
       if (part?.type === "tool" || part?.type === "toolCall" || part?.type === "tool-call") {
         const toolName = typeof part.tool === "string" ? part.tool : typeof part.name === "string" ? part.name : undefined;

@@ -4,8 +4,8 @@ import { normalizeExceptionSignature } from "./exception-handler.js";
 import { renderExecutorGuardrailLines } from "./executor-prompt.js";
 import { hasSubagentBranchOrWorkspaceEvidence, nodeRequiresSubagentIntegration, requiredSubagentIntegrationTerminalSuccess } from "./integration.js";
 import { attachPreparedResourcesToNode, recordAdapterObservationOnNode, recordRecoveryDecisionOnNode, supersedePreparedResourcesOnNode, withGoalDagNodeLifecyclePhase } from "./lifecycle.js";
-import type { HarnessSubagentAdapter, StartGoalSubagentOptions } from "./subagent-adapter.js";
-import type { GoalAdapterObservationRecord, GoalControllerActionAttemptRecord, GoalControllerTypedEventCategory, GoalDagNode, GoalDagNodeLifecyclePhase, GoalLedgerEvent, GoalNodePreparedResources, GoalOrchestrationState, GoalRecord, GoalRecoveryDecisionRecord, GoalSubagentRecord } from "./types.js";
+import { extractQuestionMarker, isQuestionPendingState, type HarnessSubagentAdapter, type StartGoalSubagentOptions } from "./subagent-adapter.js";
+import type { GoalAdapterObservationRecord, GoalControllerActionAttemptRecord, GoalControllerTypedEventCategory, GoalDagNode, GoalDagNodeLifecyclePhase, GoalLedgerEvent, GoalNodePreparedResources, GoalOrchestrationState, GoalRecord, GoalRecoveryDecisionRecord, GoalSubagentQuestionOutcome, GoalSubagentRecord } from "./types.js";
 import {
   applyAuditActions,
   buildControllerAuditSnapshot,
@@ -1390,6 +1390,13 @@ async function reconcileSubagentOutcomes(
     }
 
     if (subagent.status === "needsFollowup") {
+      // ── SUBAGENT_QUESTION triage ──
+      if (isQuestionPendingState(subagent)) {
+        const triageApplied = await triageSubagentQuestion(runtime, options, state, node, subagent, result, tickStartedAt);
+        if (triageApplied) continue;
+        // If triage returned false (no decision possible), fall through to generic followup.
+      }
+
       const handled = await tryHandleAbnormalObservation(runtime, options, state, node, subagent, result, tickStartedAt, subagent.lastAdapterObservation ?? observationFromSubagentStatus(options.adapter.adapterId, subagent, "protocolViolation", tickStartedAt));
       if (handled) continue;
       const followupPrompt = buildSubagentFollowupPrompt(node, subagent);
@@ -2443,6 +2450,369 @@ function controllerActionAttemptFromError(error: unknown): GoalControllerActionA
   return undefined;
 }
 
+// ── SUBAGENT_QUESTION triage ────────────────────────────────────────────
+
+/**
+ * Triage a subagent question into one of:
+ * 1. answer from existing context (DAG objective, scope, expected outputs, validation contract);
+ * 2. approve a bounded safe assumption (non-blocking with recommended default);
+ * 3. escalate to human (blocking question not answerable from context).
+ *
+ * Returns true if the question was handled (answer sent or blocked); false if no
+ * decision can be made and the caller should fall through to generic followup.
+ */
+async function triageSubagentQuestion(
+  runtime: GoalControllerRuntimePort,
+  options: GoalControllerTickOptions,
+  _state: GoalOrchestrationState,
+  node: GoalDagNode,
+  subagent: GoalSubagentRecord,
+  result: GoalControllerTickResult,
+  tickStartedAt: string,
+): Promise<boolean> {
+  const rawQuestion = extractQuestionMarker(subagent.selfReportedResult);
+  if (!rawQuestion) return false;
+
+  // ── Parse question fields from the marker body ──
+  const questionText = extractQuestionField(rawQuestion, "question") ?? rawQuestion;
+  const whyItMatters = extractQuestionField(rawQuestion, "why it matters");
+  const optionsText = extractOptionsText(rawQuestion);
+  const recommendedDefault = extractQuestionField(rawQuestion, "recommended default");
+  const blockingRaw = extractQuestionField(rawQuestion, "blocking")?.toLowerCase().trim();
+  const blocking = blockingRaw === "yes" || blockingRaw === "true";
+
+  // ── Try to answer from existing context ──
+  const contextAnswer = findContextAnswer(questionText, node);
+  if (contextAnswer) {
+    const outcome: GoalSubagentQuestionOutcome = {
+      rawQuestion: rawQuestion,
+      triageKind: "answeredFromContext",
+      triagedAt: tickStartedAt,
+      controllerResponse: contextAnswer,
+      blocking,
+      triageSummary: "Answered from DAG node context (objective, scope, expected outputs, or validation contract).",
+    };
+    await persistQuestionTriage(runtime, subagent, outcome, node, result, tickStartedAt);
+
+    // Send answer as follow-up prompt to the same subagent.
+    await sendQuestionAnswerFollowup(runtime, options, subagent, contextAnswer, node, result, tickStartedAt);
+    return true;
+  }
+
+  // ── Non-blocking: approve recommended default as bounded assumption ──
+  if (!blocking && recommendedDefault) {
+    const outcome: GoalSubagentQuestionOutcome = {
+      rawQuestion: rawQuestion,
+      triageKind: "approvedAssumption",
+      triagedAt: tickStartedAt,
+      controllerResponse: `Approved recommended default: ${recommendedDefault}${optionsText ? `. Options considered: ${optionsText}` : ""}`,
+      blocking: false,
+      selectedOption: recommendedDefault,
+      triageSummary: `Non-blocking question resolved by approving the recommended default (${recommendedDefault}). Subagent must record this assumption in its final result.`,
+    };
+    await persistQuestionTriage(runtime, subagent, outcome, node, result, tickStartedAt);
+    await sendQuestionAnswerFollowup(runtime, options, subagent, outcome.controllerResponse, node, result, tickStartedAt);
+    return true;
+  }
+
+  // ── Non-blocking without a recommended default: approve a safe path with the first option ──
+  if (!blocking && !recommendedDefault) {
+    const firstOption = extractFirstOptionId(rawQuestion);
+    if (firstOption) {
+      const outcome: GoalSubagentQuestionOutcome = {
+        rawQuestion: rawQuestion,
+        triageKind: "approvedAssumption",
+        triagedAt: tickStartedAt,
+        controllerResponse: `No default specified; approved first option: ${firstOption}${optionsText ? `. Options: ${optionsText}` : ""}. Record this assumption in your final result.`,
+        blocking: false,
+        selectedOption: firstOption,
+        triageSummary: "Non-blocking question without recommended default; approved first option as safe bounded assumption.",
+      };
+      await persistQuestionTriage(runtime, subagent, outcome, node, result, tickStartedAt);
+      await sendQuestionAnswerFollowup(runtime, options, subagent, outcome.controllerResponse, node, result, tickStartedAt);
+      return true;
+    }
+  }
+
+  // ── Blocking and not answerable: escalate to human ──
+  const escalationDetails = [
+    `Question: ${questionText}`,
+    whyItMatters ? `Why it matters: ${whyItMatters}` : undefined,
+    optionsText ? `Options: ${optionsText}` : undefined,
+    recommendedDefault ? `Recommended default: ${recommendedDefault}` : undefined,
+    `Blocking: yes`,
+  ].filter((line): line is string => Boolean(line)).join("\n");
+
+  const outcome: GoalSubagentQuestionOutcome = {
+    rawQuestion: rawQuestion,
+    triageKind: "escalatedToHuman",
+    triagedAt: tickStartedAt,
+    controllerResponse: `Human escalation needed. ${escalationDetails}`,
+    blocking: true,
+    selectedOption: recommendedDefault,
+    triageSummary: "Blocking question could not be answered from existing DAG context. Human or external input required.",
+  };
+  await persistQuestionTriage(runtime, subagent, outcome, node, result, tickStartedAt);
+
+  // Mark node/subagent blocked with actionable evidence.
+  const blockedSummary = `blocked: subagent question requires human input. ${escalationDetails}`;
+  const blockedSubagent = withSubagentPatch(subagent, {
+    status: "blocked",
+    integrationStatus: blockedSummary,
+    selfReportedResult: `SUBAGENT_QUESTION: ${rawQuestion}`,
+    updatedAt: tickStartedAt,
+  });
+  const blockedNode = withNodePatch(node, {
+    status: "blocked",
+    lifecyclePhase: "terminal",
+    lastValidationSummary: blockedSummary,
+    updatedAt: tickStartedAt,
+  });
+  await runtime.saveGoalSubagent(blockedSubagent);
+  await runtime.saveGoalDagNode(blockedNode);
+  await recordControllerEvent(runtime, node.goalId, "question.escalatedToHuman", {
+    nodeId: node.nodeId,
+    subagentId: subagent.subagentId,
+    question: questionText,
+    whyItMatters,
+    options: optionsText,
+    recommendedDefault,
+    summary: blockedSummary,
+  }, tickStartedAt);
+  result.blocked.push(blockedNode);
+  result.synced.push(blockedSubagent);
+  return true;
+}
+
+/** Persist a question triage outcome on the subagent record and record a controller event. */
+async function persistQuestionTriage(
+  runtime: GoalControllerRuntimePort,
+  subagent: GoalSubagentRecord,
+  outcome: GoalSubagentQuestionOutcome,
+  node: GoalDagNode,
+  _result: GoalControllerTickResult,
+  tickStartedAt: string,
+): Promise<void> {
+  const updated = withSubagentPatch(subagent, {
+    questionResults: [...(subagent.questionResults ?? []), outcome],
+    lastRecoveryDecision: {
+      action: outcome.triageKind === "escalatedToHuman"
+        ? "markNodeBlocked"
+        : outcome.triageKind === "answeredFromContext"
+          ? "sendPromptToSameSession"
+          : "sendPromptToSameSession",
+      reason: outcome.triageSummary ?? outcome.controllerResponse,
+      at: tickStartedAt,
+      ruleId: `question-triage-${outcome.triageKind}`,
+      confidence: "high",
+      evidence: { questionOutcome: outcome },
+    } as GoalRecoveryDecisionRecord,
+    updatedAt: tickStartedAt,
+  });
+  await runtime.saveGoalSubagent(updated);
+
+  await recordControllerEvent(runtime, subagent.goalId, `question.triage-${outcome.triageKind}`, {
+    nodeId: node.nodeId,
+    subagentId: subagent.subagentId,
+    question: outcome.rawQuestion,
+    triageKind: outcome.triageKind,
+    response: outcome.controllerResponse,
+    blocking: outcome.blocking,
+    selectedOption: outcome.selectedOption,
+  }, tickStartedAt);
+}
+
+/** Send a question answer or assumption approval as a follow-up prompt to the subagent. */
+async function sendQuestionAnswerFollowup(
+  runtime: GoalControllerRuntimePort,
+  options: GoalControllerTickOptions,
+  subagent: GoalSubagentRecord,
+  answer: string,
+  node: GoalDagNode,
+  result: GoalControllerTickResult,
+  tickStartedAt: string,
+): Promise<void> {
+  const followupPrompt = [
+    `[CONTROLLER ANSWER TO SUBAGENT_QUESTION]`,
+    `The controller has reviewed your question and provides the following response:`,
+    "",
+    answer,
+    "",
+    `If this resolves your question, continue working on the node objective: "${node.objective}"`,
+    `If you still need a different decision, explain why and include a revised SUBAGENT_QUESTION.`,
+    `When done, report exactly: SUBAGENT_RESULT: <summary of changes, verification, and remaining risks>`,
+    `If blocked, report exactly: SUBAGENT_BLOCKED: <specific blocker and what input/state change is needed>`,
+  ].filter((line): line is string => Boolean(line)).join("\n");
+
+  let followed: GoalSubagentRecord;
+  try {
+    followed = await sendGoalSubagentPromptWithTimeout(runtime, options, options.adapter, subagent, followupPrompt, tickStartedAt);
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    await degradePromptDispatchFailure(runtime, node, subagent, result, tickStartedAt, `question-answer follow-up dispatch failed: ${errorMessage}`, error);
+    return;
+  }
+  const runningSubagent = withSubagentPatch(followed, {
+    status: "running",
+    integrationStatus: undefined,
+    updatedAt: tickStartedAt,
+  });
+  const runningNode = withNodePatch(node, {
+    status: "running",
+    lastValidationSummary: `Answered subagent question: ${answer.slice(0, 200)}`,
+    updatedAt: tickStartedAt,
+  });
+  await runtime.saveGoalSubagent(runningSubagent);
+  await runtime.saveGoalDagNode(runningNode);
+  await recordControllerEvent(runtime, node.goalId, "question.answered", {
+    nodeId: node.nodeId,
+    subagentId: subagent.subagentId,
+    triageKind: "answeredFromContext",
+    answer: answer.slice(0, 500),
+  }, tickStartedAt);
+  result.followups.push(runningSubagent);
+}
+
+// ── Question parsing helpers ──
+
+/**
+ * Extract a named field from the SUBAGENT_QUESTION marker body.
+ * Fields are parsed as lines starting with "- <fieldName>:" or "<fieldName>:".
+ */
+function extractQuestionField(body: string, fieldName: string): string | undefined {
+  const patterns = [
+    new RegExp(`(?:^|\\n)\\s*(?:-\\s*)?${escapeRegex(fieldName)}\\s*:\\s*(.*?)(?=\\n\\s*(?:-\\s*)?(?:question|why it matters|options|recommended default|blocking)\\s*:|$)`, "ims"),
+    new RegExp(`(?:^|\\n)\\s*(?:\\*\\*)?${escapeRegex(fieldName)}(?:\\*\\*)?\\s*:\\s*(.*?)(?=\\n\\s*(?:\\*\\*)?(?:question|why it matters|options|recommended default|blocking)(?:\\*\\*)?\\s*:|$)`, "ims"),
+  ];
+  for (const pattern of patterns) {
+    const match = body.match(pattern);
+    if (match?.[1]?.trim()) return match[1].trim();
+  }
+  return undefined;
+}
+
+/** Extract the options block text from a question body. */
+function extractOptionsText(body: string): string | undefined {
+  const optionsLines: string[] = [];
+  let inOptions = false;
+  for (const line of body.split("\n")) {
+    const trimmed = line.trim();
+    if (/^options\s*:/i.test(trimmed)) {
+      inOptions = true;
+      const afterColon = trimmed.replace(/^options\s*:\s*/i, "").trim();
+      if (afterColon) optionsLines.push(afterColon);
+      continue;
+    }
+    if (inOptions) {
+      if (/^(question|why it matters|recommended default|blocking)\s*:/i.test(trimmed)) {
+        inOptions = false;
+      } else {
+        optionsLines.push(trimmed);
+      }
+    }
+  }
+  return optionsLines.length > 0 ? optionsLines.join("; ") : undefined;
+}
+
+/** Extract the id of the first option in the options block. */
+function extractFirstOptionId(body: string): string | undefined {
+  const optionsText = extractOptionsText(body);
+  if (!optionsText) return undefined;
+  // Options are often formatted as "- A: ..." or "A: ..."
+  const optionMatch = optionsText.match(/\b([A-Za-z])\s*[:.)]\s*/);
+  return optionMatch?.[1]?.trim();
+}
+
+/**
+ * Try to find an answer to the question from the DAG node's context.
+ * Returns the answer text or undefined if not answerable.
+ */
+function findContextAnswer(question: string, node: GoalDagNode): string | undefined {
+  const lowerQuestion = question.toLowerCase();
+
+  // Check if the answer is in the node objective.
+  if (node.objective && isAnsweredByText(lowerQuestion, node.objective)) {
+    return `From the node objective: ${node.objective}`;
+  }
+
+  // Check if the answer is in the node scope.
+  if (node.scope && isAnsweredByText(lowerQuestion, node.scope)) {
+    return `From the node scope: ${node.scope}`;
+  }
+
+  // Check expected outputs.
+  if (node.expectedOutputs.length > 0) {
+    const outputs = node.expectedOutputs.join(", ");
+    if (isAnsweredByText(lowerQuestion, outputs)) {
+      return `Expected outputs: ${outputs}`;
+    }
+  }
+
+  // Check validators.
+  if (node.validators.length > 0) {
+    const validators = node.validators.join(", ");
+    if (isAnsweredByText(lowerQuestion, validators)) {
+      return `Validators: ${validators}`;
+    }
+  }
+
+  // Check allowed paths from validation contract.
+  const allowedPaths = node.validation?.allowedPaths ?? [];
+  if (allowedPaths.length > 0) {
+    const paths = allowedPaths.join(", ");
+    if (isAnsweredByText(lowerQuestion, paths)) {
+      return `Allowed changed paths: ${paths}`;
+    }
+  }
+
+  // Check completion gates.
+  if (node.completionGates.length > 0) {
+    const gates = node.completionGates.join(", ");
+    if (isAnsweredByText(lowerQuestion, gates)) {
+      return `Completion gates: ${gates}`;
+    }
+  }
+
+  // Check quality profiles.
+  const profiles = node.qualityProfiles?.join(", ") ?? "";
+  if (profiles && isAnsweredByText(lowerQuestion, profiles)) {
+    return `Quality profiles: ${profiles}`;
+  }
+
+  return undefined;
+}
+
+/**
+ * Simple heuristic: check if key terms from the question appear in the context text.
+ * This is intentionally conservative — it looks for overlapping term sets.
+ */
+function isAnsweredByText(lowerQuestion: string, context: string): boolean {
+  const lowerContext = context.toLowerCase();
+  // Extract significant terms from the question (words 4+ chars, excluding common words).
+  const stopWords = new Set(["what", "when", "where", "which", "should", "could", "would", "have", "been", "this", "that", "with", "from", "their", "your", "they", "will", "does", "need", "about", "than", "then", "into", "over", "such", "some", "these", "those", "what", "how", "why", "can", "the", "and", "for", "are", "not", "but", "was", "its", "all", "each", "which", "that", "than", "very", "just", "also", "more", "any"]);
+  const terms = lowerQuestion
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .split(/\s+/)
+    .filter((t) => t.length >= 4 && !stopWords.has(t));
+
+  if (terms.length === 0) return false;
+
+  // Count how many terms appear in the context.
+  let matched = 0;
+  for (const term of terms) {
+    if (lowerContext.includes(term)) matched++;
+  }
+
+  // Consider it answerable if >50% of terms match.
+  return matched >= Math.ceil(terms.length / 2);
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// observationFromSubagentStatus is defined at the bottom of the file adjacent to other helper functions.
+
 function buildValidationCappedReplacementPrompt(
   node: GoalDagNode,
   previous: GoalSubagentRecord,
@@ -3108,7 +3478,7 @@ function observationFromSubagentStatus(
     adapterId,
     kind,
     at,
-    summary: subagent.selfReportedResult,
+    summary: subagent.selfReportedResult ?? subagent.integrationStatus,
     error: subagent.integrationStatus,
     evidence: { status: subagent.status, retryCount: subagent.retryCount },
   };

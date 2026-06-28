@@ -53,6 +53,7 @@ const MARKER_LINE_PREFIX = String.raw`(?:^|\n)\s*(?:#{1,6}\s*)?(?:[-*]\s*)?(?:\*
 const MARKER_LOOKAHEAD_PREFIX = String.raw`\n\s*(?:#{1,6}\s*)?(?:[-*]\s*)?(?:\*\*)?`;
 const RESULT_MARKER = new RegExp(`${MARKER_LINE_PREFIX}SUBAGENT_RESULT(?:\\*\\*)?\\s*:\\s*([\\s\\S]*?)(?=${MARKER_LOOKAHEAD_PREFIX}SUBAGENT_[A-Z_]+(?:\\*\\*)?\\s*:|$)`, "i");
 const BLOCKED_MARKER = new RegExp(`${MARKER_LINE_PREFIX}SUBAGENT_BLOCKED(?:\\*\\*)?\\s*:\\s*([\\s\\S]*?)(?=${MARKER_LOOKAHEAD_PREFIX}SUBAGENT_[A-Z_]+(?:\\*\\*)?\\s*:|$)`, "i");
+const QUESTION_MARKER = new RegExp(`${MARKER_LINE_PREFIX}SUBAGENT_QUESTION(?:\\*\\*)?\\s*:\\s*([\\s\\S]*?)(?=${MARKER_LOOKAHEAD_PREFIX}SUBAGENT_[A-Z_]+(?:\\*\\*)?\\s*:|$)`, "i");
 const STATUS_BLOCKED_MARKER = /(?:^|\n)\s*(?:#{1,6}\s*)?(?:[-*]\s*)?(?:\*\*)?SUBAGENT_STATUS(?:\*\*)?\s*:\s*blocked\b/i;
 const DEFAULT_STALE_SUBAGENT_SESSION_MS = 10 * 60_000;
 const CONTEXT_OVERFLOW_ERROR_PATTERNS = [
@@ -175,6 +176,16 @@ export function renderPiSubagentInitialPrompt(request: HarnessSubagentStartReque
     "SUBAGENT_RESULT: <summary of changes, verification, and remaining risks>",
     "If blocked, report this exact marker instead:",
     "SUBAGENT_BLOCKED: <specific blocker and what input/state change is needed>",
+    "If you encounter material ambiguity that could affect correctness, compatibility, scope, or validation, report your uncertainty using this marker:",
+    "SUBAGENT_QUESTION:",
+    "- question: <what needs to be decided>",
+    "- why it matters: <correctness/scope/compatibility/validation impact>",
+    "- options:",
+    "  - A: <summary and tradeoff>",
+    "  - B: <summary and tradeoff>",
+    "- recommended default: <option id or concrete assumption>",
+    "- blocking: yes|no",
+    "The controller will answer from context, approve a bounded assumption, or escalate if needed.",
     "",
     `Goal: ${request.goalId}`,
     `Node: ${request.node.nodeId} (${request.node.slug})`,
@@ -231,6 +242,13 @@ export function readPiSubagentSessionState(
   const result = assistantIsCurrent ? extractResultMarker(parsed.lastAssistantText) : undefined;
   if (result) {
     return withInspectionMetadata({ status: "selfReportedComplete", selfReportedResult: result, lastActivityAt: parsed.lastAssistantAt ?? effectiveLastActivityAt }, parsed, attemptMetadata);
+  }
+  // SUBAGENT_QUESTION detection: if the subagent surfaced a question, report as needsFollowup
+  // so the controller can triage it. The question body is stored in selfReportedResult for
+  // downstream triage logic to parse.
+  const question = assistantIsCurrent ? extractQuestionMarkerFromPi(parsed.lastAssistantText) : undefined;
+  if (question) {
+    return withInspectionMetadata({ status: "needsFollowup", selfReportedResult: `SUBAGENT_QUESTION: ${question}`, lastActivityAt: parsed.lastAssistantAt ?? effectiveLastActivityAt }, parsed, attemptMetadata);
   }
   if (parsed.lastError && errorIsCurrent) {
     if (isRecoverableContextOverflow(parsed, options, effectiveLastActivityAt)) {
@@ -389,6 +407,11 @@ function hasLiveBackgroundRunnerForSubagent(subagent: GoalSubagentRecord): boole
 function metadataString(metadata: Record<string, unknown> | undefined, key: string): string | undefined {
   const value = metadata?.[key];
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+export function extractQuestionMarkerFromPi(text: string | undefined): string | undefined {
+  const match = text?.match(QUESTION_MARKER);
+  return cleanupMarkerText(match?.[1]);
 }
 
 function extractResultMarker(text: string | undefined): string | undefined {

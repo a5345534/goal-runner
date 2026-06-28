@@ -45,6 +45,30 @@
         "minLength": 1
       }
     },
+    "qualityProfile": {
+      "type": "string",
+      "enum": [
+        "incremental-implementation",
+        "test-driven-change",
+        "code-review-required",
+        "independent-audit",
+        "security-sensitive-review",
+        "api-contract-change",
+        "database-migration",
+        "docs-required",
+        "observability-required",
+        "ship-preflight",
+        "implementation-discipline"
+      ]
+    },
+    "qualityProfileList": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/qualityProfile"
+      }
+    },
     "workspace": {
       "type": "object",
       "additionalProperties": false,
@@ -308,6 +332,10 @@
           "type": "string",
           "minLength": 1,
           "description": "Default Pi thinking level for nodes that do not override thinkingLevel."
+        },
+        "qualityProfiles": {
+          "$ref": "#/$defs/qualityProfileList",
+          "description": "Default quality profiles inherited by each node unless omitted from the DAG. Runtime consumers resolve defaults plus node-specific profiles in stable de-duplicated order."
         }
       }
     },
@@ -378,6 +406,10 @@
           "type": "string",
           "minLength": 1,
           "description": "Pi thinking level for this node; overrides defaults.thinkingLevel."
+        },
+        "qualityProfiles": {
+          "$ref": "#/$defs/qualityProfileList",
+          "description": "Node-specific quality profiles. Runtime consumers resolve defaults.qualityProfiles plus this list in stable de-duplicated order."
         }
       }
     }

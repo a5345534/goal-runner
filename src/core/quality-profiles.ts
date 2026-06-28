@@ -6,7 +6,7 @@ import {
 
 export { GOAL_QUALITY_PROFILES, isGoalQualityProfile, type GoalQualityProfile };
 
-const QUALITY_PROFILE_DISCIPLINE: Record<GoalQualityProfile, string> = {
+const QUALITY_PROFILE_DISCIPLINE = {
   "incremental-implementation": "implement the smallest independently verifiable slice; avoid unrelated cleanup or broad refactors",
   "test-driven-change": "treat tests/validators as first-class evidence; run or explain declared validators before reporting completion",
   "code-review-required": "prepare a reviewable diff with verification notes, risks, and reviewer-relevant context",
@@ -17,6 +17,7 @@ const QUALITY_PROFILE_DISCIPLINE: Record<GoalQualityProfile, string> = {
   "docs-required": "update or identify required documentation/ADR/operator notes for the change",
   "observability-required": "preserve or add operational visibility; mention logs, metrics, traces, or monitorability evidence",
   "ship-preflight": "include release-readiness notes such as validation, rollback/safety plan, and known risks",
+  "implementation-discipline": "surfaces material ambiguity to the controller via SUBAGENT_QUESTION markers instead of silently assuming or directly asking the user",
 };
 
 export function qualityProfilesOf(value: unknown): string[] {

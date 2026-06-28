@@ -145,6 +145,16 @@ export function renderOpencodeSubagentInitialPrompt(request: HarnessSubagentStar
     "SUBAGENT_RESULT: <summary of changes, verification, and remaining risks>",
     "If blocked, report this exact marker instead:",
     "SUBAGENT_BLOCKED: <specific blocker and what input/state change is needed>",
+    "If you encounter material ambiguity that could affect correctness, compatibility, scope, or validation, report your uncertainty using this marker:",
+    "SUBAGENT_QUESTION:",
+    "- question: <what needs to be decided>",
+    "- why it matters: <correctness/scope/compatibility/validation impact>",
+    "- options:",
+    "  - A: <summary and tradeoff>",
+    "  - B: <summary and tradeoff>",
+    "- recommended default: <option id or concrete assumption>",
+    "- blocking: yes|no",
+    "The controller will answer from context, approve a bounded assumption, or escalate if needed.",
     "",
     `Goal: ${request.goalId}`,
     `Node: ${request.node.nodeId} (${request.node.slug})`,
@@ -179,6 +189,7 @@ function subagentTitleForExisting(subagent: GoalSubagentRecord): string {
 
 const RESULT_MARKER = /(?:^|\n)\s*SUBAGENT_RESULT\s*:\s*([\s\S]*?)(?=\n\s*SUBAGENT_[A-Z_]+\s*:|$)/i;
 const BLOCKED_MARKER = /(?:^|\n)\s*SUBAGENT_BLOCKED\s*:\s*([\s\S]*?)(?=\n\s*SUBAGENT_[A-Z_]+\s*:|$)/i;
+const QUESTION_MARKER = /(?:^|\n)\s*SUBAGENT_QUESTION\s*:\s*([\s\S]*?)(?=\n\s*SUBAGENT_[A-Z_]+\s*:|$)/i;
 const STATUS_BLOCKED_MARKER = /(?:^|\n)\s*SUBAGENT_STATUS\s*:\s*blocked\b/i;
 
 export function readOpencodeSubagentSessionState(
@@ -200,6 +211,11 @@ export function readOpencodeSubagentSessionState(
     const match = snapshot.lastAssistantText?.match(RESULT_MARKER);
     const explicit = match ? match[1]?.trim() : undefined;
     return { status: "selfReportedComplete", selfReportedResult: explicit ?? "Subagent reported done", lastActivityAt: snapshot.lastActivityAt };
+  }
+  if (snapshot.hasQuestionMarker) {
+    const match = snapshot.lastAssistantText?.match(QUESTION_MARKER);
+    const explicit = match ? match[1]?.trim() : undefined;
+    return { status: "needsFollowup", selfReportedResult: `SUBAGENT_QUESTION: ${explicit ?? "subagent question"}`, lastActivityAt: snapshot.lastActivityAt };
   }
   if (snapshot.hasError) {
     return { status: "failed", error: "opencode assistant turn ended with an error", lastActivityAt: snapshot.lastActivityAt };

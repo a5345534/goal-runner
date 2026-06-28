@@ -244,6 +244,31 @@ export interface GoalRecoveryDecisionRecord {
     maxRetries?: number;
     evidence?: Record<string, unknown>;
 }
+/**
+ * Triage outcome for a subagent question.
+ */
+export type GoalSubagentQuestionTriageKind = "answeredFromContext" | "approvedAssumption" | "escalatedToHuman" | "pending";
+/**
+ * Persistent record of a subagent question and the controller's triage decision.
+ */
+export interface GoalSubagentQuestionOutcome {
+    /** The raw question text as parsed from the SUBAGENT_QUESTION marker. */
+    rawQuestion: string;
+    /** Triage outcome classification. */
+    triageKind: GoalSubagentQuestionTriageKind;
+    /** Timestamp when the triage occurred. */
+    triagedAt: string;
+    /** The controller's response to the question (answer, assumption approval, or escalation note). */
+    controllerResponse: string;
+    /** Whether the question was blocking. Inferred from marker or set by triage. */
+    blocking: boolean;
+    /** The selected/approved option id, if any. */
+    selectedOption?: string;
+    /** Summary of the context or reasoning used for the triage decision. */
+    triageSummary?: string;
+    /** Arbitrary evidence attached by controller or adapter. */
+    evidence?: Record<string, unknown>;
+}
 export type GoalControllerTypedEventCategory = "poll" | "node.lifecycle" | "node.staleDetected" | "recovery.decision" | "recovery.action" | "recovery.rule" | "transcript" | "validation.result" | "integration.result" | "promotion.result" | "cleanup.result" | "diagnostic";
 export type GoalControllerActionAttemptKind = "runnerLaunch" | "promptDispatch" | "recovery" | "validation" | "integration" | "promotion" | "cleanup";
 export type GoalControllerActionAttemptStatus = "started" | "succeeded" | "timedOut" | "failed" | "degraded";
@@ -359,6 +384,8 @@ export interface GoalSubagentRecord {
     lastAdapterObservation?: GoalAdapterObservationRecord;
     /** Last controller recovery decision involving this subagent. */
     lastRecoveryDecision?: GoalRecoveryDecisionRecord;
+    /** Persistent question triage outcomes for this subagent. */
+    questionResults?: GoalSubagentQuestionOutcome[];
     createdAt: string;
     updatedAt: string;
 }

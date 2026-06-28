@@ -1,4 +1,4 @@
-import type { GoalDagNode, GoalNodePreparedResources, GoalSubagentRecord, GoalSubagentStatus } from "./types.js";
+import type { GoalDagNode, GoalNodePreparedResources, GoalSubagentQuestionOutcome, GoalSubagentRecord, GoalSubagentStatus } from "./types.js";
 export type HarnessSubagentSessionStatus = "starting" | "running" | "idle" | "needsFollowup" | "selfReportedComplete" | "blocked" | "failed" | "stopped";
 export interface HarnessSubagentStartRequest {
     goalId: string;
@@ -32,12 +32,35 @@ export interface HarnessSubagentStateRequest {
     subagent: GoalSubagentRecord;
     metadata?: Record<string, unknown>;
 }
+/** Marker prefix for SUBAGENT_QUESTION, SUBAGENT_RESULT, and SUBAGENT_BLOCKED. */
+export declare const SUBAGENT_MARKER_PREFIXES: readonly ["SUBAGENT_RESULT", "SUBAGENT_BLOCKED", "SUBAGENT_QUESTION"];
+/**
+ * Regex that matches any SUBAGENT_* marker at the start of a line,
+ * optionally preceded by markdown heading/formatting.
+ */
+export declare const SUBAGENT_MARKER_RX: RegExp;
+/**
+ * Regex for SUBAGENT_QUESTION marker specifically.
+ * Captures the question body text (everything until the next SUBAGENT_* marker or end of string).
+ */
+export declare const QUESTION_MARKER_RX: RegExp;
+/**
+ * Extract the text body of a SUBAGENT_QUESTION marker from assistant output.
+ * Returns undefined if no question marker is found.
+ */
+export declare function extractQuestionMarker(text: string | undefined): string | undefined;
+/**
+ * Check whether a status line signals question-pending state.
+ */
+export declare function isQuestionPendingState(subagent: GoalSubagentRecord): boolean;
 export interface HarnessSubagentSessionState {
     status: HarnessSubagentSessionStatus;
     lastActivityAt?: string;
     selfReportedResult?: string;
     validationSignals?: string[];
     error?: string;
+    /** When a SUBAGENT_QUESTION is detected, the parsed question outcome (if triaged) or raw question text (if pending). */
+    questionOutcome?: GoalSubagentQuestionOutcome;
     metadata?: Record<string, unknown>;
 }
 export interface HarnessSubagentAbortRequest {

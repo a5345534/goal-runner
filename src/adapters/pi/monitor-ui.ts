@@ -10,6 +10,7 @@ import type {
   GoalDagNode,
   GoalLedgerEvent,
   GoalModelResolution,
+  GoalSubagentQuestionOutcome,
   GoalSubagentRecord,
   GoalSummary,
   HarnessState,
@@ -1155,12 +1156,18 @@ function currentControllerBlockerDiagnostic(goal: GoalSummary, dag: GoalMonitorD
     const relatedSubagents = dag.subagents.filter((subagent) => subagent.nodeId === blockedNode.nodeId);
     const latest = latestSubagent(relatedSubagents);
     const reason = blockedNode.lastValidationSummary ?? latest?.integrationError ?? latest?.integrationStatus ?? latest?.selfReportedResult;
-    return `Current blocker: ${blockedNode.nodeId} [${blockedNode.status}]${reason ? ` — ${shortenMiddle(reason.replace(/\s+/g, " ").trim(), 180)}` : ""}`;
+    const questionTag = latest?.questionResults?.length ? ` [${latest.questionResults.length} question(s) triaged]` : "";
+    const escalationTag = latest?.questionResults?.some((q) => q.triageKind === "escalatedToHuman") ? " [HUMAN INPUT NEEDED]" : "";
+    return `Current blocker: ${blockedNode.nodeId} [${blockedNode.status}]${questionTag}${escalationTag}${reason ? ` — ${shortenMiddle(reason.replace(/\s+/g, " ").trim(), 180)}` : ""}`;
   }
   const blockedSubagent = latestSubagent(dag.subagents.filter((subagent) => ["blocked", "failed", "needsFollowup"].includes(subagent.status)));
   if (blockedSubagent) {
     const reason = blockedSubagent.integrationError ?? blockedSubagent.integrationStatus ?? blockedSubagent.selfReportedResult;
-    return `Current blocker: ${blockedSubagent.nodeId}/${blockedSubagent.subagentId} [${blockedSubagent.status}]${reason ? ` — ${shortenMiddle(reason.replace(/\s+/g, " ").trim(), 180)}` : ""}`;
+    const isQuestion = /SUBAGENT_QUESTION/i.test(blockedSubagent.selfReportedResult ?? "");
+    const questionTag = isQuestion ? " [QUESTION PENDING]" : "";
+    const questionResultTag = blockedSubagent.questionResults?.length ? ` [${blockedSubagent.questionResults.length} question(s) triaged]` : "";
+    const escalationTag = blockedSubagent.questionResults?.some((q) => q.triageKind === "escalatedToHuman") ? " [HUMAN INPUT NEEDED]" : "";
+    return `Current blocker: ${blockedSubagent.nodeId}/${blockedSubagent.subagentId} [${blockedSubagent.status}]${isQuestion ? " — Subagent has a pending question" : ""}${questionTag}${questionResultTag}${escalationTag}${!isQuestion && reason ? ` — ${shortenMiddle(reason.replace(/\s+/g, " ").trim(), 180)}` : ""}`;
   }
   if (["blocked", "failed", "budgetLimited", "usageLimited"].includes(goal.status)) return `Current blocker: goal status=${goal.status}`;
   return undefined;
@@ -1391,6 +1398,7 @@ function renderRunnerLiveLines(
 ): string[] {
   const integration = formatSubagentIntegration(subagent);
   const note = subagent.integrationStatus ?? subagent.selfReportedResult;
+  const questionResults = subagent.questionResults;
   const prepared = formatPreparedResources(node);
   const resolutionLines = renderResolutionEvidenceLines(node);
   return [
@@ -1413,6 +1421,7 @@ function renderRunnerLiveLines(
     subagent.lastRecoveryDecision ? `recovery: ${formatRecoveryDecision(subagent.lastRecoveryDecision.action, subagent.lastRecoveryDecision.ruleId, subagent.lastRecoveryDecision.reason)}` : undefined,
     integration ? `integration: ${integration}` : undefined,
     note ? `note: ${note}` : undefined,
+    ...(questionResults && questionResults.length > 0 ? ["── Questions ──", ...questionResults.map(formatQuestionOutcome)] : []),
     "transcript:",
     ...transcript.lines,
   ].filter((line): line is string => Boolean(line));
@@ -1489,6 +1498,19 @@ function formatObservation(kind: string, detail?: string): string {
 
 function formatRecoveryDecision(action: string, ruleId: string | undefined, reason: string): string {
   return `${action}${ruleId ? ` rule=${shortenMiddle(ruleId, 48)}` : ""} — ${shortenMiddle(reason.replace(/\s+/g, " ").trim(), 140)}`;
+}
+
+function formatQuestionOutcome(outcome: GoalSubagentQuestionOutcome): string {
+  const triageLabels: Record<GoalSubagentQuestionOutcome["triageKind"], string> = {
+    answeredFromContext: "ANSWERED",
+    approvedAssumption: "ASSUMPTION",
+    escalatedToHuman: "ESCALATED",
+    pending: "PENDING",
+  };
+  const label = triageLabels[outcome.triageKind] ?? outcome.triageKind;
+  const blocking = outcome.blocking ? " [BLOCKING]" : "";
+  const option = outcome.selectedOption ? ` → option ${outcome.selectedOption}` : "";
+  return `[${label}${blocking}]${option} ${shortenMiddle(outcome.triageSummary ?? outcome.controllerResponse, 120)}`;
 }
 
 function formatSubagentIntegration(subagent: GoalSubagentRecord): string | undefined {
