@@ -10,6 +10,9 @@ export type GoalCommand = {
     objective?: string;
     tokenBudget?: number;
 } | {
+    kind: "retryNode";
+    nodeId: string;
+} | {
     kind: "pause";
 } | {
     kind: "resume";

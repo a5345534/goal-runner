@@ -44,6 +44,12 @@ export function parseGoalCommand(args = "") {
             const parsed = parseBudgetAndObjective(rest, "edit");
             return { kind: "edit", ...parsed };
         }
+        case "retry-node":
+        case "retryNode": {
+            if (rest.length !== 1)
+                throw new Error(`/goal ${first} requires exactly one DAG node id`);
+            return { kind: "retryNode", nodeId: rest[0] ?? "" };
+        }
         case "pause":
             ensureNoExtraArgs(first, rest);
             return { kind: "pause" };

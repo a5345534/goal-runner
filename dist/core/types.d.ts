@@ -71,7 +71,7 @@ export interface GoalSteeringContextRequest {
     kind: "budget_limit" | "objective_updated";
     renderedPrompt: string;
 }
-export type GoalLedgerEventType = "goal_created" | "goal_replaced" | "goal_edited" | "goal_paused" | "goal_resumed" | "goal_cleared" | "turn_started" | "turn_finished" | "meaningful_progress" | "no_progress_continuation_suppressed" | "continuation_requested" | "continuation_started" | "continuation_already_started" | "continuation_skipped" | "continuation_retryable_failure" | "continuation_fatal_failure" | "completion_requested" | "completion_audit_result" | "controller_event" | "goal_completed" | "goal_blocked" | "goal_budget_limited" | "goal_usage_limited" | GoalControllerAuditLedgerEventType | "candidate_selected" | "candidate_retried" | "candidate_switched" | "candidate_exhausted" | "candidate_blocked";
+export type GoalLedgerEventType = "goal_created" | "goal_replaced" | "goal_edited" | "goal_paused" | "goal_resumed" | "goal_node_retry_requested" | "goal_cleared" | "turn_started" | "turn_finished" | "meaningful_progress" | "no_progress_continuation_suppressed" | "continuation_requested" | "continuation_started" | "continuation_already_started" | "continuation_skipped" | "continuation_retryable_failure" | "continuation_fatal_failure" | "completion_requested" | "completion_audit_result" | "controller_event" | "goal_completed" | "goal_blocked" | "goal_budget_limited" | "goal_usage_limited" | GoalControllerAuditLedgerEventType | "candidate_selected" | "candidate_retried" | "candidate_switched" | "candidate_exhausted" | "candidate_blocked";
 export interface GoalLedgerEvent {
     eventId?: string;
     sessionKey: string;

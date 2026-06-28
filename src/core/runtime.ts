@@ -129,6 +129,8 @@ export class GoalRuntime {
         if (objective === undefined) throw new Error("edit objective is required for /goal edit");
         return this.editGoal(sessionKey, objective, { tokenBudget: command.tokenBudget });
       }
+      case "retryNode":
+        return this.retryGoalDagNodeForSession(sessionKey, command.nodeId);
       case "pause":
         return this.pauseGoal(sessionKey);
       case "resume":
@@ -621,6 +623,67 @@ export class GoalRuntime {
     };
   }
 
+  async retryGoalDagNodeForSession(sessionKey: string, nodeId: string): Promise<GoalToolResult> {
+    const goal = await this.requireGoal(sessionKey);
+    return this.retryGoalDagNode(goal.goalId, nodeId);
+  }
+
+  async retryGoalDagNode(goalId: string, nodeId: string): Promise<GoalToolResult> {
+    const goal = await this.getGoalById(goalId);
+    if (!goal) throw new Error(`goal not found: ${goalId}`);
+    const node = await this.store.getGoalDagNode(goalId, nodeId);
+    if (!node) throw new Error(`DAG node not found for goal ${goalId}: ${nodeId}`);
+    if (!["blocked", "blockedTerminal", "failed", "needsFollowup"].includes(node.status)) {
+      throw new Error(`DAG node ${nodeId} is ${node.status}; only blocked, blockedTerminal, failed, or needsFollowup nodes can be retried`);
+    }
+
+    const now = this.nowIso();
+    const subagents = await this.store.listGoalSubagents(goalId, nodeId);
+    const retiredSubagentIds: string[] = [];
+    for (const subagent of subagents) {
+      if (["complete", "blockedTerminal"].includes(subagent.status)) continue;
+      await this.store.saveGoalSubagent({
+        ...subagent,
+        status: "blockedTerminal",
+        integrationStatus: appendRetryNote(subagent.integrationStatus, `superseded by manual node retry at ${now}`),
+        updatedAt: now,
+      });
+      retiredSubagentIds.push(subagent.subagentId);
+    }
+
+    const retriedNode: GoalDagNode = {
+      ...node,
+      status: "planned",
+      lifecyclePhase: undefined,
+      preparedResources: undefined,
+      lastAdapterObservation: undefined,
+      lastRecoveryDecision: undefined,
+      lastValidationSummary: `manual retry requested for ${node.status} node at ${now}`,
+      updatedAt: now,
+    };
+    await this.store.saveGoalDagNode(retriedNode);
+
+    const updatedGoal = goal.status === "active"
+      ? { ...goal, updatedAt: now }
+      : normalizeBudgetLimited({
+        ...goal,
+        status: "active",
+        updatedAt: now,
+        goalTurnsSinceAuditReset: goal.status === "blocked" ? 0 : goal.goalTurnsSinceAuditReset,
+      });
+    await this.store.saveGoal(updatedGoal);
+    await this.appendLedger("goal_node_retry_requested", goal.sessionKey, goalId, {
+      nodeId,
+      previousStatus: node.status,
+      previousLifecyclePhase: node.lifecyclePhase,
+      previousSummary: node.lastValidationSummary,
+      retiredSubagentIds,
+    });
+    await this.store.clearReservation(goal.sessionKey);
+    await this.callbacks.notifyGoalUpdated?.(updatedGoal);
+    return { goal: updatedGoal, message: `DAG node ${nodeId} reset to planned for retry.` };
+  }
+
   async getReservation(sessionKey: string): Promise<ContinuationReservation | undefined> {
     return this.store.getReservation(sessionKey);
   }
@@ -1077,6 +1140,10 @@ export class GoalRuntime {
   private nowIso(date = this.config.now()): string {
     return date.toISOString();
   }
+}
+
+function appendRetryNote(current: string | undefined, note: string): string {
+  return current ? `${current}; ${note}` : note;
 }
 
 function formatGoalSummary(goal: GoalRecord): string {

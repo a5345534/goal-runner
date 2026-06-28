@@ -4,6 +4,7 @@ export type GoalCommand =
   | { kind: "show" }
   | { kind: "start"; objective: string; tokenBudget?: number }
   | { kind: "edit"; objective?: string; tokenBudget?: number }
+  | { kind: "retryNode"; nodeId: string }
   | { kind: "pause" }
   | { kind: "resume" }
   | { kind: "clear" };
@@ -56,6 +57,11 @@ export function parseGoalCommand(args = ""): GoalCommand {
       if (rest.length === 0) return { kind: "edit" };
       const parsed = parseBudgetAndObjective(rest, "edit");
       return { kind: "edit", ...parsed };
+    }
+    case "retry-node":
+    case "retryNode": {
+      if (rest.length !== 1) throw new Error(`/goal ${first} requires exactly one DAG node id`);
+      return { kind: "retryNode", nodeId: rest[0] ?? "" };
     }
     case "pause":
       ensureNoExtraArgs(first, rest);

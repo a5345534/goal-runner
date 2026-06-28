@@ -107,7 +107,7 @@ export default function goalPiExtension(pi) {
         },
     });
     pi.registerCommand("goal", {
-        description: "Long-running orchestrated goal: /goal <objective>, /goal list, /goal status|monitor|debug|pause|resume|edit|budget|clear [goal-ref]",
+        description: "Long-running orchestrated goal: /goal <objective>, /goal list, /goal status|monitor|debug|pause|resume|retry-node|edit|budget|clear [goal-ref]",
         getArgumentCompletions: (prefix) => {
             const commands = [
                 "--tokens",
@@ -440,6 +440,12 @@ async function handlePiGoalCommand(runtime, ctx, args, backgroundGoalSessions, c
     if (first === "debug") {
         ensureAtMostOneGoalRef(first, tokens.slice(1));
         await showTargetGoalDebug(runtime, ctx, tokens[1]);
+        return;
+    }
+    if (first === "retry-node") {
+        const { goalRef, nodeId } = parseRetryNodeArgs(tokens.slice(1));
+        const goal = await resolveGoalReferenceOrDefault(runtime, ctx, goalRef);
+        await retryTargetGoalNode(runtime, ctx, goal, nodeId, controllerDefaults);
         return;
     }
     if (first === "pause" || first === "resume" || first === "clear") {
@@ -1851,6 +1857,13 @@ function ensureAtMostOneGoalRef(command, rest) {
     if (rest.length > 1)
         throw new Error(`/goal ${command} accepts at most one goal-ref`);
 }
+function parseRetryNodeArgs(args) {
+    if (args.length === 1)
+        return { nodeId: args[0] ?? "" };
+    if (args.length === 2)
+        return { goalRef: args[0], nodeId: args[1] ?? "" };
+    throw new Error("/goal retry-node requires <node-id> or <goal-ref> <node-id>");
+}
 async function editGoalFromCommand(runtime, ctx, args) {
     if (args.length === 0) {
         const goal = await resolveGoalReferenceOrDefault(runtime, ctx);
@@ -2323,6 +2336,12 @@ function isPathInside(candidatePath, parentPath) {
 }
 function isFailureMessage(message) {
     return /^failed\b/i.test(message);
+}
+async function retryTargetGoalNode(runtime, ctx, goal, nodeId, controllerDefaults = {}) {
+    const result = await runtime.retryGoalDagNode(goal.goalId, nodeId);
+    ctx.ui.notify(result.message, "info");
+    const latestGoal = (await runtime.listGoalSummaries()).find((candidate) => candidate.goalId === goal.goalId) ?? goal;
+    await resumeTargetGoal(runtime, ctx, latestGoal, controllerDefaults);
 }
 async function resumeTargetGoal(runtime, ctx, goal, controllerDefaults = {}) {
     const dagNodes = await runtime.listGoalDagNodes(goal.goalId);

@@ -7,6 +7,7 @@ test("parse /goal forms", () => {
   assert.deepEqual(parseGoalCommand("pause"), { kind: "pause" });
   assert.deepEqual(parseGoalCommand("resume"), { kind: "resume" });
   assert.deepEqual(parseGoalCommand("clear"), { kind: "clear" });
+  assert.deepEqual(parseGoalCommand("retry-node closeout-docs"), { kind: "retryNode", nodeId: "closeout-docs" });
   assert.deepEqual(parseGoalCommand("edit"), { kind: "edit" });
   assert.deepEqual(parseGoalCommand("edit ship it"), { kind: "edit", objective: "ship it", tokenBudget: undefined });
   assert.deepEqual(parseGoalCommand(" finish migration "), { kind: "start", objective: "finish migration", tokenBudget: undefined });
@@ -23,6 +24,7 @@ test("parse token budgets", () => {
   assert.throws(() => parseTokenBudget("nope"), /invalid token budget/);
   assert.throws(() => parseGoalCommand("--tokens"), /missing token budget/);
   assert.throws(() => parseGoalCommand("pause now"), /extra arguments/);
+  assert.throws(() => parseGoalCommand("retry-node"), /requires exactly one DAG node id/);
 });
 
 test("objective validation trims and enforces 4000 chars", () => {

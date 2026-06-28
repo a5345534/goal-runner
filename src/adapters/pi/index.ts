@@ -182,7 +182,7 @@ export default function goalPiExtension(pi: ExtensionAPI) {
 
   pi.registerCommand("goal", {
     description:
-      "Long-running orchestrated goal: /goal <objective>, /goal list, /goal status|monitor|debug|pause|resume|edit|budget|clear [goal-ref]",
+      "Long-running orchestrated goal: /goal <objective>, /goal list, /goal status|monitor|debug|pause|resume|retry-node|edit|budget|clear [goal-ref]",
     getArgumentCompletions: (prefix: string) => {
       const commands = [
         "--tokens",
@@ -553,6 +553,12 @@ async function handlePiGoalCommand(
   if (first === "debug") {
     ensureAtMostOneGoalRef(first, tokens.slice(1));
     await showTargetGoalDebug(runtime, ctx, tokens[1]);
+    return;
+  }
+  if (first === "retry-node") {
+    const { goalRef, nodeId } = parseRetryNodeArgs(tokens.slice(1));
+    const goal = await resolveGoalReferenceOrDefault(runtime, ctx, goalRef);
+    await retryTargetGoalNode(runtime, ctx, goal, nodeId, controllerDefaults);
     return;
   }
   if (first === "pause" || first === "resume" || first === "clear") {
@@ -2103,6 +2109,12 @@ function ensureAtMostOneGoalRef(command: string, rest: string[]): void {
   if (rest.length > 1) throw new Error(`/goal ${command} accepts at most one goal-ref`);
 }
 
+function parseRetryNodeArgs(args: string[]): { goalRef?: string; nodeId: string } {
+  if (args.length === 1) return { nodeId: args[0] ?? "" };
+  if (args.length === 2) return { goalRef: args[0], nodeId: args[1] ?? "" };
+  throw new Error("/goal retry-node requires <node-id> or <goal-ref> <node-id>");
+}
+
 async function editGoalFromCommand(runtime: GoalRuntime, ctx: ExtensionCommandContext, args: string[]): Promise<void> {
   if (args.length === 0) {
     const goal = await resolveGoalReferenceOrDefault(runtime, ctx);
@@ -2635,6 +2647,13 @@ function isPathInside(candidatePath: string, parentPath: string): boolean {
 
 function isFailureMessage(message: string): boolean {
   return /^failed\b/i.test(message);
+}
+
+async function retryTargetGoalNode(runtime: GoalRuntime, ctx: ExtensionCommandContext, goal: GoalSummary, nodeId: string, controllerDefaults: PiGoalControllerDefaults = {}): Promise<void> {
+  const result = await runtime.retryGoalDagNode(goal.goalId, nodeId);
+  ctx.ui.notify(result.message, "info");
+  const latestGoal = (await runtime.listGoalSummaries()).find((candidate) => candidate.goalId === goal.goalId) ?? goal;
+  await resumeTargetGoal(runtime, ctx, latestGoal, controllerDefaults);
 }
 
 async function resumeTargetGoal(runtime: GoalRuntime, ctx: ExtensionCommandContext, goal: GoalSummary, controllerDefaults: PiGoalControllerDefaults = {}): Promise<void> {
