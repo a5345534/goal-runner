@@ -975,7 +975,11 @@ export class NativeGitWorkspaceManager {
       targetWorkspacePath: target.workspacePath,
       targetHead: target.head,
     });
-    if (sync.status === "blocked") {
+    const idempotentPromotedTarget = sync.status === "blocked"
+      && sync.targetHead
+      && sync.remoteHead
+      && isDirectPromotionMergeCommit(target.workspacePath, sync.targetHead, sync.remoteHead, controllerHead);
+    if (sync.status === "blocked" && !idempotentPromotedTarget) {
       return nativeGitPromotionBlocked(request, `target branch sync blocked: ${sync.summary}`, {
         controllerBranch,
         controllerHead,
@@ -987,6 +991,9 @@ export class NativeGitWorkspaceManager {
         targetSyncSummary: sync.summary,
       });
     }
+    const syncSummary = idempotentPromotedTarget
+      ? `target ${target.targetBranch} already contains an unpushed direct promotion merge; parent push will publish it`
+      : sync.summary;
 
     const syncedTargetHead = sync.targetHead ?? (safeGit(target.workspacePath, ["rev-parse", "--verify", "HEAD"]) || target.head);
     const syncedCheckout = this.syncSubmoduleWorktreesToHeadPins({ targetWorkspacePath: target.workspacePath, recursive: true });
@@ -999,7 +1006,7 @@ export class NativeGitWorkspaceManager {
         targetWorkspacePath: target.workspacePath,
         targetHead: syncedTargetHead,
         targetRemoteHead: sync.remoteHead,
-        targetSyncSummary: sync.summary,
+        targetSyncSummary: syncSummary,
       });
     }
     const targetSyncCheckoutSummary = successfulSubmoduleCheckoutSyncSummary(syncedCheckout);
@@ -1007,7 +1014,7 @@ export class NativeGitWorkspaceManager {
     if (controllerHead === syncedTargetHead || gitIsAncestor(target.workspacePath, controllerHead, syncedTargetHead)) {
       return {
         status: "notRequired",
-        summary: appendIntegrationSummary(appendIntegrationSummary(`controller ${shortSha(controllerHead)} is already contained in target ${target.targetBranch}`, prePromotionCheckoutSyncSummary), targetSyncCheckoutSummary),
+        summary: appendIntegrationSummary(appendIntegrationSummary(appendIntegrationSummary(`controller ${shortSha(controllerHead)} is already contained in target ${target.targetBranch}`, prePromotionCheckoutSyncSummary), syncSummary), targetSyncCheckoutSummary),
         controllerBranch,
         controllerHead,
         targetRef: target.targetRef,
@@ -1015,7 +1022,7 @@ export class NativeGitWorkspaceManager {
         targetWorkspacePath: target.workspacePath,
         targetHead: syncedTargetHead,
         targetRemoteHead: sync.remoteHead,
-        targetSyncSummary: sync.summary,
+        targetSyncSummary: syncSummary,
         promotionCommitSha: syncedTargetHead,
       };
     }
@@ -1041,7 +1048,7 @@ export class NativeGitWorkspaceManager {
             targetWorkspacePath: target.workspacePath,
             targetHead: syncedTargetHead,
             targetRemoteHead: sync.remoteHead,
-            targetSyncSummary: sync.summary,
+            targetSyncSummary: syncSummary,
           });
         }
         submodulePromotionSummary = resolution.summary;
@@ -1067,7 +1074,7 @@ export class NativeGitWorkspaceManager {
           targetWorkspacePath: target.workspacePath,
           targetHead: syncedTargetHead,
           targetRemoteHead: sync.remoteHead,
-          targetSyncSummary: sync.summary,
+          targetSyncSummary: syncSummary,
         });
       }
       const publishSummary = publish.status === "passed" ? publish.summary : undefined;
@@ -1087,7 +1094,7 @@ export class NativeGitWorkspaceManager {
           targetWorkspacePath: target.workspacePath,
           targetHead: syncedTargetHead,
           targetRemoteHead: sync.remoteHead,
-          targetSyncSummary: sync.summary,
+          targetSyncSummary: syncSummary,
         });
       }
       const postMergeCheckoutSyncSummary = successfulSubmoduleCheckoutSyncSummary(postMergeCheckoutSync);
@@ -1104,7 +1111,7 @@ export class NativeGitWorkspaceManager {
         targetWorkspacePath: target.workspacePath,
         targetHead: syncedTargetHead,
         targetRemoteHead: sync.remoteHead,
-        targetSyncSummary: sync.summary,
+        targetSyncSummary: syncSummary,
         promotionCommitSha,
       };
     } catch (error) {
@@ -1117,7 +1124,7 @@ export class NativeGitWorkspaceManager {
         targetWorkspacePath: target.workspacePath,
         targetHead: syncedTargetHead,
         targetRemoteHead: sync.remoteHead,
-        targetSyncSummary: sync.summary,
+        targetSyncSummary: syncSummary,
       });
     }
   }
@@ -1538,6 +1545,7 @@ export class NativeGitWorkspaceManager {
       const head = safeGit(request.targetWorkspacePath, ["rev-parse", "--verify", "HEAD"]);
       if (!head) return { status: "blocked", summary: "target workspace has no HEAD", error: "no HEAD" };
 
+      refreshRetainedSubmoduleRefsForPushCheck(request.targetWorkspacePath);
       const refspec = `HEAD:refs/heads/${request.remoteBranch}`;
       git(request.targetWorkspacePath, ["push", "--recurse-submodules=check", request.remoteName, refspec]);
 
@@ -1631,6 +1639,30 @@ export class NativeGitWorkspaceManager {
 
   private resolveWorktreeRoot(repoRoot: string): string {
     return resolve(this.options.worktreeRoot ?? resolve(repoRoot, ".worktrees"));
+  }
+}
+
+function isDirectPromotionMergeCommit(cwd: string, commit: string, targetParent: string, controllerParent: string): boolean {
+  const line = safeGit(cwd, ["rev-list", "--parents", "-n", "1", commit]);
+  const [, ...parents] = line.split(/\s+/).filter(Boolean);
+  return parents.length === 2 && parents.includes(targetParent) && parents.includes(controllerParent);
+}
+
+function refreshRetainedSubmoduleRefsForPushCheck(targetWorkspacePath: string): void {
+  const gitlinks = scanChangedSubmoduleGitlinks(targetWorkspacePath, "ALL", "HEAD")
+    .filter((gitlink) => gitlink.status !== "deleted" && gitlink.newSha);
+  for (const gitlink of gitlinks) {
+    const submodulePath = resolve(targetWorkspacePath, gitlink.path);
+    if (!existsSync(submodulePath) || !findGitRepositoryRoot(submodulePath)) continue;
+    const canonicalUrl = resolveSubmoduleCanonicalUrl(targetWorkspacePath, gitlink.path, "HEAD")
+      ?? resolveSubmoduleCanonicalUrl(targetWorkspacePath, gitlink.path, "WORKTREE");
+    if (!canonicalUrl) continue;
+    safeGit(submodulePath, [
+      "fetch",
+      "--no-tags",
+      canonicalUrl,
+      "+refs/heads/goal-runner/retained/*:refs/remotes/goal-runner-retained/*",
+    ]);
   }
 }
 
