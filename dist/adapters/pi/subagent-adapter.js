@@ -164,6 +164,7 @@ export function readPiSubagentSessionState(subagent, options = {}) {
     const staleResult = !assistantIsCurrent ? extractResultMarker(parsed.lastAssistantText) : undefined;
     const staleBlocked = !assistantIsCurrent ? extractBlockedMarker(parsed.lastAssistantText) : undefined;
     const hasExplicitAttempt = Boolean(subagent.attemptId || subagent.attemptStartedAt || subagent.attemptCursor);
+    const errorIsCurrent = Boolean(parsed.lastError && (!hasExplicitAttempt || isAtOrAfter(parsed.lastErrorAt ?? parsed.lastActivityAt, currentAttemptAt)));
     const attemptMetadata = compactMetadata({
         attemptId: subagent.attemptId,
         attemptStartedAt: subagent.attemptStartedAt,
@@ -171,6 +172,8 @@ export function readPiSubagentSessionState(subagent, options = {}) {
         staleReplayIgnored: Boolean(staleResult || staleBlocked),
         staleReplayMarker: staleResult ? "SUBAGENT_RESULT" : staleBlocked ? "SUBAGENT_BLOCKED" : undefined,
         staleReplayAt: staleResult || staleBlocked ? parsed.lastAssistantAt : undefined,
+        staleErrorIgnored: Boolean(parsed.lastError && !errorIsCurrent),
+        staleErrorAt: parsed.lastError && !errorIsCurrent ? parsed.lastErrorAt : undefined,
     });
     const blocked = assistantIsCurrent ? extractBlockedMarker(parsed.lastAssistantText) : undefined;
     if (blocked) {
@@ -180,7 +183,7 @@ export function readPiSubagentSessionState(subagent, options = {}) {
     if (result) {
         return withInspectionMetadata({ status: "selfReportedComplete", selfReportedResult: result, lastActivityAt: parsed.lastAssistantAt ?? effectiveLastActivityAt }, parsed, attemptMetadata);
     }
-    if (parsed.lastError) {
+    if (parsed.lastError && errorIsCurrent) {
         if (isRecoverableContextOverflow(parsed, options, effectiveLastActivityAt)) {
             return withInspectionMetadata({ status: "running", error: `Pi context overflow recovery pending: ${parsed.lastError}`, lastActivityAt: effectiveLastActivityAt }, parsed, attemptMetadata);
         }
@@ -256,6 +259,7 @@ function parsePiSessionLine(rawLine, parsed) {
         // rebuilds/retries the session. Treat a later compaction as recovery evidence
         // so the pre-compaction error does not remain sticky in runtime polling.
         parsed.lastError = undefined;
+        parsed.lastErrorAt = undefined;
         parsed.lastMessageRole = "compaction";
         return;
     }
@@ -268,10 +272,14 @@ function parsePiSessionLine(rawLine, parsed) {
     if (typeof message.role === "string")
         parsed.lastMessageRole = message.role;
     if (message.role === "assistant") {
-        if (message.stopReason === "error" && typeof message.errorMessage === "string")
+        if (message.stopReason === "error" && typeof message.errorMessage === "string") {
             parsed.lastError = message.errorMessage;
-        else
+            parsed.lastErrorAt = typeof entry.timestamp === "string" ? entry.timestamp : parsed.lastActivityAt;
+        }
+        else {
             parsed.lastError = undefined;
+            parsed.lastErrorAt = undefined;
+        }
         const assistantText = textFromContent(message.content);
         if (assistantText) {
             parsed.lastAssistantText = assistantText;

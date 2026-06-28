@@ -50,6 +50,12 @@ export function parseGoalCommand(args = "") {
                 throw new Error(`/goal ${first} requires exactly one DAG node id`);
             return { kind: "retryNode", nodeId: rest[0] ?? "" };
         }
+        case "continue-node":
+        case "continueNode": {
+            if (rest.length !== 1)
+                throw new Error(`/goal ${first} requires exactly one DAG node id`);
+            return { kind: "continueNode", nodeId: rest[0] ?? "" };
+        }
         case "pause":
             ensureNoExtraArgs(first, rest);
             return { kind: "pause" };

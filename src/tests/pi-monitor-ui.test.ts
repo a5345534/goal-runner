@@ -751,6 +751,27 @@ test("goal monitor offers retry-node operation on blocked node rows", () => {
   assert.deepEqual(controller.handleInput("\r"), { kind: "nodeOperation", operation: "retryNode", nodeId: "build-node" });
 });
 
+test("goal monitor offers continue-node operation on blocked node rows with reusable sessions", () => {
+  const now = new Date("2026-05-31T00:05:00.000Z");
+  const nodes = [dagNode({ status: "blockedTerminal", lifecyclePhase: "terminal", lastValidationSummary: "Connection error" })];
+  const subagents = [subagent({ status: "blockedTerminal", integrationStatus: "Connection error", sessionFile: "/sessions/subagent-build-node-1.jsonl" })];
+  const controller = new GoalMonitorController(
+    summary("blocked"),
+    () => ({ lines: ["controller-tail"], entryCount: 1, messageCount: 1 }),
+    () => ({ nodes, subagents, refreshedAt: now.toISOString() }),
+    () => now,
+  );
+
+  controller.render(140, theme);
+  controller.handleInput("\r"); // nodes
+  const rendered = controller.render(220, theme).join("\n");
+
+  assert.match(rendered, /ops: \[runners\(1\)\].*retry node.*continue node/);
+  controller.handleInput("\x1b[C");
+  controller.handleInput("\x1b[C");
+  assert.deepEqual(controller.handleInput("\r"), { kind: "nodeOperation", operation: "continueNode", nodeId: "build-node" });
+});
+
 test("goal monitor offers retry-node operation on blocked runner rows", () => {
   const now = new Date("2026-05-31T00:05:00.000Z");
   const nodes = [dagNode({ status: "blockedTerminal", lifecyclePhase: "terminal", lastValidationSummary: "Connection error" })];
@@ -1879,6 +1900,7 @@ test("Pi: actions display user-facing labels but return existing operation IDs",
   assert.equal(ACTION_DISPLAY_LABELS["nodeList"], "nodes");
   assert.equal(ACTION_DISPLAY_LABELS["runnerList"], "runners");
   assert.equal(ACTION_DISPLAY_LABELS["retryNode"], "retry node");
+  assert.equal(ACTION_DISPLAY_LABELS["continueNode"], "continue node");
   assert.equal(ACTION_DISPLAY_LABELS["view"], "view");
   assert.equal(ACTION_DISPLAY_LABELS["back"], "back");
   assert.equal(ACTION_DISPLAY_LABELS["pause"], "pause");

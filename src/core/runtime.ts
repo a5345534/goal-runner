@@ -131,6 +131,8 @@ export class GoalRuntime {
       }
       case "retryNode":
         return this.retryGoalDagNodeForSession(sessionKey, command.nodeId);
+      case "continueNode":
+        return this.continueGoalDagNodeInPlaceForSession(sessionKey, command.nodeId);
       case "pause":
         return this.pauseGoal(sessionKey);
       case "resume":
@@ -692,6 +694,78 @@ export class GoalRuntime {
     return { goal: updatedGoal, message: `DAG node ${nodeId} reset to planned for retry.` };
   }
 
+  async continueGoalDagNodeInPlaceForSession(sessionKey: string, nodeId: string): Promise<GoalToolResult> {
+    const goal = await this.requireGoal(sessionKey);
+    return this.continueGoalDagNodeInPlace(goal.goalId, nodeId);
+  }
+
+  async continueGoalDagNodeInPlace(goalId: string, nodeId: string): Promise<GoalToolResult> {
+    const goal = await this.getGoalById(goalId);
+    if (!goal) throw new Error(`goal not found: ${goalId}`);
+    const node = await this.store.getGoalDagNode(goalId, nodeId);
+    if (!node) throw new Error(`DAG node not found for goal ${goalId}: ${nodeId}`);
+    if (!["blocked", "blockedTerminal", "failed", "needsFollowup"].includes(node.status)) {
+      throw new Error(`DAG node ${nodeId} is ${node.status}; only blocked, blockedTerminal, failed, or needsFollowup nodes can be continued in-place`);
+    }
+
+    const subagents = await this.store.listGoalSubagents(goalId, nodeId);
+    const subagent = selectSubagentForInPlaceContinuation(node, subagents);
+    if (!subagent) throw new Error(`DAG node ${nodeId} has no recorded subagent to continue; use retry-node to start a fresh subagent`);
+    if (!subagent.sessionFile) throw new Error(`DAG node ${nodeId} subagent ${subagent.subagentId} has no reusable session file; use retry-node to start a fresh subagent`);
+
+    const now = this.nowIso();
+    const previousRetryCount = subagent.retryCount ?? 0;
+    const resetSubagent: GoalSubagentRecord = {
+      ...subagent,
+      status: "blocked",
+      integrationState: resetIntegrationStateForContinuation(subagent),
+      integrationError: undefined,
+      integrationCompletedAt: undefined,
+      retryCount: 0,
+      lastActionAttempt: undefined,
+      lastAdapterObservation: undefined,
+      lastRecoveryDecision: undefined,
+      recoveryLoopSignature: undefined,
+      integrationStatus: appendRetryNote(subagent.integrationStatus, `manual same-subagent continuation requested at ${now}; retry count reset from ${previousRetryCount} to 0`),
+      updatedAt: now,
+    };
+    await this.store.saveGoalSubagent(resetSubagent);
+
+    const continuedNode: GoalDagNode = {
+      ...node,
+      status: "blocked",
+      lifecyclePhase: "controllerJudging",
+      preparedResources: preparedResourcesForInPlaceContinuation(node, resetSubagent, now),
+      lastAdapterObservation: undefined,
+      lastRecoveryDecision: undefined,
+      lastValidationSummary: `manual same-subagent continuation requested for ${node.status} node at ${now}; retry count reset from ${previousRetryCount} to 0`,
+      updatedAt: now,
+    };
+    await this.store.saveGoalDagNode(continuedNode);
+
+    const updatedGoal = goal.status === "active"
+      ? { ...goal, updatedAt: now }
+      : normalizeBudgetLimited({
+        ...goal,
+        status: "active",
+        updatedAt: now,
+        goalTurnsSinceAuditReset: goal.status === "blocked" ? 0 : goal.goalTurnsSinceAuditReset,
+      });
+    await this.store.saveGoal(updatedGoal);
+    await this.appendLedger("goal_node_continue_requested", goal.sessionKey, goalId, {
+      nodeId,
+      subagentId: subagent.subagentId,
+      previousNodeStatus: node.status,
+      previousSubagentStatus: subagent.status,
+      previousRetryCount,
+      preservedSessionFile: subagent.sessionFile,
+      preservedWorkspacePath: subagent.workspacePath,
+    });
+    await this.store.clearReservation(goal.sessionKey);
+    await this.callbacks.notifyGoalUpdated?.(updatedGoal);
+    return { goal: updatedGoal, message: `DAG node ${nodeId} queued for same-subagent continuation using ${subagent.subagentId}; retry count reset.` };
+  }
+
   async getReservation(sessionKey: string): Promise<ContinuationReservation | undefined> {
     return this.store.getReservation(sessionKey);
   }
@@ -1148,6 +1222,44 @@ export class GoalRuntime {
   private nowIso(date = this.config.now()): string {
     return date.toISOString();
   }
+}
+
+function selectSubagentForInPlaceContinuation(node: GoalDagNode, subagents: GoalSubagentRecord[]): GoalSubagentRecord | undefined {
+  const preparedSubagentId = node.preparedResources?.subagentId;
+  if (preparedSubagentId) {
+    const prepared = subagents.find((subagent) => subagent.subagentId === preparedSubagentId && subagent.status !== "complete");
+    if (prepared) return prepared;
+  }
+  return subagents
+    .filter((subagent) => subagent.status !== "complete")
+    .sort((left, right) => subagentSortTime(right) - subagentSortTime(left))[0];
+}
+
+function subagentSortTime(subagent: GoalSubagentRecord): number {
+  return Math.max(
+    Date.parse(subagent.updatedAt) || 0,
+    Date.parse(subagent.lastActivityAt ?? "") || 0,
+    Date.parse(subagent.createdAt) || 0,
+  );
+}
+
+function resetIntegrationStateForContinuation(subagent: GoalSubagentRecord): GoalSubagentRecord["integrationState"] {
+  if (subagent.integrationState === "complete" || subagent.integrationState === "not-required") return subagent.integrationState;
+  return subagent.workspacePath || subagent.branch || subagent.ref ? "pending" : undefined;
+}
+
+function preparedResourcesForInPlaceContinuation(node: GoalDagNode, subagent: GoalSubagentRecord, now: string): GoalDagNode["preparedResources"] {
+  return {
+    ...(node.preparedResources ?? {}),
+    subagentId: subagent.subagentId,
+    adapterId: subagent.harnessAdapterId,
+    workspacePath: subagent.workspacePath ?? node.preparedResources?.workspacePath,
+    branch: subagent.branch ?? node.preparedResources?.branch,
+    ref: subagent.ref ?? node.preparedResources?.ref,
+    sessionId: subagent.sessionId ?? node.preparedResources?.sessionId,
+    sessionFile: subagent.sessionFile ?? node.preparedResources?.sessionFile,
+    updatedAt: now,
+  };
 }
 
 function retryWorkspaceForNode(node: GoalDagNode, subagents: GoalSubagentRecord[]): GoalDagNode["workspace"] {

@@ -33,7 +33,7 @@ import { filterPiBackgroundRunnersForSubagent, type PiBackgroundRunnerRecord } f
 import type { GoalListThemeLike } from "./goal-list-ui.js";
 
 export type GoalMonitorAction = "close" | "pause" | "resume" | "clear" | "openSession";
-export type GoalMonitorNodeOperation = "retryNode";
+export type GoalMonitorNodeOperation = "retryNode" | "continueNode";
 export type GoalMonitorRunnerOperation = "openSession" | "stop" | "kill" | "archive";
 
 export type GoalMonitorSelection =
@@ -972,6 +972,7 @@ function operationsForListItem(item: GoalMonitorListItem | undefined, goal: Goal
       { kind: "internal", operation: "runnerList", label: `${userActionLabel("runnerList")}(${runnerCount})` },
     ];
     if (node && canRetryNode(node)) operations.push({ kind: "node", operation: "retryNode", nodeId: item.nodeId, label: userActionLabel("retryNode") });
+    if (node && canContinueNodeInPlace(node, dag.subagents)) operations.push({ kind: "node", operation: "continueNode", nodeId: item.nodeId, label: userActionLabel("continueNode") });
     operations.push({ kind: "internal", operation: "back", label: userActionLabel("back") });
     return operations;
   }
@@ -985,12 +986,17 @@ function operationsForListItem(item: GoalMonitorListItem | undefined, goal: Goal
   if (hasLiveRunner) operations.push({ kind: "runner", operation: "kill", subagentId: item.subagentId, label: userActionLabel("kill") });
   if (runnerRecords.length > 0) operations.push({ kind: "runner", operation: "archive", subagentId: item.subagentId, label: userActionLabel("archive") });
   if (node && canRetryNode(node)) operations.push({ kind: "node", operation: "retryNode", nodeId: item.nodeId, label: userActionLabel("retryNode") });
+  if (node && canContinueNodeInPlace(node, dag.subagents)) operations.push({ kind: "node", operation: "continueNode", nodeId: item.nodeId, label: userActionLabel("continueNode") });
   operations.push({ kind: "internal", operation: "back", label: userActionLabel("back") });
   return operations;
 }
 
 function canRetryNode(node: GoalDagNode): boolean {
   return ["blocked", "blockedTerminal", "failed", "needsFollowup"].includes(node.status);
+}
+
+function canContinueNodeInPlace(node: GoalDagNode, subagents: GoalSubagentRecord[]): boolean {
+  return canRetryNode(node) && subagents.some((subagent) => subagent.nodeId === node.nodeId && subagent.status !== "complete" && Boolean(subagent.sessionFile));
 }
 
 /** Map an operation ID to its user-facing label using ACTION_DISPLAY_LABELS. */

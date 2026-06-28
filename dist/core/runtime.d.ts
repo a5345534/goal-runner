@@ -99,6 +99,8 @@ export declare class GoalRuntime {
     }): Promise<GoalToolResult>;
     retryGoalDagNodeForSession(sessionKey: string, nodeId: string): Promise<GoalToolResult>;
     retryGoalDagNode(goalId: string, nodeId: string): Promise<GoalToolResult>;
+    continueGoalDagNodeInPlaceForSession(sessionKey: string, nodeId: string): Promise<GoalToolResult>;
+    continueGoalDagNodeInPlace(goalId: string, nodeId: string): Promise<GoalToolResult>;
     getReservation(sessionKey: string): Promise<ContinuationReservation | undefined>;
     clearGoal(sessionKey: string): Promise<GoalToolResult>;
     toolGetGoal(sessionKey: string): Promise<GoalToolResult>;

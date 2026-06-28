@@ -45,6 +45,7 @@ export const ACTION_DISPLAY_LABELS = {
     nodeList: "nodes",
     runnerList: "runners",
     retryNode: "retry node",
+    continueNode: "continue node",
     view: "view",
     back: "back",
     pause: "pause",

@@ -87,6 +87,7 @@ export type GoalLedgerEventType =
   | "goal_paused"
   | "goal_resumed"
   | "goal_node_retry_requested"
+  | "goal_node_continue_requested"
   | "goal_cleared"
   | "turn_started"
   | "turn_finished"

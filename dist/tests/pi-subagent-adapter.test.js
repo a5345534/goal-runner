@@ -488,6 +488,33 @@ test("Pi subagent session inspection leaves recent assistant chatter idle but fo
     assert.match(stale.error ?? "", /unresolved assistant message/);
     assert.match(stale.error ?? "", /SUBAGENT_RESULT\/SUBAGENT_BLOCKED/);
 });
+test("Pi subagent session inspection ignores stale assistant errors from earlier reused-session attempts", () => {
+    const transcript = [
+        JSON.stringify({ type: "message", message: { role: "user", content: "old prompt" }, timestamp: "2026-06-02T00:00:00.000Z" }),
+        JSON.stringify({
+            type: "message",
+            message: { role: "assistant", stopReason: "error", errorMessage: "Connection error.", content: [] },
+            timestamp: "2026-06-02T00:01:00.000Z",
+        }),
+        JSON.stringify({ type: "message", message: { role: "user", content: "recovery prompt" }, timestamp: "2026-06-02T00:20:00.000Z" }),
+    ].join("\n");
+    const state = readPiSubagentSessionState(subagent({
+        sessionFile: "/reused-session-error",
+        attemptId: "subagent-1-attempt-2",
+        attemptStartedAt: "2026-06-02T00:20:00.000Z",
+        attemptCursor: { at: "2026-06-02T00:20:00.000Z", source: "prompt-dispatch" },
+        createdAt: "2026-06-02T00:00:00.000Z",
+        lastActivityAt: "2026-06-02T00:20:00.000Z",
+    }), {
+        exists: () => true,
+        now: () => new Date("2026-06-02T00:20:30.000Z"),
+        live: true,
+        readFile: () => transcript,
+    });
+    assert.equal(state.status, "running");
+    assert.equal(state.error, undefined);
+    assert.equal(state.metadata?.staleErrorIgnored, true);
+});
 test("Pi subagent session inspection ignores outcome markers from earlier reused-session attempts", () => {
     const transcript = [
         JSON.stringify({ type: "message", message: { role: "user", content: "old node" }, timestamp: "2026-06-02T00:00:00.000Z" }),

@@ -106,6 +106,66 @@ test("runtime can reset a blocked DAG node for manual retry", async () => {
     const ledger = await runtime.listLedgerEvents("s1", goalId);
     assert.equal(ledger.at(-1)?.type, "goal_node_retry_requested");
 });
+test("runtime can reset retry counters and continue a blocked DAG node in place", async () => {
+    const runtime = new GoalRuntime({ store: new MemoryGoalStore(), config: { retryBaseDelayMs: 0, retryJitterMs: 0 } });
+    const created = await runtime.createOrReplaceGoal("s1", "continue blocked node");
+    const goalId = created.goal.goalId;
+    await runtime.planGoalDag(goalId, [{ nodeId: "closeout-docs", objective: "Close out docs", workspace: { worktreeSlug: "closeout-docs" } }]);
+    const node = await runtime.getGoalDagNode(goalId, "closeout-docs");
+    assert.ok(node);
+    await runtime.saveGoalDagNode({
+        ...node,
+        status: "blockedTerminal",
+        lifecyclePhase: "terminal",
+        preparedResources: {
+            subagentId: "subagent-closeout-docs",
+            workspacePath: "/repo/.worktrees/closeout-docs",
+            branch: "goal/closeout-docs",
+            sessionFile: "/sessions/subagent-closeout-docs.jsonl",
+        },
+        lastValidationSummary: "recovery retries exhausted: Connection error",
+    });
+    await runtime.saveGoalSubagent({
+        goalId,
+        nodeId: "closeout-docs",
+        subagentId: "subagent-closeout-docs",
+        harnessAdapterId: "fake",
+        sessionFile: "/sessions/subagent-closeout-docs.jsonl",
+        status: "blockedTerminal",
+        workspacePath: "/repo/.worktrees/closeout-docs",
+        branch: "goal/closeout-docs",
+        integrationState: "failed",
+        integrationStatus: "Connection error",
+        integrationError: "Connection error",
+        retryCount: 2,
+        recoveryLoopSignature: "fake:runnerError:connection",
+        lastRecoveryDecision: { action: "markNodeBlocked", reason: "Connection error", at: node.updatedAt },
+        prompts: ["initial", "recovery"],
+        createdAt: node.createdAt,
+        updatedAt: node.updatedAt,
+    });
+    await runtime.blockGoalFromControllerCloseout(goalId, "blocked before in-place continuation");
+    const result = await runtime.continueGoalDagNodeInPlace(goalId, "closeout-docs");
+    assert.match(result.message, /same-subagent continuation/);
+    assert.equal(result.goal?.status, "active");
+    const continued = await runtime.getGoalDagNode(goalId, "closeout-docs");
+    assert.equal(continued?.status, "blocked");
+    assert.equal(continued?.lifecyclePhase, "controllerJudging");
+    assert.equal(continued?.workspace?.worktreeSlug, "closeout-docs");
+    assert.equal(continued?.preparedResources?.subagentId, "subagent-closeout-docs");
+    assert.equal(continued?.preparedResources?.sessionFile, "/sessions/subagent-closeout-docs.jsonl");
+    assert.match(continued?.lastValidationSummary ?? "", /manual same-subagent continuation requested/);
+    const reset = await runtime.getGoalSubagent(goalId, "subagent-closeout-docs");
+    assert.equal(reset?.status, "blocked");
+    assert.equal(reset?.retryCount, 0);
+    assert.equal(reset?.integrationState, "pending");
+    assert.equal(reset?.integrationError, undefined);
+    assert.equal(reset?.recoveryLoopSignature, undefined);
+    assert.equal(reset?.lastRecoveryDecision, undefined);
+    assert.match(reset?.integrationStatus ?? "", /retry count reset from 2 to 0/);
+    const ledger = await runtime.listLedgerEvents("s1", goalId);
+    assert.equal(ledger.at(-1)?.type, "goal_node_continue_requested");
+});
 test("blocked audit evidence can reject non-matching blockers even after three turns", async () => {
     const runtime = new GoalRuntime({ store: new MemoryGoalStore(), config: { retryBaseDelayMs: 0, retryJitterMs: 0 } });
     await runtime.createOrReplaceGoal("s1", "blocked evidence test");

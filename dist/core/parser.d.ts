@@ -13,6 +13,9 @@ export type GoalCommand = {
     kind: "retryNode";
     nodeId: string;
 } | {
+    kind: "continueNode";
+    nodeId: string;
+} | {
     kind: "pause";
 } | {
     kind: "resume";

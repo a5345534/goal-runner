@@ -732,6 +732,8 @@ function operationsForListItem(item, goal, dag) {
         ];
         if (node && canRetryNode(node))
             operations.push({ kind: "node", operation: "retryNode", nodeId: item.nodeId, label: userActionLabel("retryNode") });
+        if (node && canContinueNodeInPlace(node, dag.subagents))
+            operations.push({ kind: "node", operation: "continueNode", nodeId: item.nodeId, label: userActionLabel("continueNode") });
         operations.push({ kind: "internal", operation: "back", label: userActionLabel("back") });
         return operations;
     }
@@ -750,11 +752,16 @@ function operationsForListItem(item, goal, dag) {
         operations.push({ kind: "runner", operation: "archive", subagentId: item.subagentId, label: userActionLabel("archive") });
     if (node && canRetryNode(node))
         operations.push({ kind: "node", operation: "retryNode", nodeId: item.nodeId, label: userActionLabel("retryNode") });
+    if (node && canContinueNodeInPlace(node, dag.subagents))
+        operations.push({ kind: "node", operation: "continueNode", nodeId: item.nodeId, label: userActionLabel("continueNode") });
     operations.push({ kind: "internal", operation: "back", label: userActionLabel("back") });
     return operations;
 }
 function canRetryNode(node) {
     return ["blocked", "blockedTerminal", "failed", "needsFollowup"].includes(node.status);
+}
+function canContinueNodeInPlace(node, subagents) {
+    return canRetryNode(node) && subagents.some((subagent) => subagent.nodeId === node.nodeId && subagent.status !== "complete" && Boolean(subagent.sessionFile));
 }
 /** Map an operation ID to its user-facing label using ACTION_DISPLAY_LABELS. */
 function userActionLabel(operationId) {
