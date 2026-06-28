@@ -51,7 +51,7 @@ import {
 } from "./background-session.js";
 import { GoalListController, formatGoalListRow, formatGoalListState } from "./goal-list-ui.js";
 import { normalizePiModelArg } from "./model-args.js";
-import { GoalMonitorController, type GoalMonitorDagSnapshot, type GoalMonitorRunnerOperation, type GoalMonitorSelection } from "./monitor-ui.js";
+import { GoalMonitorController, type GoalMonitorDagSnapshot, type GoalMonitorNodeOperation, type GoalMonitorRunnerOperation, type GoalMonitorSelection } from "./monitor-ui.js";
 import { PI_GOAL_SESSION_ENTRY_TYPE, PiSessionGoalMirrorStore } from "./session-store.js";
 import {
   archivePiBackgroundRunnerDirs,
@@ -2150,6 +2150,10 @@ async function editGoalBudgetFromCommand(runtime: GoalRuntime, ctx: ExtensionCom
 async function monitorGoalSummary(runtime: GoalRuntime, ctx: ExtensionCommandContext, goal: GoalSummary): Promise<void> {
   const selection = await pickGoalMonitorAction(runtime, ctx, goal);
   if (!selection || selection.kind === "close") return;
+  if (selection.kind === "nodeOperation") {
+    await runGoalMonitorNodeOperation(runtime, ctx, goal, selection.operation, selection.nodeId);
+    return;
+  }
   if (selection.kind === "runnerOperation") {
     await runGoalMonitorRunnerOperation(runtime, ctx, goal, selection.operation, selection.subagentId);
     return;
@@ -2203,7 +2207,7 @@ async function pickGoalMonitorAction(runtime: GoalRuntime, ctx: ExtensionCommand
           done(undefined);
           return;
         }
-        if (selection?.kind === "action" || selection?.kind === "runnerOperation") {
+        if (selection?.kind === "action" || selection?.kind === "nodeOperation" || selection?.kind === "runnerOperation") {
           clearInterval(refresh);
           done(selection);
           return;
@@ -2212,6 +2216,18 @@ async function pickGoalMonitorAction(runtime: GoalRuntime, ctx: ExtensionCommand
       },
     };
   });
+}
+
+async function runGoalMonitorNodeOperation(
+  runtime: GoalRuntime,
+  ctx: ExtensionCommandContext,
+  goal: GoalSummary,
+  operation: GoalMonitorNodeOperation,
+  nodeId: string,
+): Promise<void> {
+  if (operation === "retryNode") {
+    await retryTargetGoalNode(runtime, ctx, goal, nodeId);
+  }
 }
 
 async function runGoalMonitorRunnerOperation(

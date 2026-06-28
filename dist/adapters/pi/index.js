@@ -1900,6 +1900,10 @@ async function monitorGoalSummary(runtime, ctx, goal) {
     const selection = await pickGoalMonitorAction(runtime, ctx, goal);
     if (!selection || selection.kind === "close")
         return;
+    if (selection.kind === "nodeOperation") {
+        await runGoalMonitorNodeOperation(runtime, ctx, goal, selection.operation, selection.nodeId);
+        return;
+    }
     if (selection.kind === "runnerOperation") {
         await runGoalMonitorRunnerOperation(runtime, ctx, goal, selection.operation, selection.subagentId);
         return;
@@ -1959,7 +1963,7 @@ async function pickGoalMonitorAction(runtime, ctx, goal) {
                     done(undefined);
                     return;
                 }
-                if (selection?.kind === "action" || selection?.kind === "runnerOperation") {
+                if (selection?.kind === "action" || selection?.kind === "nodeOperation" || selection?.kind === "runnerOperation") {
                     clearInterval(refresh);
                     done(selection);
                     return;
@@ -1968,6 +1972,11 @@ async function pickGoalMonitorAction(runtime, ctx, goal) {
             },
         };
     });
+}
+async function runGoalMonitorNodeOperation(runtime, ctx, goal, operation, nodeId) {
+    if (operation === "retryNode") {
+        await retryTargetGoalNode(runtime, ctx, goal, nodeId);
+    }
 }
 async function runGoalMonitorRunnerOperation(runtime, ctx, goal, operation, subagentId) {
     const state = await runtime.getGoalOrchestrationState(goal.goalId);

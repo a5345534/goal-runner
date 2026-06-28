@@ -44,6 +44,7 @@ export const MONITOR_NODE_DISPLAY_STATE_CHARS = {
 export const ACTION_DISPLAY_LABELS = {
     nodeList: "nodes",
     runnerList: "runners",
+    retryNode: "retry node",
     view: "view",
     back: "back",
     pause: "pause",

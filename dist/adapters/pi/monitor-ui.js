@@ -451,6 +451,9 @@ export class GoalMonitorController {
         if (operation.kind === "action") {
             return operation.action === "close" ? { kind: "close" } : { kind: "action", action: operation.action };
         }
+        if (operation.kind === "node") {
+            return { kind: "nodeOperation", operation: operation.operation, nodeId: operation.nodeId };
+        }
         if (operation.kind === "runner") {
             return { kind: "runnerOperation", operation: operation.operation, subagentId: operation.subagentId };
         }
@@ -722,12 +725,17 @@ function operationsForListItem(item, goal, dag) {
         ];
     }
     if (item.kind === "node") {
+        const node = dag.nodes.find((record) => record.nodeId === item.nodeId);
         const runnerCount = dag.subagents.filter((subagent) => subagent.nodeId === item.nodeId).length;
-        return [
+        const operations = [
             { kind: "internal", operation: "runnerList", label: `${userActionLabel("runnerList")}(${runnerCount})` },
-            { kind: "internal", operation: "back", label: userActionLabel("back") },
         ];
+        if (node && canRetryNode(node))
+            operations.push({ kind: "node", operation: "retryNode", nodeId: item.nodeId, label: userActionLabel("retryNode") });
+        operations.push({ kind: "internal", operation: "back", label: userActionLabel("back") });
+        return operations;
     }
+    const node = dag.nodes.find((record) => record.nodeId === item.nodeId);
     const subagent = dag.subagents.find((record) => record.subagentId === item.subagentId);
     const runnerRecords = (dag.runners ?? []).filter((runner) => runner.subagentId === item.subagentId);
     const hasLiveRunner = runnerRecords.some((runner) => runner.runnerAlive || runner.childAlive);
@@ -740,8 +748,13 @@ function operationsForListItem(item, goal, dag) {
         operations.push({ kind: "runner", operation: "kill", subagentId: item.subagentId, label: userActionLabel("kill") });
     if (runnerRecords.length > 0)
         operations.push({ kind: "runner", operation: "archive", subagentId: item.subagentId, label: userActionLabel("archive") });
+    if (node && canRetryNode(node))
+        operations.push({ kind: "node", operation: "retryNode", nodeId: item.nodeId, label: userActionLabel("retryNode") });
     operations.push({ kind: "internal", operation: "back", label: userActionLabel("back") });
     return operations;
+}
+function canRetryNode(node) {
+    return ["blocked", "blockedTerminal", "failed", "needsFollowup"].includes(node.status);
 }
 /** Map an operation ID to its user-facing label using ACTION_DISPLAY_LABELS. */
 function userActionLabel(operationId) {
@@ -755,6 +768,8 @@ function formatPlainOperation(operation) {
         return operation.operation;
     if (operation.kind === "action")
         return operation.action;
+    if (operation.kind === "node")
+        return operation.operation;
     if (operation.kind === "runner")
         return operation.operation;
     return "-";

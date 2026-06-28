@@ -103,6 +103,7 @@ export interface GoalMonitorOverview {
 export const ACTION_DISPLAY_LABELS: Record<string, string> = {
   nodeList: "nodes",
   runnerList: "runners",
+  retryNode: "retry node",
   view: "view",
   back: "back",
   pause: "pause",
