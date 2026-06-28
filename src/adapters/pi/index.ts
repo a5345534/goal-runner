@@ -1174,7 +1174,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
       targetRef: binding.promotionTargetRef,
       workspace: binding.workspace,
     });
-    const promotion = promotePiControllerBranchIfRequired(manager, binding);
+    const promotion = promotePiControllerBranchIfRequired(manager, binding, goalId);
     promotionResult = promotion.result;
     promotionStatus = promotionResult?.status ?? "notRequired";
     if (!promotion.ok) {
@@ -1472,6 +1472,7 @@ function getParentRemoteUrl(workspacePath: string, remoteName: string): string |
 function promotePiControllerBranchIfRequired(
   manager: NativeGitWorkspaceManager,
   binding: ResolvedWorkspaceBinding,
+  goalId?: string,
 ): { ok: true; summary: string; result?: ReturnType<NativeGitWorkspaceManager["promoteControllerBranch"]> } | { ok: false; summary: string; result: ReturnType<NativeGitWorkspaceManager["promoteControllerBranch"]> } {
   if (!isAutoAllocatedPiControllerWorkspace(binding)) {
     return { ok: true, summary: "promotion not required for explicit controller workspace" };
@@ -1479,6 +1480,7 @@ function promotePiControllerBranchIfRequired(
   const result = manager.promoteControllerBranch({
     controllerWorkspacePath: binding.workspace,
     controllerBranch: binding.branch,
+    goalId,
     targetRef: binding.promotionTargetRef,
   });
   if (result.status === "blocked") return { ok: false, summary: result.summary, result };

@@ -985,7 +985,7 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(runtime, ctx, goalId, bindi
             targetRef: binding.promotionTargetRef,
             workspace: binding.workspace,
         });
-        const promotion = promotePiControllerBranchIfRequired(manager, binding);
+        const promotion = promotePiControllerBranchIfRequired(manager, binding, goalId);
         promotionResult = promotion.result;
         promotionStatus = promotionResult?.status ?? "notRequired";
         if (!promotion.ok) {
@@ -1261,13 +1261,14 @@ function getParentRemoteUrl(workspacePath, remoteName) {
         return undefined;
     }
 }
-function promotePiControllerBranchIfRequired(manager, binding) {
+function promotePiControllerBranchIfRequired(manager, binding, goalId) {
     if (!isAutoAllocatedPiControllerWorkspace(binding)) {
         return { ok: true, summary: "promotion not required for explicit controller workspace" };
     }
     const result = manager.promoteControllerBranch({
         controllerWorkspacePath: binding.workspace,
         controllerBranch: binding.branch,
+        goalId,
         targetRef: binding.promotionTargetRef,
     });
     if (result.status === "blocked")

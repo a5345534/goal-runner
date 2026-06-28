@@ -1075,6 +1075,86 @@ test("native git promotion blocks dirty target worktrees", () => {
   }
 });
 
+test("native git promotion resolves submodule gitlink conflicts using controller objects", () => {
+  const root = mkdtempSync(join(tmpdir(), "goal-promotion-submodule-conflict-"));
+  const previousTrustedPatterns = process.env[TRUSTED_SUBMODULE_URL_PATTERNS_ENV];
+  const previousAllowProtocol = process.env.GIT_ALLOW_PROTOCOL;
+  try {
+    process.env.GIT_ALLOW_PROTOCOL = previousAllowProtocol?.split(":").includes("file")
+      ? previousAllowProtocol
+      : [previousAllowProtocol, "file"].filter(Boolean).join(":");
+    const subRemote = join(root, "aos-core.git");
+    const subSeed = join(root, "aos-core-seed");
+    const parent = join(root, "parent");
+
+    git(root, ["init", "--bare", subRemote]);
+    mkdirSync(subSeed, { recursive: true });
+    git(subSeed, ["init", "-b", "main"]);
+    git(subSeed, ["config", "user.email", "goal@example.test"]);
+    git(subSeed, ["config", "user.name", "Goal Test"]);
+    writeFileSync(join(subSeed, "README.md"), "base\n");
+    git(subSeed, ["add", "README.md"]);
+    git(subSeed, ["commit", "-m", "submodule base"]);
+    git(subSeed, ["remote", "add", "origin", subRemote]);
+    git(subSeed, ["push", "origin", "HEAD:refs/heads/main"]);
+    git(subRemote, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+    mkdirSync(parent, { recursive: true });
+    git(parent, ["init", "-b", "main"]);
+    git(parent, ["config", "user.email", "goal@example.test"]);
+    git(parent, ["config", "user.name", "Goal Test"]);
+    git(parent, ["commit", "--allow-empty", "-m", "initial"]);
+    gitWithFileProtocol(parent, ["submodule", "add", subRemote, "aos-core"]);
+    git(parent, ["commit", "-am", "add aos-core submodule"]);
+
+    process.env[TRUSTED_SUBMODULE_URL_PATTERNS_ENV] = subRemote;
+    const manager = new NativeGitWorkspaceManager({ defaultBaseRef: "main", fetch: false });
+    const controller = manager.allocateControllerWorkspace({ invocationCwd: parent, goalId: "goal-promote-submodule", objective: "Promote submodule conflict" });
+
+    git(join(parent, "aos-core"), ["config", "user.email", "goal@example.test"]);
+    git(join(parent, "aos-core"), ["config", "user.name", "Goal Test"]);
+    writeFileSync(join(parent, "aos-core", "target.txt"), "target\n");
+    git(join(parent, "aos-core"), ["add", "target.txt"]);
+    git(join(parent, "aos-core"), ["commit", "-m", "target submodule change"]);
+    git(parent, ["add", "aos-core"]);
+    git(parent, ["commit", "-m", "target bumps submodule"]);
+
+    git(join(controller.worktreePath, "aos-core"), ["config", "user.email", "goal@example.test"]);
+    git(join(controller.worktreePath, "aos-core"), ["config", "user.name", "Goal Test"]);
+    writeFileSync(join(controller.worktreePath, "aos-core", "controller.txt"), "controller\n");
+    git(join(controller.worktreePath, "aos-core"), ["add", "controller.txt"]);
+    git(join(controller.worktreePath, "aos-core"), ["commit", "-m", "controller submodule change"]);
+    git(controller.worktreePath, ["add", "aos-core"]);
+    git(controller.worktreePath, ["commit", "-m", "controller bumps submodule"]);
+
+    const result = manager.promoteControllerBranch({
+      controllerWorkspacePath: controller.worktreePath,
+      controllerBranch: controller.branch,
+      goalId: "goal-promote-submodule",
+      targetRef: controller.baseRef,
+    });
+
+    assert.equal(result.status, "complete");
+    assert.match(result.summary, /resolved submodule gitlink conflict/);
+    assert.match(result.summary, /submodule-merge-commit/);
+    const gitlinkSha = git(parent, ["rev-parse", "HEAD:aos-core"]);
+    const mergeCommit = git(join(parent, "aos-core"), ["cat-file", "-p", gitlinkSha]);
+    assert.equal((mergeCommit.match(/^parent /gm) ?? []).length, 2);
+    assert.equal(git(join(parent, "aos-core"), ["show", `${gitlinkSha}:target.txt`]), "target");
+    assert.equal(git(join(parent, "aos-core"), ["show", `${gitlinkSha}:controller.txt`]), "controller");
+    assert.equal(git(parent, ["status", "--porcelain=v1", "--untracked-files=no", "--ignore-submodules=none"]), "");
+    assert.match(git(subRemote, ["for-each-ref", "--format=%(refname)", "refs/heads/goal-runner/retained"]), /goal-runner\/retained\/goal-promote-submodule\/aos-core-/);
+
+    manager.cleanupWorkspace({ repoRoot: parent, worktreePath: controller.worktreePath, branch: controller.branch, force: true });
+  } finally {
+    if (previousTrustedPatterns === undefined) delete process.env[TRUSTED_SUBMODULE_URL_PATTERNS_ENV];
+    else process.env[TRUSTED_SUBMODULE_URL_PATTERNS_ENV] = previousTrustedPatterns;
+    if (previousAllowProtocol === undefined) delete process.env.GIT_ALLOW_PROTOCOL;
+    else process.env.GIT_ALLOW_PROTOCOL = previousAllowProtocol;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("native git promotion aborts merge conflicts and blocks completion", () => {
   const repo = createRepo();
   try {

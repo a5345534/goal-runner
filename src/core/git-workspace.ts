@@ -147,6 +147,8 @@ export interface NativeGitSubagentBranchIntegratorOptions {
 export interface NativeGitControllerBranchPromotionRequest {
   controllerWorkspacePath: string;
   controllerBranch?: string;
+  /** Goal id used for durable submodule retained-ref names when promotion resolves gitlink conflicts. */
+  goalId?: string;
   /** Target/base branch or ref that should receive the controller branch before goal completion. */
   targetRef?: string;
   strategy?: "merge";
@@ -941,6 +943,19 @@ export class NativeGitWorkspaceManager {
     const target = resolveControllerPromotionTarget(controllerWorkspacePath, request.targetRef, controllerBranch, this.options.branchPrefix);
     if (!target.ok) return nativeGitPromotionBlocked(request, target.error, { controllerBranch, controllerHead, targetRef: target.targetRef, targetBranch: target.targetBranch });
 
+    const prePromotionCheckoutSync = this.syncSubmoduleWorktreesToHeadPins({ targetWorkspacePath: target.workspacePath, recursive: true });
+    if (prePromotionCheckoutSync.status === "blocked") {
+      return nativeGitPromotionBlocked(request, `target submodule checkout sync failed before promotion: ${prePromotionCheckoutSync.summary}`, {
+        controllerBranch,
+        controllerHead,
+        targetRef: target.targetRef,
+        targetBranch: target.targetBranch,
+        targetWorkspacePath: target.workspacePath,
+        targetHead: target.head,
+      });
+    }
+    const prePromotionCheckoutSyncSummary = successfulSubmoduleCheckoutSyncSummary(prePromotionCheckoutSync);
+
     const targetDirty = gitStatusPorcelain(target.workspacePath, { ignoreWorktreeRoot: true });
     if (targetDirty) {
       return nativeGitPromotionBlocked(request, `target workspace has uncommitted changes; cannot promote safely:\n${targetDirty}`, {
@@ -974,11 +989,25 @@ export class NativeGitWorkspaceManager {
     }
 
     const syncedTargetHead = sync.targetHead ?? (safeGit(target.workspacePath, ["rev-parse", "--verify", "HEAD"]) || target.head);
+    const syncedCheckout = this.syncSubmoduleWorktreesToHeadPins({ targetWorkspacePath: target.workspacePath, recursive: true });
+    if (syncedCheckout.status === "blocked") {
+      return nativeGitPromotionBlocked(request, `target submodule checkout sync failed after target sync: ${syncedCheckout.summary}`, {
+        controllerBranch,
+        controllerHead,
+        targetRef: target.targetRef,
+        targetBranch: target.targetBranch,
+        targetWorkspacePath: target.workspacePath,
+        targetHead: syncedTargetHead,
+        targetRemoteHead: sync.remoteHead,
+        targetSyncSummary: sync.summary,
+      });
+    }
+    const targetSyncCheckoutSummary = successfulSubmoduleCheckoutSyncSummary(syncedCheckout);
 
     if (controllerHead === syncedTargetHead || gitIsAncestor(target.workspacePath, controllerHead, syncedTargetHead)) {
       return {
         status: "notRequired",
-        summary: `controller ${shortSha(controllerHead)} is already contained in target ${target.targetBranch}`,
+        summary: appendIntegrationSummary(appendIntegrationSummary(`controller ${shortSha(controllerHead)} is already contained in target ${target.targetBranch}`, prePromotionCheckoutSyncSummary), targetSyncCheckoutSummary),
         controllerBranch,
         controllerHead,
         targetRef: target.targetRef,
@@ -991,12 +1020,83 @@ export class NativeGitWorkspaceManager {
       };
     }
 
+    let submodulePromotionSummary: string | undefined;
     try {
-      git(target.workspacePath, ["merge", "--no-ff", "--no-edit", controllerHead]);
+      try {
+        git(target.workspacePath, ["merge", "--no-ff", "--no-commit", controllerHead]);
+      } catch (error) {
+        const resolution = resolveSubmoduleIntegrationMergeConflicts({
+          controllerWorkspacePath: target.workspacePath,
+          sourceWorkspacePath: controllerWorkspacePath,
+          sourceHead: controllerHead,
+          goalId: request.goalId ?? controllerBranch ?? "promotion",
+        });
+        if (!resolution.ok) {
+          safeGit(target.workspacePath, ["merge", "--abort"]);
+          return nativeGitPromotionBlocked(request, `git merge failed while promoting controller branch: ${gitErrorMessage(error)}${resolution.error ? `; submodule-aware resolution failed: ${resolution.error}` : ""}`, {
+            controllerBranch,
+            controllerHead,
+            targetRef: target.targetRef,
+            targetBranch: target.targetBranch,
+            targetWorkspacePath: target.workspacePath,
+            targetHead: syncedTargetHead,
+            targetRemoteHead: sync.remoteHead,
+            targetSyncSummary: sync.summary,
+          });
+        }
+        submodulePromotionSummary = resolution.summary;
+      }
+
+      const promotionGoalId = sanitizeSlug(request.goalId ?? controllerBranch ?? "promotion") || "promotion";
+      const publish = this.ensureSubmoduleGitlinksDurablyPublished({
+        goalId: promotionGoalId,
+        parentWorkspacePath: target.workspacePath,
+        sourceWorkspacePaths: [controllerWorkspacePath, target.workspacePath],
+        baseTreeish: syncedTargetHead,
+        targetTreeish: "INDEX",
+        phase: "closeout",
+        policy: resolveNativeGitCloseoutPolicy(AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY, { env: process.env }),
+      });
+      if (publish.status === "blocked") {
+        abortMergeAndCleanPostMergeValidationArtifacts(target.workspacePath);
+        return nativeGitPromotionBlocked(request, `promotion submodule publish blocked: ${publish.summary}`, {
+          controllerBranch,
+          controllerHead,
+          targetRef: target.targetRef,
+          targetBranch: target.targetBranch,
+          targetWorkspacePath: target.workspacePath,
+          targetHead: syncedTargetHead,
+          targetRemoteHead: sync.remoteHead,
+          targetSyncSummary: sync.summary,
+        });
+      }
+      const publishSummary = publish.status === "passed" ? publish.summary : undefined;
+
+      const postMergeCheckoutSync = this.syncSubmoduleWorktreesToHeadPins({
+        targetWorkspacePath: target.workspacePath,
+        recursive: true,
+        allowRootWorktreeChanges: true,
+      });
+      if (postMergeCheckoutSync.status === "blocked") {
+        abortMergeAndCleanPostMergeValidationArtifacts(target.workspacePath);
+        return nativeGitPromotionBlocked(request, `target submodule checkout sync failed after promotion merge: ${postMergeCheckoutSync.summary}`, {
+          controllerBranch,
+          controllerHead,
+          targetRef: target.targetRef,
+          targetBranch: target.targetBranch,
+          targetWorkspacePath: target.workspacePath,
+          targetHead: syncedTargetHead,
+          targetRemoteHead: sync.remoteHead,
+          targetSyncSummary: sync.summary,
+        });
+      }
+      const postMergeCheckoutSyncSummary = successfulSubmoduleCheckoutSyncSummary(postMergeCheckoutSync);
+
+      git(target.workspacePath, ["commit", "--no-edit"]);
       const promotionCommitSha = git(target.workspacePath, ["rev-parse", "--verify", "HEAD"]);
       return {
         status: "complete",
-        summary: `merged controller ${controllerBranch ?? shortSha(controllerHead)} ${shortSha(controllerHead)} into target ${target.targetBranch} ${shortSha(promotionCommitSha)}`,
+        summary: appendIntegrationSummary(appendIntegrationSummary(appendIntegrationSummary(appendIntegrationSummary(appendIntegrationSummary(`merged controller ${controllerBranch ?? shortSha(controllerHead)} ${shortSha(controllerHead)} into target ${target.targetBranch} ${shortSha(promotionCommitSha)}`, prePromotionCheckoutSyncSummary), targetSyncCheckoutSummary), submodulePromotionSummary), publishSummary), postMergeCheckoutSyncSummary),
         controllerBranch,
         controllerHead,
         targetRef: target.targetRef,
@@ -1008,7 +1108,7 @@ export class NativeGitWorkspaceManager {
         promotionCommitSha,
       };
     } catch (error) {
-      safeGit(target.workspacePath, ["merge", "--abort"]);
+      abortMergeAndCleanPostMergeValidationArtifacts(target.workspacePath);
       return nativeGitPromotionBlocked(request, `git merge failed while promoting controller branch: ${gitErrorMessage(error)}`, {
         controllerBranch,
         controllerHead,

@@ -127,6 +127,8 @@ export interface NativeGitSubagentBranchIntegratorOptions {
 export interface NativeGitControllerBranchPromotionRequest {
     controllerWorkspacePath: string;
     controllerBranch?: string;
+    /** Goal id used for durable submodule retained-ref names when promotion resolves gitlink conflicts. */
+    goalId?: string;
     /** Target/base branch or ref that should receive the controller branch before goal completion. */
     targetRef?: string;
     strategy?: "merge";
