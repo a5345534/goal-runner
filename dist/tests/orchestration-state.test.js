@@ -266,6 +266,14 @@ test("sqlite store persists orchestration state across reopen", async () => {
             status: "selfReportedComplete",
             selfReportedResult: "implemented and tested",
             controllerValidationResults: ["npm test passed", "controller review pending"],
+            questionResults: [{
+                    rawQuestion: "- question: Which module?",
+                    triageKind: "approvedAssumption",
+                    triagedAt: now,
+                    controllerResponse: "Approved recommended default: A",
+                    blocking: false,
+                    selectedOption: "A",
+                }],
             commitSha: "abc123",
         }));
         firstStore.close();
@@ -282,6 +290,8 @@ test("sqlite store persists orchestration state across reopen", async () => {
         assert.equal(state.subagents.length, 1);
         assert.equal(state.subagents[0]?.status, "selfReportedComplete");
         assert.deepEqual(state.subagents[0]?.controllerValidationResults, ["npm test passed", "controller review pending"]);
+        assert.equal(state.subagents[0]?.questionResults?.[0]?.triageKind, "approvedAssumption");
+        assert.equal(state.subagents[0]?.questionResults?.[0]?.selectedOption, "A");
         assert.equal(state.subagents[0]?.commitSha, "abc123");
         secondStore.close();
     }

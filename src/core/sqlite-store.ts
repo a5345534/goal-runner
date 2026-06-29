@@ -168,6 +168,7 @@ interface SqliteSubagentRow {
   recovery_loop_signature: string | null;
   last_adapter_observation_json: string | null;
   last_recovery_decision_json: string | null;
+  question_results_json: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -489,8 +490,8 @@ export class SQLiteGoalStore implements GoalStore {
           integration_error, integration_completed_at, retry_count, attempt_id,
           attempt_started_at, attempt_cursor_json, last_action_attempt_json,
           recovery_loop_signature, last_adapter_observation_json, last_recovery_decision_json,
-          created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          question_results_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(goal_id, subagent_id) DO UPDATE SET
           node_id = excluded.node_id,
           harness_adapter_id = excluded.harness_adapter_id,
@@ -521,6 +522,7 @@ export class SQLiteGoalStore implements GoalStore {
           recovery_loop_signature = excluded.recovery_loop_signature,
           last_adapter_observation_json = excluded.last_adapter_observation_json,
           last_recovery_decision_json = excluded.last_recovery_decision_json,
+          question_results_json = excluded.question_results_json,
           updated_at = excluded.updated_at`,
       )
       .run(
@@ -555,6 +557,7 @@ export class SQLiteGoalStore implements GoalStore {
         subagent.recoveryLoopSignature ?? null,
         subagent.lastAdapterObservation === undefined ? null : JSON.stringify(subagent.lastAdapterObservation),
         subagent.lastRecoveryDecision === undefined ? null : JSON.stringify(subagent.lastRecoveryDecision),
+        subagent.questionResults === undefined ? null : JSON.stringify(subagent.questionResults),
         subagent.createdAt,
         subagent.updatedAt,
       );
@@ -792,6 +795,7 @@ export class SQLiteGoalStore implements GoalStore {
         recovery_loop_signature TEXT,
         last_adapter_observation_json TEXT,
         last_recovery_decision_json TEXT,
+        question_results_json TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         PRIMARY KEY (goal_id, subagent_id)
@@ -832,6 +836,7 @@ export class SQLiteGoalStore implements GoalStore {
     addColumnIfMissing(this.db, "goal_subagents", "recovery_loop_signature", "TEXT");
     addColumnIfMissing(this.db, "goal_subagents", "last_adapter_observation_json", "TEXT");
     addColumnIfMissing(this.db, "goal_subagents", "last_recovery_decision_json", "TEXT");
+    addColumnIfMissing(this.db, "goal_subagents", "question_results_json", "TEXT");
   }
 }
 
@@ -1016,6 +1021,7 @@ function rowToSubagent(row: SqliteSubagentRow): GoalSubagentRecord {
     recoveryLoopSignature: row.recovery_loop_signature ?? undefined,
     lastAdapterObservation: parseRecord(row.last_adapter_observation_json) as GoalSubagentRecord["lastAdapterObservation"] | undefined,
     lastRecoveryDecision: parseRecord(row.last_recovery_decision_json) as GoalSubagentRecord["lastRecoveryDecision"] | undefined,
+    questionResults: parseQuestionResults(row.question_results_json),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1030,6 +1036,16 @@ function parseRecord(json: string | null): Record<string, unknown> | undefined {
   try {
     const parsed = JSON.parse(json) as unknown;
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseQuestionResults(json: string | null): GoalSubagentRecord["questionResults"] | undefined {
+  if (!json) return undefined;
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    return Array.isArray(parsed) ? parsed as GoalSubagentRecord["questionResults"] : undefined;
   } catch {
     return undefined;
   }

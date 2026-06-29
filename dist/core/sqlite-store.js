@@ -210,8 +210,8 @@ export class SQLiteGoalStore {
           integration_error, integration_completed_at, retry_count, attempt_id,
           attempt_started_at, attempt_cursor_json, last_action_attempt_json,
           recovery_loop_signature, last_adapter_observation_json, last_recovery_decision_json,
-          created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          question_results_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(goal_id, subagent_id) DO UPDATE SET
           node_id = excluded.node_id,
           harness_adapter_id = excluded.harness_adapter_id,
@@ -242,8 +242,9 @@ export class SQLiteGoalStore {
           recovery_loop_signature = excluded.recovery_loop_signature,
           last_adapter_observation_json = excluded.last_adapter_observation_json,
           last_recovery_decision_json = excluded.last_recovery_decision_json,
+          question_results_json = excluded.question_results_json,
           updated_at = excluded.updated_at`)
-            .run(subagent.goalId, subagent.nodeId, subagent.subagentId, subagent.harnessAdapterId, subagent.sessionId ?? null, subagent.sessionFile ?? null, subagent.workspacePath ?? null, subagent.branch ?? null, subagent.ref ?? null, subagent.status, JSON.stringify(subagent.prompts), subagent.lastActivityAt ?? null, subagent.selfReportedResult ?? null, subagent.controllerValidationResults === undefined ? null : JSON.stringify(subagent.controllerValidationResults), subagent.commitSha ?? null, subagent.integrationStatus ?? null, subagent.integrationState ?? null, subagent.integrationSourceBranch ?? null, subagent.integrationSourceRef ?? null, subagent.integrationSourceHead ?? null, subagent.integrationCommitSha ?? null, subagent.integrationError ?? null, subagent.integrationCompletedAt ?? null, subagent.retryCount ?? null, subagent.attemptId ?? null, subagent.attemptStartedAt ?? null, subagent.attemptCursor === undefined ? null : JSON.stringify(subagent.attemptCursor), subagent.lastActionAttempt === undefined ? null : JSON.stringify(subagent.lastActionAttempt), subagent.recoveryLoopSignature ?? null, subagent.lastAdapterObservation === undefined ? null : JSON.stringify(subagent.lastAdapterObservation), subagent.lastRecoveryDecision === undefined ? null : JSON.stringify(subagent.lastRecoveryDecision), subagent.createdAt, subagent.updatedAt);
+            .run(subagent.goalId, subagent.nodeId, subagent.subagentId, subagent.harnessAdapterId, subagent.sessionId ?? null, subagent.sessionFile ?? null, subagent.workspacePath ?? null, subagent.branch ?? null, subagent.ref ?? null, subagent.status, JSON.stringify(subagent.prompts), subagent.lastActivityAt ?? null, subagent.selfReportedResult ?? null, subagent.controllerValidationResults === undefined ? null : JSON.stringify(subagent.controllerValidationResults), subagent.commitSha ?? null, subagent.integrationStatus ?? null, subagent.integrationState ?? null, subagent.integrationSourceBranch ?? null, subagent.integrationSourceRef ?? null, subagent.integrationSourceHead ?? null, subagent.integrationCommitSha ?? null, subagent.integrationError ?? null, subagent.integrationCompletedAt ?? null, subagent.retryCount ?? null, subagent.attemptId ?? null, subagent.attemptStartedAt ?? null, subagent.attemptCursor === undefined ? null : JSON.stringify(subagent.attemptCursor), subagent.lastActionAttempt === undefined ? null : JSON.stringify(subagent.lastActionAttempt), subagent.recoveryLoopSignature ?? null, subagent.lastAdapterObservation === undefined ? null : JSON.stringify(subagent.lastAdapterObservation), subagent.lastRecoveryDecision === undefined ? null : JSON.stringify(subagent.lastRecoveryDecision), subagent.questionResults === undefined ? null : JSON.stringify(subagent.questionResults), subagent.createdAt, subagent.updatedAt);
     }
     async getGoalSubagent(goalId, subagentId) {
         const row = this.db
@@ -462,6 +463,7 @@ export class SQLiteGoalStore {
         recovery_loop_signature TEXT,
         last_adapter_observation_json TEXT,
         last_recovery_decision_json TEXT,
+        question_results_json TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         PRIMARY KEY (goal_id, subagent_id)
@@ -502,6 +504,7 @@ export class SQLiteGoalStore {
         addColumnIfMissing(this.db, "goal_subagents", "recovery_loop_signature", "TEXT");
         addColumnIfMissing(this.db, "goal_subagents", "last_adapter_observation_json", "TEXT");
         addColumnIfMissing(this.db, "goal_subagents", "last_recovery_decision_json", "TEXT");
+        addColumnIfMissing(this.db, "goal_subagents", "question_results_json", "TEXT");
     }
 }
 function addColumnIfMissing(db, table, column, definition) {
@@ -678,6 +681,7 @@ function rowToSubagent(row) {
         recoveryLoopSignature: row.recovery_loop_signature ?? undefined,
         lastAdapterObservation: parseRecord(row.last_adapter_observation_json),
         lastRecoveryDecision: parseRecord(row.last_recovery_decision_json),
+        questionResults: parseQuestionResults(row.question_results_json),
         createdAt: row.created_at,
         updatedAt: row.updated_at,
     };
@@ -691,6 +695,17 @@ function parseRecord(json) {
     try {
         const parsed = JSON.parse(json);
         return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
+function parseQuestionResults(json) {
+    if (!json)
+        return undefined;
+    try {
+        const parsed = JSON.parse(json);
+        return Array.isArray(parsed) ? parsed : undefined;
     }
     catch {
         return undefined;

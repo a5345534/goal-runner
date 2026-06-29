@@ -239,6 +239,7 @@ function cloneSubagent(subagent: GoalSubagentRecord): GoalSubagentRecord {
     lastActionAttempt: subagent.lastActionAttempt ? cloneJson(subagent.lastActionAttempt) : undefined,
     lastAdapterObservation: subagent.lastAdapterObservation ? cloneJson(subagent.lastAdapterObservation) : undefined,
     lastRecoveryDecision: subagent.lastRecoveryDecision ? cloneJson(subagent.lastRecoveryDecision) : undefined,
+    questionResults: subagent.questionResults ? cloneJson(subagent.questionResults) : undefined,
   };
 }
 

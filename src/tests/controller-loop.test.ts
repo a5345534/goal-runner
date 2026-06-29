@@ -1636,6 +1636,107 @@ test("controller loop can run bounded ticks and stop when idle", async () => {
   assert.equal(loop.ticks[0]?.changed, false);
 });
 
+// ── SUBAGENT_QUESTION triage tests ──
+
+test("controller triages synced non-blocking SUBAGENT_QUESTION and preserves evidence after follow-up", async () => {
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
+  await runtime.saveGoalDagNode({ ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode), status: "running", updatedAt: now });
+  await runtime.saveGoalSubagent(subagent({ status: "running" }));
+  const adapter = new FakeSubagentAdapter();
+  adapter.states.set("subagent-1", {
+    status: "needsFollowup",
+    lastActivityAt: now,
+    selfReportedResult: [
+      "SUBAGENT_QUESTION:",
+      "- question: Which logging style should I use?",
+      "- why it matters: consistency of implementation details",
+      "- options:",
+      "  - A: Existing console-style logging",
+      "  - B: Add a new logging wrapper",
+      "- recommended default: A",
+      "- blocking: no",
+    ].join("\n"),
+  });
+
+  const tick = await runtime.runGoalControllerTick("goal-1", { adapter });
+
+  assert.equal(tick.followups.length, 1);
+  assert.match(adapter.prompts[0]?.prompt ?? "", /Approved recommended default: A/);
+  assert.match(adapter.prompts[0]?.prompt ?? "", /Existing console-style logging/);
+  const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
+  assert.equal(saved?.status, "running");
+  assert.equal(saved?.questionResults?.[0]?.triageKind, "approvedAssumption");
+  assert.equal(saved?.questionResults?.[0]?.selectedOption, "A");
+  assert.match(saved?.lastRecoveryDecision?.ruleId ?? "", /question-triage-approvedAssumption/);
+});
+
+test("controller answers blocking SUBAGENT_QUESTION from node context and preserves triage evidence", async () => {
+  const { runtime } = await runtimeWithPlan([{
+    nodeId: "build",
+    objective: "Implement provider integration",
+    scope: "Use Stripe for payment processing; PayPal integration is out of scope.",
+  }]);
+  await runtime.saveGoalDagNode({ ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode), status: "running", updatedAt: now });
+  await runtime.saveGoalSubagent(subagent({ status: "running" }));
+  const adapter = new FakeSubagentAdapter();
+  adapter.states.set("subagent-1", {
+    status: "needsFollowup",
+    lastActivityAt: now,
+    selfReportedResult: [
+      "SUBAGENT_QUESTION:",
+      "- question: Should payment processing use Stripe?",
+      "- why it matters: provider choice affects API compatibility",
+      "- options:",
+      "  - A: Use Stripe",
+      "  - B: Use PayPal",
+      "- recommended default: A",
+      "- blocking: yes",
+    ].join("\n"),
+  });
+
+  const tick = await runtime.runGoalControllerTick("goal-1", { adapter });
+
+  assert.equal(tick.followups.length, 1);
+  assert.match(adapter.prompts[0]?.prompt ?? "", /From the node scope: Use Stripe/);
+  const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
+  assert.equal(saved?.status, "running");
+  assert.equal(saved?.questionResults?.[0]?.triageKind, "answeredFromContext");
+  assert.equal(saved?.questionResults?.[0]?.blocking, true);
+});
+
+test("controller escalates blocking SUBAGENT_QUESTION with options and durable evidence", async () => {
+  const { runtime } = await runtimeWithPlan([{ nodeId: "build", objective: "Build feature" }]);
+  await runtime.saveGoalDagNode({ ...(await runtime.getGoalDagNode("goal-1", "build") as GoalDagNode), status: "running", updatedAt: now });
+  await runtime.saveGoalSubagent(subagent({ status: "running" }));
+  const adapter = new FakeSubagentAdapter();
+  adapter.states.set("subagent-1", {
+    status: "needsFollowup",
+    lastActivityAt: now,
+    selfReportedResult: [
+      "SUBAGENT_QUESTION:",
+      "- question: Should we break public API compatibility?",
+      "- why it matters: existing consumers may fail",
+      "- options:",
+      "  - A: Version endpoint and keep compatibility",
+      "  - B: Break the existing endpoint",
+      "- recommended default: A",
+      "- blocking: yes",
+    ].join("\n"),
+  });
+
+  const tick = await runtime.runGoalControllerTick("goal-1", { adapter });
+
+  assert.equal(tick.blocked.length, 1);
+  assert.equal(adapter.prompts.length, 0);
+  const saved = await runtime.getGoalSubagent("goal-1", "subagent-1");
+  assert.equal(saved?.status, "blocked");
+  assert.equal(saved?.questionResults?.[0]?.triageKind, "escalatedToHuman");
+  assert.match(saved?.lastRecoveryDecision?.ruleId ?? "", /question-triage-escalatedToHuman/);
+  assert.match(saved?.integrationStatus ?? "", /Options:/);
+  assert.match(saved?.integrationStatus ?? "", /Version endpoint and keep compatibility/);
+  assert.match((await runtime.getGoalDagNode("goal-1", "build"))?.lastValidationSummary ?? "", /HUMAN|human input|Options:/i);
+});
+
 // ── Durable candidate fallback tests ──
 
 function candidateChain(attemptedCandidates: Array<{ model: string; status: string }>, retryPolicyAttempts?: number): GoalModelResolution {

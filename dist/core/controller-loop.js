@@ -1088,7 +1088,7 @@ async function reconcileSubagentOutcomes(runtime, goalId, options, result, tickS
                 await degradePromptDispatchFailure(runtime, node, subagent, result, tickStartedAt, `explicit outcome-marker follow-up dispatch failed: ${errorMessage}`, error);
                 continue;
             }
-            const runningSubagent = withSubagentPatch(followed, { status: "running", integrationStatus: undefined });
+            const runningSubagent = withSubagentPatch(followed, { status: "running", integrationStatus: undefined, selfReportedResult: undefined });
             const runningNode = withNodePatch(node, { status: "running", lastValidationSummary: "Requested explicit SUBAGENT_RESULT/SUBAGENT_BLOCKED marker from subagent." });
             await runtime.saveGoalSubagent(runningSubagent);
             await runtime.saveGoalDagNode(runningNode);
@@ -2026,9 +2026,9 @@ async function triageSubagentQuestion(runtime, options, _state, node, subagent, 
             blocking,
             triageSummary: "Answered from DAG node context (objective, scope, expected outputs, or validation contract).",
         };
-        await persistQuestionTriage(runtime, subagent, outcome, node, result, tickStartedAt);
+        const triagedSubagent = await persistQuestionTriage(runtime, subagent, outcome, node, result, tickStartedAt);
         // Send answer as follow-up prompt to the same subagent.
-        await sendQuestionAnswerFollowup(runtime, options, subagent, contextAnswer, node, result, tickStartedAt);
+        await sendQuestionAnswerFollowup(runtime, options, triagedSubagent, contextAnswer, outcome.triageKind, node, result, tickStartedAt);
         return true;
     }
     // ── Non-blocking: approve recommended default as bounded assumption ──
@@ -2042,8 +2042,8 @@ async function triageSubagentQuestion(runtime, options, _state, node, subagent, 
             selectedOption: recommendedDefault,
             triageSummary: `Non-blocking question resolved by approving the recommended default (${recommendedDefault}). Subagent must record this assumption in its final result.`,
         };
-        await persistQuestionTriage(runtime, subagent, outcome, node, result, tickStartedAt);
-        await sendQuestionAnswerFollowup(runtime, options, subagent, outcome.controllerResponse, node, result, tickStartedAt);
+        const triagedSubagent = await persistQuestionTriage(runtime, subagent, outcome, node, result, tickStartedAt);
+        await sendQuestionAnswerFollowup(runtime, options, triagedSubagent, outcome.controllerResponse, outcome.triageKind, node, result, tickStartedAt);
         return true;
     }
     // ── Non-blocking without a recommended default: approve a safe path with the first option ──
@@ -2059,8 +2059,8 @@ async function triageSubagentQuestion(runtime, options, _state, node, subagent, 
                 selectedOption: firstOption,
                 triageSummary: "Non-blocking question without recommended default; approved first option as safe bounded assumption.",
             };
-            await persistQuestionTriage(runtime, subagent, outcome, node, result, tickStartedAt);
-            await sendQuestionAnswerFollowup(runtime, options, subagent, outcome.controllerResponse, node, result, tickStartedAt);
+            const triagedSubagent = await persistQuestionTriage(runtime, subagent, outcome, node, result, tickStartedAt);
+            await sendQuestionAnswerFollowup(runtime, options, triagedSubagent, outcome.controllerResponse, outcome.triageKind, node, result, tickStartedAt);
             return true;
         }
     }
@@ -2081,10 +2081,10 @@ async function triageSubagentQuestion(runtime, options, _state, node, subagent, 
         selectedOption: recommendedDefault,
         triageSummary: "Blocking question could not be answered from existing DAG context. Human or external input required.",
     };
-    await persistQuestionTriage(runtime, subagent, outcome, node, result, tickStartedAt);
+    const triagedSubagent = await persistQuestionTriage(runtime, subagent, outcome, node, result, tickStartedAt);
     // Mark node/subagent blocked with actionable evidence.
     const blockedSummary = `blocked: subagent question requires human input. ${escalationDetails}`;
-    const blockedSubagent = withSubagentPatch(subagent, {
+    const blockedSubagent = withSubagentPatch(triagedSubagent, {
         status: "blocked",
         integrationStatus: blockedSummary,
         selfReportedResult: `SUBAGENT_QUESTION: ${rawQuestion}`,
@@ -2139,9 +2139,10 @@ async function persistQuestionTriage(runtime, subagent, outcome, node, _result, 
         blocking: outcome.blocking,
         selectedOption: outcome.selectedOption,
     }, tickStartedAt);
+    return updated;
 }
 /** Send a question answer or assumption approval as a follow-up prompt to the subagent. */
-async function sendQuestionAnswerFollowup(runtime, options, subagent, answer, node, result, tickStartedAt) {
+async function sendQuestionAnswerFollowup(runtime, options, subagent, answer, triageKind, node, result, tickStartedAt) {
     const followupPrompt = [
         `[CONTROLLER ANSWER TO SUBAGENT_QUESTION]`,
         `The controller has reviewed your question and provides the following response:`,
@@ -2165,6 +2166,7 @@ async function sendQuestionAnswerFollowup(runtime, options, subagent, answer, no
     const runningSubagent = withSubagentPatch(followed, {
         status: "running",
         integrationStatus: undefined,
+        selfReportedResult: undefined,
         updatedAt: tickStartedAt,
     });
     const runningNode = withNodePatch(node, {
@@ -2177,7 +2179,7 @@ async function sendQuestionAnswerFollowup(runtime, options, subagent, answer, no
     await recordControllerEvent(runtime, node.goalId, "question.answered", {
         nodeId: node.nodeId,
         subagentId: subagent.subagentId,
-        triageKind: "answeredFromContext",
+        triageKind,
         answer: answer.slice(0, 500),
     }, tickStartedAt);
     result.followups.push(runningSubagent);
@@ -2188,35 +2190,31 @@ async function sendQuestionAnswerFollowup(runtime, options, subagent, answer, no
  * Fields are parsed as lines starting with "- <fieldName>:" or "<fieldName>:".
  */
 function extractQuestionField(body, fieldName) {
-    const patterns = [
-        new RegExp(`(?:^|\\n)\\s*(?:-\\s*)?${escapeRegex(fieldName)}\\s*:\\s*(.*?)(?=\\n\\s*(?:-\\s*)?(?:question|why it matters|options|recommended default|blocking)\\s*:|$)`, "ims"),
-        new RegExp(`(?:^|\\n)\\s*(?:\\*\\*)?${escapeRegex(fieldName)}(?:\\*\\*)?\\s*:\\s*(.*?)(?=\\n\\s*(?:\\*\\*)?(?:question|why it matters|options|recommended default|blocking)(?:\\*\\*)?\\s*:|$)`, "ims"),
-    ];
-    for (const pattern of patterns) {
-        const match = body.match(pattern);
-        if (match?.[1]?.trim())
-            return match[1].trim();
-    }
-    return undefined;
+    const fieldHeader = String.raw `(?:question|why it matters|options|recommended default|blocking)`;
+    const pattern = new RegExp(`(?:^|\\n)\\s*(?:[-*]\\s*)?(?:\\*\\*)?${escapeRegex(fieldName)}(?:\\*\\*)?\\s*:\\s*([\\s\\S]*?)(?=\\n\\s*(?:[-*]\\s*)?(?:\\*\\*)?${fieldHeader}(?:\\*\\*)?\\s*:|$)`, "im");
+    const match = body.match(pattern);
+    return match?.[1]?.trim() || undefined;
 }
 /** Extract the options block text from a question body. */
 function extractOptionsText(body) {
     const optionsLines = [];
     let inOptions = false;
+    const optionsHeader = /^(?:[-*]\s*)?(?:\*\*)?options(?:\*\*)?\s*:/i;
+    const nextFieldHeader = /^(?:[-*]\s*)?(?:\*\*)?(question|why it matters|recommended default|blocking)(?:\*\*)?\s*:/i;
     for (const line of body.split("\n")) {
         const trimmed = line.trim();
-        if (/^options\s*:/i.test(trimmed)) {
+        if (optionsHeader.test(trimmed)) {
             inOptions = true;
-            const afterColon = trimmed.replace(/^options\s*:\s*/i, "").trim();
+            const afterColon = trimmed.replace(optionsHeader, "").trim();
             if (afterColon)
                 optionsLines.push(afterColon);
             continue;
         }
         if (inOptions) {
-            if (/^(question|why it matters|recommended default|blocking)\s*:/i.test(trimmed)) {
+            if (nextFieldHeader.test(trimmed)) {
                 inOptions = false;
             }
-            else {
+            else if (trimmed) {
                 optionsLines.push(trimmed);
             }
         }

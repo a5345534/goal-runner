@@ -273,7 +273,7 @@ export async function syncGoalSubagentState(
   const controllerValidationResults = state.validationSignals?.length
     ? [...(subagent.controllerValidationResults ?? []), ...state.validationSignals]
     : subagent.controllerValidationResults;
-  const selfReportedResult = state.selfReportedResult && (nextStatus === "selfReportedComplete" || nextStatus === "blocked")
+  const selfReportedResult = state.selfReportedResult && (nextStatus === "selfReportedComplete" || nextStatus === "blocked" || nextStatus === "needsFollowup")
     ? state.selfReportedResult
     : subagent.selfReportedResult;
   return {
