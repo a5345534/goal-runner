@@ -3012,3 +3012,68 @@ test("evaluateSubmoduleTargetBranchPolicy blocks diverged push via fast-forward 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("evaluateSubmoduleTargetBranchPolicy detects goal-spec/main mismatch via explicit mapping", () => {
+  // Verifies that explicit branch mappings override the parent target branch,
+  // as in the observed goal-spec/main scenario where the parent uses "goal-spec"
+  // but the submodule publishes to "main".
+  const { root, parent, subWorktree, subRemote, nextSha } = createTargetBranchPublishFixture();
+  try {
+    const gitlinks: ChangedSubmoduleGitlink[] = [
+      { path: "deps/sub", status: "modified", newSha: nextSha },
+    ];
+
+    const result = evaluateSubmoduleTargetBranchPolicy(
+      parent,
+      defaultTargetBranchPolicy({
+        branchMappings: [{ path: "deps/sub", targetBranch: "main" }],
+        trustedSubmoduleTargetBranchUrlPatterns: [subRemote],
+      }),
+      gitlinks,
+      [parent, subWorktree],
+      { parentTargetBranch: "goal-spec" },
+    );
+
+    assert.equal(result.status, "passed");
+    assert.equal(result.published.length, 1);
+    assert.equal(result.published[0]!.targetBranch, "main",
+      "explicit mapping must override parent target branch goal-spec");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("evaluateSubmoduleTargetBranchPolicy blocks gitmodules URL change without trust", () => {
+  // Verifies that changing the .gitmodules URL to an untrusted remote blocks
+  // target-branch publication, even when the original URL is trusted.
+  const { root, parent, subRemote, initialSha } = createTargetBranchFixture();
+  try {
+    const evilRemote = join(root, "evil.git");
+    git(root, ["init", "--bare", evilRemote]);
+    writeFileSync(join(parent, ".gitmodules"), `[submodule "deps/sub"]
+	path = deps/sub
+	url = ${evilRemote}
+`);
+    git(parent, ["add", ".gitmodules"]);
+    git(parent, ["commit", "-m", "changed submodule URL to untrusted"]);
+
+    const gitlinks: ChangedSubmoduleGitlink[] = [
+      { path: "deps/sub", status: "modified", newSha: initialSha },
+    ];
+
+    const result = evaluateSubmoduleTargetBranchPolicy(
+      parent,
+      defaultTargetBranchPolicy({
+        trustedSubmoduleTargetBranchUrlPatterns: [subRemote],
+      }),
+      gitlinks,
+      [parent],
+      { treeish: "HEAD", parentTargetBranch: "main" },
+    );
+
+    assert.equal(result.status, "blocked");
+    assert.match(result.summary, /not in trusted patterns|not trusted/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
