@@ -48,7 +48,9 @@ are persisted in a JSON file under `AGENT_GOAL_STATE_HOME` (by default
 | `modelClassCatalogJson` | `model-class-catalog-json` | `AGENT_GOAL_MODEL_CLASS_CATALOG_JSON` | — | json | Inline model-class catalog JSON. |
 | `modelBindingFile` | `model-binding-file` | `AGENT_GOAL_MODEL_BINDING_FILE` | — | string | Path to harness binding catalog override. |
 | `modelBindingJson` | `model-binding-json` | `AGENT_GOAL_MODEL_BINDING_JSON` | — | json | Inline binding catalog JSON. |
-| `trustedSubmoduleUrlPatterns` | `trusted-submodule-url-patterns` | `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_URL_PATTERNS` | — | string | Trusted submodule URL patterns for retained-ref publishing. |
+| `trustedSubmoduleUrlPatterns` | `trusted-submodule-url-patterns` | `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_URL_PATTERNS` | — | string | Trusted submodule URL patterns for retained-ref publishing. JSON array or comma/newline-separated patterns. |
+| `trustedSubmoduleTargetBranchUrlPatterns` | `trusted-submodule-target-branch-url-patterns` | `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_TARGET_BRANCH_URL_PATTERNS` | — | string | Trusted submodule URL patterns for target-branch publication (separate from retained-ref trust). JSON array or comma/newline-separated patterns. |
+| `submoduleTargetEnforcementScope` | `submodule-target-enforcement-scope` | _(env not supported; configure per policy)_ | `final-tree` | string | Enforcement scope for submodule target-branch closeout: `final-tree` (only submodules in the promoted tree), `all-submodules` (every registered submodule), or `none` (skip target-branch enforcement). |
 | `controllerAuditModel` | `controller-audit-model` | `AGENT_GOAL_CONTROLLER_AUDIT_MODEL`, `AGENT_GOAL_PI_CONTROLLER_AUDIT_MODEL`, `PI_GOAL_CONTROLLER_AUDIT_MODEL` | — | string (secret) | Optional controller-audit model id. |
 
 ## Precedence
@@ -59,6 +61,60 @@ are persisted in a JSON file under `AGENT_GOAL_STATE_HOME` (by default
 
 Some keys with `restartRequired: true` require a Pi reload/start or a fresh
 controller process to take effect for env-affected code paths.
+
+## Target-branch closeout configuration
+
+The target-branch closeout policy controls whether and how the controller
+promotes submodule gitlinks to their project target branches during goal
+finalization. This is a **separate concern** from retained-ref publishing
+(which preserves SHAs under `refs/heads/goal-runner/retained/*`). Trusting a
+URL for retained-ref publishing does **not** authorize target-branch mutation.
+
+### When target-branch enforcement runs
+
+Target-branch enforcement runs during the final closeout phase after all DAG
+nodes are terminal, integration passes, and local promotion to the parent target
+branch succeeds. The controller scans the promoted tree for submodule gitlinks,
+resolves each submodule's target branch, and publishes the gitlink SHA with
+fast-forward-only semantics.
+
+### Configuration via environment
+
+| Variable | Purpose |
+|----------|---------|
+| `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_TARGET_BRANCH_URL_PATTERNS` | URL patterns trusted for target-branch pushes. JSON array or newline/comma-delimited. Requires exact match unless the pattern ends with `*` (prefix match). |
+
+Set this variable before starting the controller process; a running Pi/controller
+must be restarted to pick up environment changes.
+
+### Enforcement scopes
+
+| Scope | Description |
+|-------|-------------|
+| `final-tree` (default) | Only submodules reachable in the final promoted tree are enforced. Deleted submodules are not published. Added/modified gitlinks must publish to target branches. |
+| `all-submodules` | Every registered submodule is enforced regardless of whether it changed. Stricter — can expose pre-existing unpushed gitlinks. |
+| `none` | No target-branch enforcement. Only retained-ref publication is performed based on the closeout policy's `submodulePublishMode`. |
+
+### Target branch resolution order
+
+1. Explicit `branchMappings` (longest path match wins; supports `*` glob)
+2. `.gitmodules` `branch` key (from the versioned treeish)
+3. Remote default branch (`git ls-remote --symref HEAD`)
+4. Parent target branch fallback
+
+If none resolves, the submodule is blocked with a "cannot resolve target branch"
+diagnostic.
+
+### Publication constraints
+
+- **Fast-forward only**: The push is rejected if the SHA is not a descendant of
+the current branch tip.
+- **Pre-existing branch required**: The target branch must exist on the remote.
+- **Post-push verification**: When `verifyRemoteReachability` is true (default),
+the controller fetches the pushed branch and confirms the SHA is reachable.
+- **Protected branches**: If the remote branch is protected (rejects non-ff
+pushes or enforce status checks), the push is blocked with a `protected branch`
+diagnostic.
 
 ## Candidate-chain example
 
