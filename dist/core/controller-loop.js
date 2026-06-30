@@ -121,6 +121,8 @@ function controllerEventCategory(event) {
         return "integration.result";
     if (event.startsWith("promotion."))
         return "promotion.result";
+    if (event.startsWith("submoduleTargetBranch."))
+        return "submoduleTargetBranch.result";
     if (event.startsWith("cleanup.") || event.includes("Cleanup"))
         return "cleanup.result";
     if (event.startsWith("transcript."))

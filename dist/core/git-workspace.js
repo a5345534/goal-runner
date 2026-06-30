@@ -75,6 +75,46 @@ function uniqueNonEmptyStrings(values) {
     }
     return result;
 }
+/**
+ * Environment variable that can supply additional trusted submodule URL
+ * patterns for target-branch publication, layered on top of the policy's
+ * built-in patterns. Value may be a JSON array of strings or a
+ * newline/comma-delimited list.
+ */
+export const TRUSTED_SUBMODULE_TARGET_BRANCH_URL_PATTERNS_ENV = "AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_TARGET_BRANCH_URL_PATTERNS";
+/**
+ * Default target-branch policy for auto-allocated remote closeout.
+ * - enforcementScope is "final-tree": only submodules in the final tree
+ *   are enforced.
+ * - branchMappings is empty: the default remote branch is used for all
+ *   submodules.
+ * - trustedSubmoduleTargetBranchUrlPatterns is empty: only URLs that
+ *   match the closeout policy's trusted patterns are published.
+ * - verifyRemoteReachability is true: fails if remote verification fails.
+ */
+export const DEFAULT_SUBMODULE_TARGET_BRANCH_POLICY = {
+    enforcementScope: "final-tree",
+    branchMappings: [],
+    trustedSubmoduleTargetBranchUrlPatterns: [],
+    verifyRemoteReachability: true,
+};
+/**
+ * Resolves a {@link NativeGitSubmoduleTargetBranchPolicy} by merging
+ * environment-configured trusted URL patterns.
+ */
+export function resolveSubmoduleTargetBranchPolicy(policy, options = {}) {
+    const configuredPatterns = parseTrustedSubmoduleUrlPatterns(options.env?.[TRUSTED_SUBMODULE_TARGET_BRANCH_URL_PATTERNS_ENV]);
+    return {
+        ...policy,
+        enforcementScope: policy.enforcementScope ?? "final-tree",
+        branchMappings: [...(policy.branchMappings ?? [])],
+        trustedSubmoduleTargetBranchUrlPatterns: uniqueNonEmptyStrings([
+            ...policy.trustedSubmoduleTargetBranchUrlPatterns,
+            ...configuredPatterns,
+        ]),
+        verifyRemoteReachability: policy.verifyRemoteReachability ?? true,
+    };
+}
 export class NativeGitWorkspaceManager {
     options;
     constructor(options = {}) {

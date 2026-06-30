@@ -269,8 +269,8 @@ export interface GoalSubagentQuestionOutcome {
     /** Arbitrary evidence attached by controller or adapter. */
     evidence?: Record<string, unknown>;
 }
-export type GoalControllerTypedEventCategory = "poll" | "node.lifecycle" | "node.staleDetected" | "recovery.decision" | "recovery.action" | "recovery.rule" | "transcript" | "validation.result" | "integration.result" | "promotion.result" | "cleanup.result" | "diagnostic";
-export type GoalControllerActionAttemptKind = "runnerLaunch" | "promptDispatch" | "recovery" | "validation" | "integration" | "promotion" | "cleanup";
+export type GoalControllerTypedEventCategory = "poll" | "node.lifecycle" | "node.staleDetected" | "recovery.decision" | "recovery.action" | "recovery.rule" | "transcript" | "validation.result" | "integration.result" | "promotion.result" | "submoduleTargetBranch.result" | "cleanup.result" | "diagnostic";
+export type GoalControllerActionAttemptKind = "runnerLaunch" | "promptDispatch" | "recovery" | "validation" | "integration" | "promotion" | "submoduleTargetBranch" | "cleanup";
 export type GoalControllerActionAttemptStatus = "started" | "succeeded" | "timedOut" | "failed" | "degraded";
 export interface GoalAttemptCursor {
     /** Timestamp boundary used by adapters that can only inspect transcripts by message time. */

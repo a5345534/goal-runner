@@ -391,6 +391,7 @@ export type GoalControllerTypedEventCategory =
   | "validation.result"
   | "integration.result"
   | "promotion.result"
+  | "submoduleTargetBranch.result"
   | "cleanup.result"
   | "diagnostic";
 
@@ -401,6 +402,7 @@ export type GoalControllerActionAttemptKind =
   | "validation"
   | "integration"
   | "promotion"
+  | "submoduleTargetBranch"
   | "cleanup";
 
 export type GoalControllerActionAttemptStatus =
