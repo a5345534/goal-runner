@@ -458,6 +458,681 @@ export function resolveSubmoduleTargetBranchPolicy(
   };
 }
 
+// ── Target branch resolution primitives ──
+
+/**
+ * Resolves the target branch for a submodule by checking, in order:
+ * 1. Explicit {@link NativeGitSubmoduleTargetBranchMapping.branchMappings} entries
+ *    (direct path match or trailing glob `*` match, with longest match winning).
+ * 2. The `branch` key in the submodule&#39;s `.gitmodules` entry (versioned in the
+ *    parent tree).
+ * 3. The remote default branch of the submodule&#39;s canonical URL
+ *    (via `git ls-remote --symref`).
+ * 4. The parent target branch, if one is provided, as a controlled fallback.
+ *
+ * Returns the resolved branch name or undefined when no resolution strategy
+ * produces a result.
+ */
+export function resolveSubmoduleTargetBranch(
+  submodulePath: string,
+  policy: NativeGitSubmoduleTargetBranchPolicy,
+  parentWorkspacePath: string,
+  treeish?: string,
+  parentTargetBranch?: string,
+): string | undefined {
+  // Priority 1: explicit branchMappings (longest match wins)
+  const mapping = matchBranchMapping(submodulePath, policy.branchMappings);
+  if (mapping) return mapping.targetBranch;
+
+  // Priority 2: .gitmodules branch key
+  const gitmodulesBranch = resolveGitmodulesSubmoduleBranch(parentWorkspacePath, submodulePath, treeish);
+  if (gitmodulesBranch) return gitmodulesBranch;
+
+  // Priority 3: remote default branch from canonical URL
+  const canonicalUrl = resolveSubmoduleCanonicalUrl(parentWorkspacePath, submodulePath, treeish);
+  if (canonicalUrl) {
+    const remoteDefault = resolveRemoteDefaultBranch(canonicalUrl);
+    if (remoteDefault) return remoteDefault;
+  }
+
+  // Priority 4: parent target branch fallback
+  if (parentTargetBranch) return parentTargetBranch;
+
+  return undefined;
+}
+
+/**
+ * Matches a submodule path against branch mappings. Returns the mapping with
+ * the longest matching path (most specific wins). Supports glob patterns where
+ * the mapping path ends with `*`.
+ */
+function matchBranchMapping(
+  submodulePath: string,
+  mappings: NativeGitSubmoduleTargetBranchMapping[],
+): NativeGitSubmoduleTargetBranchMapping | undefined {
+  const normalized = normalizeGitPath(submodulePath);
+  let best: NativeGitSubmoduleTargetBranchMapping | undefined;
+  let bestLength = 0;
+
+  for (const mapping of mappings) {
+    const pattern = normalizeGitPath(mapping.path);
+    let matched = false;
+
+    if (pattern.endsWith("*")) {
+      const prefix = pattern.slice(0, -1);
+      if (normalized.startsWith(prefix)) matched = true;
+    } else if (pattern === normalized) {
+      matched = true;
+    }
+
+    if (matched) {
+      const length = pattern.endsWith("*") ? pattern.length - 1 : pattern.length;
+      if (length > bestLength) {
+        best = mapping;
+        bestLength = length;
+      }
+    }
+  }
+
+  return best;
+}
+
+/**
+ * Resolves the `branch` key from the submodule&#39;s section in `.gitmodules`.
+ * Reads from the versioned treeish (HEAD/INDEX) or the WORKTREE file.
+ */
+export function resolveGitmodulesSubmoduleBranch(
+  parentWorkspacePath: string,
+  submodulePath: string,
+  treeish?: string,
+): string | undefined {
+  const config = readGitmodulesAtTreeish(parentWorkspacePath, treeish);
+  if (!config) return undefined;
+
+  let currentPath: string | undefined;
+  let currentBranch: string | undefined;
+  let inSubmoduleSection = false;
+
+  const flush = (): string | undefined => {
+    if (inSubmoduleSection && currentPath === submodulePath && currentBranch) {
+      return currentBranch.trim() || undefined;
+    }
+    return undefined;
+  };
+
+  for (const raw of config.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith(";") || line.startsWith("#")) continue;
+
+    const sectionMatch = line.match(/^\[submodule\s+"([^"]+)"\]$/);
+    if (sectionMatch) {
+      const resolved = flush();
+      if (resolved) return resolved;
+      inSubmoduleSection = true;
+      currentPath = undefined;
+      currentBranch = undefined;
+      continue;
+    }
+
+    if (!inSubmoduleSection) continue;
+    if (line.startsWith("[")) {
+      // Entering a new section — flush current submodule
+      const resolved = flush();
+      if (resolved) return resolved;
+      inSubmoduleSection = false;
+      currentPath = undefined;
+      currentBranch = undefined;
+      continue;
+    }
+
+    const eq = line.indexOf("=");
+    if (eq === -1) continue;
+    const key = line.slice(0, eq).trim();
+    const value = line.slice(eq + 1).trim();
+    if (key === "path") currentPath = value;
+    if (key === "branch") currentBranch = value;
+  }
+
+  return flush();
+}
+
+/**
+ * Resolves the default branch of a remote Git repository using
+ * `git ls-remote --symref`. Returns the branch name or undefined.
+ */
+export function resolveRemoteDefaultBranch(canonicalUrl: string): string | undefined {
+  try {
+    const output = execFileSync("git", ["ls-remote", "--symref", canonicalUrl, "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30_000,
+    });
+    // Parse: ref: refs/heads/main	HEAD
+    const match = output.match(/^ref:\s*refs\/heads\/(\S+)\s+HEAD$/m);
+    return match?.[1] || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// ── Target branch verification primitives ──
+
+/**
+ * Checks whether a remote branch already contains a given commit SHA,
+ * without requiring any publish trust. Uses an isolated bare clone to
+ * fetch the candidate branch and runs `git merge-base --is-ancestor`.
+ *
+ * This is the non-trusting containment check: the caller does not need
+ * push access or trust; they only need fetch access to inspect.
+ */
+export function branchContainsCommitRemotely(
+  canonicalUrl: string,
+  sha: string,
+  targetBranch: string,
+): { contained: boolean; error?: string } {
+  const tmpDir = resolve("/tmp", `goal-target-branch-contains-${uniqueTempSuffix()}`);
+  try {
+    mkdirSync(tmpDir, { recursive: true });
+    git(tmpDir, ["init", "--bare"]);
+
+    // Fetch the target branch only — no trust required, no push involved
+    const refspec = `refs/heads/${targetBranch}:refs/heads/${targetBranch}`;
+    git(tmpDir, ["fetch", "--no-tags", canonicalUrl, refspec]);
+
+    const fetchedSha = safeGit(tmpDir, ["rev-parse", "--verify", `refs/heads/${targetBranch}^{commit}`]);
+    if (!fetchedSha) {
+      return { contained: false, error: `target branch ${targetBranch} does not exist on remote ${canonicalUrl}` };
+    }
+
+    const isAncestor = gitIsAncestor(tmpDir, sha, fetchedSha);
+    return { contained: isAncestor };
+  } catch (error) {
+    return { contained: false, error: `failed to inspect remote branch ${targetBranch}: ${gitErrorMessage(error)}` };
+  } finally {
+    rmRecursiveSafe(tmpDir);
+  }
+}
+
+// ── Source-object resolution for target branch publication ──
+
+/**
+ * Ensures a submodule commit SHA is available in the submodule worktree
+ * by locating it in source workspaces or fetching from remote.
+ *
+ * This extends {@link ensureSubmoduleCommitAvailable} with target-branch-
+ * specific fetch sources: it first checks retained/durable refs, then
+ * source workspaces, then falls back to fetching the target branch itself.
+ *
+ * Returns true when the SHA object is available in `submoduleWorktree`
+ * after the operation.
+ */
+export function ensureSubmoduleTargetShaAvailable(
+  submoduleWorktree: string,
+  submodulePath: string,
+  sha: string,
+  sourceWorkspacePaths: string[],
+  canonicalUrl?: string,
+  targetBranch?: string,
+): boolean {
+  // Fast path: already present
+  if (gitCommitObjectExists(submoduleWorktree, sha)) return true;
+
+  // Step 1: Try retained/durable refs from canonical URL
+  if (canonicalUrl) {
+    const durablePatterns = [
+      "refs/heads/goal-runner/retained/*",
+      "refs/heads/main",
+      "refs/heads/master",
+    ];
+    for (const pattern of durablePatterns) {
+      try {
+        const refsOutput = git("/tmp", ["ls-remote", "--refs", canonicalUrl, pattern]);
+        if (!refsOutput) continue;
+        for (const line of refsOutput.split("\n")) {
+          const parts = line.split(/\s+/);
+          const ref = parts[1];
+          if (!ref) continue;
+          try {
+            git(submoduleWorktree, ["fetch", "--no-tags", canonicalUrl, `${ref}:${ref}`]);
+            if (gitCommitObjectExists(submoduleWorktree, sha)) return true;
+          } catch {
+            // Try next ref
+          }
+        }
+      } catch {
+        // Try next pattern
+      }
+    }
+
+    // Step 2: Try fetching the target branch itself (may contain the SHA)
+    if (targetBranch) {
+      try {
+        git(submoduleWorktree, ["fetch", "--no-tags", canonicalUrl, `refs/heads/${targetBranch}:refs/heads/${targetBranch}`]);
+        if (gitCommitObjectExists(submoduleWorktree, sha)) return true;
+      } catch {
+        // Fall through
+      }
+    }
+  }
+
+  // Step 3: Try source workspaces (existing logic)
+  for (const workspacePath of sourceWorkspacePaths) {
+    const objectSource = locateSubmoduleCommitObject(sha, [workspacePath], submodulePath);
+    if (!objectSource) continue;
+    const sourceRepo = objectSource.includes(`${sep}.git${sep}modules${sep}`) ? objectSource : resolve(objectSource, submodulePath);
+    if (!existsSync(sourceRepo)) continue;
+    try {
+      git(submoduleWorktree, ["fetch", "--no-tags", sourceRepo, sha]);
+    } catch {
+      continue;
+    }
+    if (gitCommitObjectExists(submoduleWorktree, sha)) return true;
+  }
+
+  return false;
+}
+
+// ── Fast-forward-only target branch publication ──
+
+/**
+ * Publishes a SHA to a submodule target branch using fast-forward-only
+ * semantics. The operation:
+ *
+ * 1. Requires target-branch-specific trust URL check.
+ * 2. Verifies ancestor proof: the SHA must be a descendant of the
+ *    current target branch tip (fast-forward check).
+ * 3. Uses an explicit non-force refspec (`<sha>:refs/heads/<branch>`)
+ *    so the remote will reject non-fast-forward pushes.
+ * 4. Verifies remote reachability after push when policy requires it.
+ *
+ * Returns a structured result with the publication status and diagnostics.
+ */
+export interface TargetBranchPublishResult {
+  published: boolean;
+  alreadyContained: boolean;
+  error?: string;
+  verificationError?: string;
+}
+
+export function publishShaToSubmoduleTargetBranch(
+  submoduleWorktree: string,
+  canonicalUrl: string,
+  sha: string,
+  targetBranch: string,
+  policy: NativeGitSubmoduleTargetBranchPolicy,
+): TargetBranchPublishResult {
+  // Check if branch already contains the SHA (no publish needed)
+  const containment = branchContainsCommitRemotely(canonicalUrl, sha, targetBranch);
+  if (containment.contained) {
+    return { published: false, alreadyContained: true };
+  }
+  if (containment.error?.includes("does not exist")) {
+    // Branch does not exist on remote — that&#39;s a blocking condition
+    return { published: false, alreadyContained: false, error: `target branch ${targetBranch} does not exist on remote ${canonicalUrl}` };
+  }
+  if (containment.error && !containment.contained) {
+    // Unexpected failure inspecting the branch — fail closed
+    return { published: false, alreadyContained: false, error: `cannot inspect target branch ${targetBranch}: ${containment.error}` };
+  }
+
+  // Verify ancestor proof: SHA must be a descendant of the current branch tip
+  const tmpDir = resolve("/tmp", `goal-target-branch-ff-${uniqueTempSuffix()}`);
+  try {
+    mkdirSync(tmpDir, { recursive: true });
+    git(tmpDir, ["init", "--bare"]);
+
+    // Fetch the current branch tip
+    const fetchRefspec = `refs/heads/${targetBranch}:refs/heads/${targetBranch}`;
+    git(tmpDir, ["fetch", "--no-tags", canonicalUrl, fetchRefspec]);
+    const currentTip = safeGit(tmpDir, ["rev-parse", "--verify", `refs/heads/${targetBranch}^{commit}`]);
+
+    if (currentTip) {
+      // SHA must be a descendant of currentTip (fast-forward check)
+      if (!gitIsAncestor(tmpDir, currentTip, sha)) {
+        return {
+          published: false,
+          alreadyContained: false,
+          error: `cannot publish ${shortSha(sha)} to ${targetBranch}: not a fast-forward (${shortSha(sha)} is not a descendant of ${shortSha(currentTip)})`,
+        };
+      }
+    }
+    // If currentTip is missing (empty repo or new branch), fast-forward is vacuously true
+  } catch (error) {
+    return {
+      published: false,
+      alreadyContained: false,
+      error: `failed to verify fast-forward proof: ${gitErrorMessage(error)}`,
+    };
+  } finally {
+    rmRecursiveSafe(tmpDir);
+  }
+
+  // Non-force push: the remote will reject if the push is not a fast-forward
+  try {
+    const refspec = `${sha}:refs/heads/${targetBranch}`;
+    execFileSync("git", ["push", "--no-verify", canonicalUrl, refspec], {
+      cwd: submoduleWorktree,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 60_000,
+    });
+  } catch (error) {
+    const message = gitErrorMessage(error);
+    // Classify the error for diagnostic purposes
+    if (/protected\s+branch|cannot\s+force\s+update|denyNonFastForward/i.test(message)) {
+      return {
+        published: false,
+        alreadyContained: false,
+        error: `target branch ${targetBranch} is protected or rejects non-fast-forward pushes: ${message}`,
+      };
+    }
+    if (/rejected|push\s+failed|remote\s+rejected/i.test(message)) {
+      return {
+        published: false,
+        alreadyContained: false,
+        error: `push to ${targetBranch} rejected: ${message}`,
+      };
+    }
+    return {
+      published: false,
+      alreadyContained: false,
+      error: `failed to push ${shortSha(sha)} to ${targetBranch}: ${message}`,
+    };
+  }
+
+  // Post-push reachability verification (when policy requires it)
+  if (policy.verifyRemoteReachability) {
+    const verification = branchContainsCommitRemotely(canonicalUrl, sha, targetBranch);
+    if (!verification.contained) {
+      return {
+        published: true,
+        alreadyContained: false,
+        verificationError: verification.error || `pushed ${shortSha(sha)} to ${targetBranch} but post-push verification failed: SHA not reachable`,
+      };
+    }
+  }
+
+  return { published: true, alreadyContained: false };
+}
+
+// ── Evaluation entry point ──
+
+/**
+ * Evaluates and applies the target-branch publication policy for a set of
+ * changed submodule gitlinks. This is the main entry point for target-branch
+ * enforcement during closeout or integration.
+ *
+ * For each submodule in the enforcement scope:
+ * 1. Resolves the target branch via policy, .gitmodules, remote default.
+ * 2. Checks if the branch already contains the target SHA (containment).
+ * 3. Ensures the SHA object is available in the submodule push source.
+ * 4. Publishes only with fast-forward proof and non-force refspec.
+ * 5. Blocks on: missing branch, ambiguous branch, divergence,
+ *    missing target object, missing trust, protected branch, push rejection.
+ */
+export function evaluateSubmoduleTargetBranchPolicy(
+  parentWorkspacePath: string,
+  policy: NativeGitSubmoduleTargetBranchPolicy,
+  submoduleGitlinks: ChangedSubmoduleGitlink[],
+  sourceWorkspacePaths: string[],
+  options: {
+    /** Treeish to read .gitmodules from for branch resolution. Defaults to HEAD. */
+    treeish?: string;
+    /** The parent target branch for fallback resolution. */
+    parentTargetBranch?: string;
+    /** Remote name used for URL resolution. Defaults to origin. */
+    remoteName?: string;
+  } = {},
+): NativeGitSubmoduleTargetBranchResult {
+  const treeish = options.treeish ?? "HEAD";
+  const remoteName = options.remoteName ?? "origin";
+  const parentTargetBranch = options.parentTargetBranch;
+
+  // Determine which submodules to enforce
+  let enforcedGitlinks: ChangedSubmoduleGitlink[];
+  if (policy.enforcementScope === "none") {
+    return {
+      status: "skipped",
+      summary: "target-branch enforcement scope is none",
+      published: [],
+      blocked: [],
+      diagnostics: [],
+    };
+  }
+
+  if (policy.enforcementScope === "final-tree") {
+    // Only submodules present in the final tree with a new SHA (added or modified)
+    enforcedGitlinks = submoduleGitlinks.filter(
+      (g) => g.status !== "deleted" && g.newSha,
+    );
+  } else {
+    // "all-submodules": include all gitlinks (even deleted, for diagnostic)
+    enforcedGitlinks = submoduleGitlinks;
+  }
+
+  if (enforcedGitlinks.length === 0) {
+    return {
+      status: "skipped",
+      summary: "no submodule gitlinks in enforcement scope",
+      published: [],
+      blocked: [],
+      diagnostics: [],
+    };
+  }
+
+  const published: NativeGitSubmoduleTargetBranchResult["published"] = [];
+  const blocked: NativeGitSubmoduleTargetBranchResult["blocked"] = [];
+  const diagnostics: NativeGitSubmoduleTargetBranchDiagnostic[] = [];
+
+  for (const gitlink of enforcedGitlinks) {
+    const submodulePath = gitlink.path;
+    const sha = gitlink.newSha;
+
+    // Resolve canonical URL for diagnostics
+    const canonicalUrl = resolveSubmoduleCanonicalUrl(parentWorkspacePath, submodulePath, treeish)
+      ?? resolveSubmoduleCanonicalUrl(parentWorkspacePath, submodulePath, "WORKTREE");
+
+    if (!canonicalUrl) {
+      const diagnostic: NativeGitSubmoduleTargetBranchDiagnostic = {
+        path: submodulePath,
+        sourceObjectRef: sha ?? "",
+        canonicalUrl: "",
+        enforcementMatched: true,
+        published: false,
+        error: "cannot resolve canonical URL for submodule",
+      };
+      diagnostics.push(diagnostic);
+      if (sha) {
+        blocked.push({ path: submodulePath, sha, reason: "cannot resolve canonical URL for submodule" });
+      }
+      continue;
+    }
+
+    // URL trust check: must match target-branch-trusted patterns or closeout policy
+    if (!isSubmoduleUrlTrustedByPolicy(canonicalUrl, policy)) {
+      const diagnostic: NativeGitSubmoduleTargetBranchDiagnostic = {
+        path: submodulePath,
+        sourceObjectRef: sha ?? "",
+        canonicalUrl,
+        enforcementMatched: true,
+        published: false,
+        error: `submodule URL ${canonicalUrl} is not trusted for target-branch publication`,
+      };
+      diagnostics.push(diagnostic);
+      if (sha) {
+        blocked.push({ path: submodulePath, sha, reason: `URL ${canonicalUrl} not in trusted patterns` });
+      }
+      continue;
+    }
+
+    // Resolve target branch
+    const targetBranch = resolveSubmoduleTargetBranch(
+      submodulePath,
+      policy,
+      parentWorkspacePath,
+      treeish,
+      parentTargetBranch,
+    );
+
+    if (!targetBranch) {
+      const diagnostic: NativeGitSubmoduleTargetBranchDiagnostic = {
+        path: submodulePath,
+        sourceObjectRef: sha ?? "",
+        canonicalUrl,
+        enforcementMatched: true,
+        published: false,
+        error: "cannot resolve target branch for submodule: no mapping, no .gitmodules branch, no remote default, no parent fallback",
+      };
+      diagnostics.push(diagnostic);
+      if (sha) {
+        blocked.push({ path: submodulePath, sha, reason: "cannot resolve target branch" });
+      }
+      continue;
+    }
+
+    if (!sha) {
+      // Deleted submodule or missing SHA — skip publication but record diagnostic
+      diagnostics.push({
+        path: submodulePath,
+        sourceObjectRef: sha ?? "",
+        canonicalUrl,
+        mappedBranch: targetBranch,
+        enforcementMatched: true,
+        published: false,
+        error: sha === undefined ? "deleted submodule: no SHA to publish" : "missing SHA" ,
+      });
+      continue;
+    }
+
+    // Check remote containment (no trust required for inspection)
+    const containment = branchContainsCommitRemotely(canonicalUrl, sha, targetBranch);
+    if (containment.contained) {
+      diagnostics.push({
+        path: submodulePath,
+        sourceObjectRef: sha,
+        canonicalUrl,
+        mappedBranch: targetBranch,
+        enforcementMatched: true,
+        published: true,
+      });
+      published.push({ path: submodulePath, sha, canonicalUrl, targetBranch });
+      continue;
+    }
+
+    // Branch missing on remote
+    if (containment.error?.includes("does not exist")) {
+      const diagnostic: NativeGitSubmoduleTargetBranchDiagnostic = {
+        path: submodulePath,
+        sourceObjectRef: sha,
+        canonicalUrl,
+        mappedBranch: targetBranch,
+        enforcementMatched: true,
+        published: false,
+        error: containment.error,
+      };
+      diagnostics.push(diagnostic);
+      blocked.push({ path: submodulePath, sha, reason: containment.error });
+      continue;
+    }
+
+    // Ensure SHA object is available locally
+    const submoduleWorktree = resolve(parentWorkspacePath, submodulePath);
+    const shaAvailable = ensureSubmoduleTargetShaAvailable(
+      submoduleWorktree,
+      submodulePath,
+      sha,
+      sourceWorkspacePaths,
+      canonicalUrl,
+      targetBranch,
+    );
+
+    if (!shaAvailable) {
+      const diagnostic: NativeGitSubmoduleTargetBranchDiagnostic = {
+        path: submodulePath,
+        sourceObjectRef: sha,
+        canonicalUrl,
+        mappedBranch: targetBranch,
+        enforcementMatched: true,
+        published: false,
+        error: `cannot locate submodule commit ${shortSha(sha)} in any source workspace or remote ref for publication to ${targetBranch}`,
+      };
+      diagnostics.push(diagnostic);
+      blocked.push({ path: submodulePath, sha, reason: `missing target object ${shortSha(sha)}` });
+      continue;
+    }
+
+    // Publish with fast-forward-only semantics
+    const publishResult = publishShaToSubmoduleTargetBranch(
+      submoduleWorktree,
+      canonicalUrl,
+      sha,
+      targetBranch,
+      policy,
+    );
+
+    if (publishResult.published || publishResult.alreadyContained) {
+      diagnostics.push({
+        path: submodulePath,
+        sourceObjectRef: sha,
+        canonicalUrl,
+        mappedBranch: targetBranch,
+        enforcementMatched: true,
+        published: true,
+        error: publishResult.verificationError,
+      });
+      if (!publishResult.alreadyContained) {
+        published.push({ path: submodulePath, sha, canonicalUrl, targetBranch });
+      } else {
+        published.push({ path: submodulePath, sha, canonicalUrl, targetBranch });
+      }
+    } else {
+      const errorMessage = publishResult.error ?? "unknown publication error";
+      diagnostics.push({
+        path: submodulePath,
+        sourceObjectRef: sha,
+        canonicalUrl,
+        mappedBranch: targetBranch,
+        enforcementMatched: true,
+        published: false,
+        error: errorMessage,
+      });
+      blocked.push({ path: submodulePath, sha, reason: errorMessage });
+    }
+  }
+
+  if (blocked.length > 0) {
+    return {
+      status: "blocked",
+      summary: `target-branch publication blocked for ${blocked.length} submodule(s): ${blocked.map((b) => `${b.path}: ${b.reason}`).join("; ")}`,
+      published,
+      blocked,
+      diagnostics,
+    };
+  }
+
+  return {
+    status: "passed",
+    summary: `target-branch publication passed: ${published.length} submodule(s) published to target branches`,
+    published,
+    blocked: [],
+    diagnostics,
+  };
+}
+
+/**
+ * Checks whether a canonical URL is trusted for target-branch publication.
+ * Checks both the target-branch-specific patterns and the closeout policy patterns.
+ */
+function isSubmoduleUrlTrustedByPolicy(
+  url: string,
+  policy: NativeGitSubmoduleTargetBranchPolicy,
+): boolean {
+  if (policy.trustedSubmoduleTargetBranchUrlPatterns.some((pattern) => submoduleUrlMatchesPattern(url, pattern))) {
+    return true;
+  }
+  return false;
+}
+
 export interface ChangedSubmoduleGitlink {
   path: string;
   status: "added" | "modified" | "deleted" | "renamed";
