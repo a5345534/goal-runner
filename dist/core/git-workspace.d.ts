@@ -315,6 +315,95 @@ export declare const DEFAULT_SUBMODULE_TARGET_BRANCH_POLICY: NativeGitSubmoduleT
 export declare function resolveSubmoduleTargetBranchPolicy(policy: NativeGitSubmoduleTargetBranchPolicy, options?: {
     env?: NodeJS.ProcessEnv;
 }): NativeGitSubmoduleTargetBranchPolicy;
+/**
+ * Resolves the target branch for a submodule by checking, in order:
+ * 1. Explicit {@link NativeGitSubmoduleTargetBranchMapping.branchMappings} entries
+ *    (direct path match or trailing glob `*` match, with longest match winning).
+ * 2. The `branch` key in the submodule&#39;s `.gitmodules` entry (versioned in the
+ *    parent tree).
+ * 3. The remote default branch of the submodule&#39;s canonical URL
+ *    (via `git ls-remote --symref`).
+ * 4. The parent target branch, if one is provided, as a controlled fallback.
+ *
+ * Returns the resolved branch name or undefined when no resolution strategy
+ * produces a result.
+ */
+export declare function resolveSubmoduleTargetBranch(submodulePath: string, policy: NativeGitSubmoduleTargetBranchPolicy, parentWorkspacePath: string, treeish?: string, parentTargetBranch?: string): string | undefined;
+/**
+ * Resolves the `branch` key from the submodule&#39;s section in `.gitmodules`.
+ * Reads from the versioned treeish (HEAD/INDEX) or the WORKTREE file.
+ */
+export declare function resolveGitmodulesSubmoduleBranch(parentWorkspacePath: string, submodulePath: string, treeish?: string): string | undefined;
+/**
+ * Resolves the default branch of a remote Git repository using
+ * `git ls-remote --symref`. Returns the branch name or undefined.
+ */
+export declare function resolveRemoteDefaultBranch(canonicalUrl: string): string | undefined;
+/**
+ * Checks whether a remote branch already contains a given commit SHA,
+ * without requiring any publish trust. Uses an isolated bare clone to
+ * fetch the candidate branch and runs `git merge-base --is-ancestor`.
+ *
+ * This is the non-trusting containment check: the caller does not need
+ * push access or trust; they only need fetch access to inspect.
+ */
+export declare function branchContainsCommitRemotely(canonicalUrl: string, sha: string, targetBranch: string): {
+    contained: boolean;
+    error?: string;
+};
+/**
+ * Ensures a submodule commit SHA is available in the submodule worktree
+ * by locating it in source workspaces or fetching from remote.
+ *
+ * This extends {@link ensureSubmoduleCommitAvailable} with target-branch-
+ * specific fetch sources: it first checks retained/durable refs, then
+ * source workspaces, then falls back to fetching the target branch itself.
+ *
+ * Returns true when the SHA object is available in `submoduleWorktree`
+ * after the operation.
+ */
+export declare function ensureSubmoduleTargetShaAvailable(submoduleWorktree: string, submodulePath: string, sha: string, sourceWorkspacePaths: string[], canonicalUrl?: string, targetBranch?: string): boolean;
+/**
+ * Publishes a SHA to a submodule target branch using fast-forward-only
+ * semantics. The operation:
+ *
+ * 1. Requires target-branch-specific trust URL check.
+ * 2. Verifies ancestor proof: the SHA must be a descendant of the
+ *    current target branch tip (fast-forward check).
+ * 3. Uses an explicit non-force refspec (`<sha>:refs/heads/<branch>`)
+ *    so the remote will reject non-fast-forward pushes.
+ * 4. Verifies remote reachability after push when policy requires it.
+ *
+ * Returns a structured result with the publication status and diagnostics.
+ */
+export interface TargetBranchPublishResult {
+    published: boolean;
+    alreadyContained: boolean;
+    error?: string;
+    verificationError?: string;
+}
+export declare function publishShaToSubmoduleTargetBranch(submoduleWorktree: string, canonicalUrl: string, sha: string, targetBranch: string, policy: NativeGitSubmoduleTargetBranchPolicy): TargetBranchPublishResult;
+/**
+ * Evaluates and applies the target-branch publication policy for a set of
+ * changed submodule gitlinks. This is the main entry point for target-branch
+ * enforcement during closeout or integration.
+ *
+ * For each submodule in the enforcement scope:
+ * 1. Resolves the target branch via policy, .gitmodules, remote default.
+ * 2. Checks if the branch already contains the target SHA (containment).
+ * 3. Ensures the SHA object is available in the submodule push source.
+ * 4. Publishes only with fast-forward proof and non-force refspec.
+ * 5. Blocks on: missing branch, ambiguous branch, divergence,
+ *    missing target object, missing trust, protected branch, push rejection.
+ */
+export declare function evaluateSubmoduleTargetBranchPolicy(parentWorkspacePath: string, policy: NativeGitSubmoduleTargetBranchPolicy, submoduleGitlinks: ChangedSubmoduleGitlink[], sourceWorkspacePaths: string[], options?: {
+    /** Treeish to read .gitmodules from for branch resolution. Defaults to HEAD. */
+    treeish?: string;
+    /** The parent target branch for fallback resolution. */
+    parentTargetBranch?: string;
+    /** Remote name used for URL resolution. Defaults to origin. */
+    remoteName?: string;
+}): NativeGitSubmoduleTargetBranchResult;
 export interface ChangedSubmoduleGitlink {
     path: string;
     status: "added" | "modified" | "deleted" | "renamed";
