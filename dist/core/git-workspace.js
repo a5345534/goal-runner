@@ -385,6 +385,8 @@ export function publishShaToSubmoduleTargetBranch(submoduleWorktree, canonicalUr
         // Fetch the current branch tip
         const fetchRefspec = `refs/heads/${targetBranch}:refs/heads/${targetBranch}`;
         git(tmpDir, ["fetch", "--no-tags", canonicalUrl, fetchRefspec]);
+        // Fetch the candidate SHA from the submodule worktree so the FF check can resolve it
+        git(tmpDir, ["fetch", "--no-tags", submoduleWorktree, sha]);
         const currentTip = safeGit(tmpDir, ["rev-parse", "--verify", `refs/heads/${targetBranch}^{commit}`]);
         if (currentTip) {
             // SHA must be a descendant of currentTip (fast-forward check)
