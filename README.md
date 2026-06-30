@@ -399,6 +399,187 @@ unblock/resume command is needed; just fix the workspace and retry.
   diagnostic summary but does not, by itself, prevent a start).
 - It does **not** inspect ignored files (`.gitignore`-excluded paths).
 
+## Submodule target-branch closeout policy
+
+For auto-allocated (and certain explicit) remote closeout workflows, the
+controller enforces submodule gitlink durability by pushing changed submodule
+SHAs to their project target branches (e.g. `main`, `release/*`) before the
+goal is marked complete. This is separate from retained-ref publishing: a
+retained-ref (`refs/heads/goal-runner/retained/*`) is a transient build artifact
+that preserves individual SHAs, while target-branch publication promotes each
+submodule gitlink into the branch the submodule's project considers canonical.
+
+> **Important:** Trust configured for retained-ref publishing
+> (`AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_URL_PATTERNS`) does **not**
+> authorize target-branch mutation. Target-branch publication requires separate
+> trust, configured through
+> `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_TARGET_BRANCH_URL_PATTERNS`, or
+> (for explicit workspace closeout) an explicit
+> `NativeGitSubmoduleTargetBranchPolicy` with
+> `trustedSubmoduleTargetBranchUrlPatterns`.
+
+### Enforcement scope
+
+During closeout, the controller scans the final promoted tree for submodule
+gitlinks. The enforcement scope controls which submodules have their target
+branches verified and published:
+
+| Scope | Behavior |
+|-------|----------|
+| `final-tree` (default) | Only submodules reachable in the final treeish being pushed are enforced. Deleted submodules are skipped. Added/modified gitlinks must be durably published to their target branches. |
+| `all-submodules` | Every registered submodule is enforced, regardless of whether it changed. This is stricter and can block closeout for pre-existing unpushed gitlinks. |
+| `none` | No target-branch enforcement. Submodule gitlinks are published only through retained-refs or left as-is based on the closeout policy's submodule-publish mode. |
+
+### Target branch resolution
+
+The target branch for each submodule is resolved in this priority order:
+
+1. **Explicit `branchMappings`** — the policy can declare path→branch mappings
+   (supports trailing `*` glob patterns; longest match wins).
+2. **`.gitmodules` `branch` key** — the versioned `branch = <name>` entry in the
+   submodule's `.gitmodules` section, read from the treeish being promoted.
+3. **Remote default branch** — the remote's HEAD symref, resolved via
+   `git ls-remote --symref`.
+4. **Parent target branch fallback** — the parent project's own target branch
+   (e.g. `main`) used when no other strategy produces a result.
+
+If none of the above produces a result, the submodule is blocked with a
+"cannot resolve target branch" diagnostic.
+
+### Changed-gitlinks full-tree scan
+
+At closeout time the controller does **not** re-scan only the integration diff;
+it scans the full promoted tree using `git ls-tree -r` (mode `160000` entries).
+This means:
+
+- **Pre-existing gitlinks** that were never durably published to their target
+  branch are detected and enforced at closeout.
+- **Deleted submodules** are skipped in `final-tree` scope but included in
+  `all-submodules` scope for diagnostic completeness.
+- **Nested submodules** within a changed top-level submodule are recursively
+  scanned when `verifyNestedSubmodules` is enabled (default: `true`).
+
+This is the "changed-gitlinks compatibility mode": the same durable-publish
+engine handles integration-phase (staged diff) and closeout-phase (full-tree)
+scans by switching between `git diff` and `git ls-tree` as the scan strategy.
+
+### Trust configuration
+
+Target-branch publication requires explicit trust for each submodule URL.
+The policy checks two layers:
+
+1. **Target-branch-specific patterns** — the policy's
+   `trustedSubmoduleTargetBranchUrlPatterns` array, fed from
+   `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_TARGET_BRANCH_URL_PATTERNS` env var.
+2. **Closeout policy patterns** — inherited from
+   `NativeGitCloseoutPolicy.trustedSubmoduleUrlPatterns` (the
+   `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_URL_PATTERNS` patterns).
+
+The final effective trust list is the union of both layers. Patterns require
+exact match unless they end in `*`, which performs prefix matching.
+
+### Missing-target-object diagnostics
+
+When a submodule commit SHA is not available locally (not in the submodule
+worktree and not fetchable from retained-refs or the target branch itself),
+the evaluation produces a **missing target object** diagnostic:
+
+```
+cannot locate submodule commit abc1234 in any source workspace or remote ref for publication to main
+```
+
+This can happen when:
+
+- The submodule worktree is detached or at a different SHA than the parent's
+  gitlink.
+- The SHA was produced by a build/CI artifact outside the goal-runner workspace.
+- The submodule remote has no retained-ref and the target branch does not yet
+  contain the SHA.
+
+**Remediation:**
+
+```bash
+# Option A: Fetch the SHA into the submodule worktree from any available remote
+cd <parent>/
+<submodule-path>
+git fetch origin <sha>
+
+# Option B: Push the SHA to a retained-ref so the closeout scanner can find it
+git push origin <sha>:refs/heads/goal-runner/retained/<any-unique-path>
+
+# Option C: If the SHA is already on the target branch, verify containment
+# on the remote explicitly and retry closeout
+```
+
+After resolving, retry closeout via `/goal retry-node` or by re-running the
+goal if pre-closeout blocking.
+
+### Common closeout blockers and remediation
+
+| Blocking diagnostic | Cause | Remediation |
+|---|---|---|
+| `URL <url> not in trusted patterns` | Submodule URL is not in `trustedSubmoduleTargetBranchUrlPatterns`. | Set `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_TARGET_BRANCH_URL_PATTERNS` before starting the controller. |
+| `cannot resolve target branch` | No mapping, gitmodules branch, remote default, or parent fallback. | Add an explicit `branchMappings` entry or a `branch` key in `.gitmodules`. |
+| `target branch <branch> does not exist on remote` | The resolved target branch does not exist upstream. | Create the branch on the remote or change the branch mapping. |
+| `cannot publish <sha> to <branch>: not a fast-forward` | The SHA would require a non-fast-forward push (diverged branch tip). | Rebase, merge forward, or create a new branch head that contains the SHA as a descendant. |
+| `missing target object <sha>` | SHA not available in any source workspace or remote ref. | Fetch/push the SHA so the closeout collector can locate it (see above). |
+| `target branch <branch> is protected` | The remote rejects pushes to the target branch (branch protection rules). | Use a non-protected branch target, or merge through a PR workflow outside goal-runner. |
+
+### Relationship between retained-ref trust and target-branch trust
+
+| Concern | Retained-ref | Target-branch |
+|---------|-------------|---------------|
+| Ref pushed | `refs/heads/goal-runner/retained/<id>/<sha>` | Project canonical branch (`main`, `release/*`) |
+| Trust env var | `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_URL_PATTERNS` | `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_TARGET_BRANCH_URL_PATTERNS` |
+| Fast-forward required | No (new ref, always fresh) | Yes (non-ff push is rejected) |
+| Branch must pre-exist | No (created on push) | Yes (must exist on remote) |
+| Removed on cleanup | Yes (orphan retained-refs can be pruned) | No (project history) |
+| Scope | Any submodule gitlink | Only submodules in enforcement scope |
+
+Configuring retained-ref trust (`AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_URL_PATTERNS`)
+does **not** authorize the controller to mutate a submodule's target branch. To
+enable target-branch publication, set the separate
+`AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_TARGET_BRANCH_URL_PATTERNS` variable.
+
+### Default policy for auto-allocated workspaces
+
+For auto-allocated controller workspaces, the default target-branch policy is:
+
+```json
+{
+  "enforcementScope": "final-tree",
+  "branchMappings": [],
+  "trustedSubmoduleTargetBranchUrlPatterns": [],
+  "verifyRemoteReachability": true
+}
+```
+
+This means:
+
+- Only submodules reachable in the final tree are enforced.
+- No explicit branch mappings: target branches are resolved from `.gitmodules`,
+  remote defaults, or the parent target branch.
+- No target-branch URL trust by default: the operator must configure
+  `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_TARGET_BRANCH_URL_PATTERNS` for
+  target-branch publication to succeed.
+- Post-push reachability is verified (the controller fetches the pushed branch
+  and confirms the SHA is an ancestor of the branch tip).
+
+### Explicit workspace closeout
+
+Explicit workspaces (`--workspace <path>`) use a different default closeout
+policy (`EXPLICIT_WORKSPACE_DEFAULT_CLOSEOUT_POLICY`) where:
+
+- `submodulePublishMode` is `block-if-unpublished` (no retained-ref fallback; the
+  SHA must already be on a durable remote ref).
+- `prePushCheckoutSimulation` and `postPushRemoteCheckoutVerification` are off.
+- Target-branch publication is not enabled by default; the user's existing
+  submodule workflow is expected to handle durability.
+
+If you need target-branch enforcement for an explicit workspace, configure a
+`NativeGitSubmoduleTargetBranchPolicy` through the software API; there is no
+explicit-workspace target-branch env var at this time.
+
 DAG nodes can also declare a generic test-spec validation contract through `kind` and `validation` metadata. A planner can model test-spec-first work as visible `test-spec` / `test-review` / `implementation` / `audit` nodes, lock approved test artifacts by sha256, and require evidence such as `validators-ran`, `locked-artifacts-unchanged`, `implementation-diff-present`, or `audit-report-present`. Controller validation fails closed when locked artifacts change, required evidence is missing, declared validators are skipped, a high-risk `kind=implementation` node has no validation contract, or an audit report used for `audit-report-present` explicitly says violations remain. `requiredEvidence` is a closed vocabulary: unsupported labels are rejected by DAG parsing and also blocked by runtime validation if encountered in old durable state; map natural-language checks to explicit `validators`, `artifactLocks`, path policy (`allowedPaths`/`forbiddenPaths`), or `auditReportPaths` fields.
 
 Bare `/goal` shows the current/default goal's objective, status, elapsed time, token usage/budget, goal-turn count, and currently useful subcommands. `/goal status` groups the objective, workspace, session, DAG summary, DAG nodes, and subagent records into readable sections with shortened ids/paths, and reports stalled DAGs when an otherwise active goal has only terminal failed/blocked nodes. `/goal monitor` opens a live dashboard that refreshes DAG and subagent state every second, showing node/subagent status counts, runtime duration, last activity age, branch/workspace, validation, notes, and transcript tail. The monitor has separate `DAG / Subagents` and `Transcript tail` panes: press `d` or `t` to focus a pane, `↑↓` to scroll the focused pane, `PageUp`/`PageDown` for page scrolling, `Home` for top, and `End` for DAG bottom or transcript live tail. `/goal list` lists recent materialized goals from the portable registry. Selecting a goal opens the same read-only monitor and keeps lifecycle actions as explicit buttons/commands rather than free-form input into the goal session. Targeted commands resolve full or short goal ids and reject ambiguous prefixes; when the goal-ref is omitted, commands prefer the current controller session's goal, then the latest non-terminal goal, then the latest goal. `/goal retry-node [goal-ref] <node-id>` is the fresh-resource escape hatch for blocked or failed DAG nodes; it appears on monitor node rows. `/goal continue-subagent [goal-ref] <subagent-id>` (or `/goal continue-node [goal-ref] <node-id>` when a node-level target is convenient) is the same-subagent escape hatch that preserves the existing session/worktree and only resets controller retry counters; it appears on monitor runner/subagent rows. The Pi status line uses compact status strings such as `🎯 active 18k/100k`, `🎯 paused`, `🎯 blocked`, `🎯 budget 100k/100k`, or `🎯 complete`.
