@@ -308,6 +308,7 @@ function controllerEventCategory(event: string): GoalControllerTypedEventCategor
   if (event.startsWith("validation.")) return "validation.result";
   if (event.startsWith("integration.")) return "integration.result";
   if (event.startsWith("promotion.")) return "promotion.result";
+  if (event.startsWith("submoduleTargetBranch.")) return "submoduleTargetBranch.result";
   if (event.startsWith("cleanup.") || event.includes("Cleanup")) return "cleanup.result";
   if (event.startsWith("transcript.")) return "transcript";
   if (event.startsWith("node.") || event.startsWith("subagent.") || event.startsWith("workspaceAllocation.")) return "node.lifecycle";

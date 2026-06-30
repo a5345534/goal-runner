@@ -186,6 +186,135 @@ export declare const AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY: NativeGitCloseoutPo
 export declare const EXPLICIT_WORKSPACE_DEFAULT_CLOSEOUT_POLICY: NativeGitCloseoutPolicy;
 export declare function resolveNativeGitCloseoutPolicy(policy: NativeGitCloseoutPolicy, options?: NativeGitCloseoutPolicyResolutionOptions): NativeGitCloseoutPolicy;
 export declare function parseTrustedSubmoduleUrlPatterns(value: string | undefined): string[];
+/**
+ * Controls which submodules have their target branches enforced during
+ * closeout of an auto-allocated remote.
+ *
+ * - "final-tree": Only submodules that are reachable in the final treeish
+ *   (the parent commit being pushed) are enforced. This is the default for
+ *   auto-allocated remote closeout.
+ * - "all-submodules": All registered submodules are enforced, regardless of
+ *   whether they changed in the current operation.
+ * - "none": No target-branch enforcement; submodule gitlinks are published
+ *   without target-branch verification.
+ */
+export type NativeGitTargetBranchEnforcementScope = "final-tree" | "all-submodules" | "none";
+/**
+ * Maps a submodule path to a specific target branch for publication.
+ * When no mapping exists for a submodule, the default branch of its
+ * remote is used as the target.
+ */
+export interface NativeGitSubmoduleTargetBranchMapping {
+    /** Submodule path relative to parent repository root. Supports glob patterns. */
+    path: string;
+    /** The target branch to enforce for this submodule's gitlink publication. */
+    targetBranch: string;
+    /** Optional remote override; defaults to the parent remote. */
+    remote?: string;
+}
+/**
+ * Policy that controls how submodule target-branch publication is enforced
+ * during closeout of an auto-allocated remote or promotion.
+ *
+ * This is a separate concern from {@link NativeGitCloseoutPolicy}: the
+ * closeout policy controls *whether* submodule SHAs are durably published
+ * (retained-ref or remote check), while the target-branch policy controls
+ * *which branch* is used for that durable publication.
+ */
+export interface NativeGitSubmoduleTargetBranchPolicy {
+    /**
+     * Controls which submodules have their target branches enforced.
+     * Defaults to "final-tree" for auto-allocated remote closeout.
+     */
+    enforcementScope: NativeGitTargetBranchEnforcementScope;
+    /**
+     * Maps submodule paths to specific target branches. When empty or
+     * unmapped, default branch discovery is used per submodule.
+     */
+    branchMappings: NativeGitSubmoduleTargetBranchMapping[];
+    /**
+     * URL patterns for submodules whose remote URLs are trusted to receive
+     * target-branch pushes. Inherited from or layered on top of
+     * {@link NativeGitCloseoutPolicy.trustedSubmoduleUrlPatterns}.
+     */
+    trustedSubmoduleTargetBranchUrlPatterns: string[];
+    /**
+     * Whether to verify that the published target-branch commit is reachable
+     * on the remote after push. Defaults to true.
+     */
+    verifyRemoteReachability: boolean;
+}
+/**
+ * Diagnostic record for each submodule evaluated during target-branch
+ * policy enforcement. Includes the source object ref for traceability
+ * and the enforcement decision.
+ */
+export interface NativeGitSubmoduleTargetBranchDiagnostic {
+    /** Submodule path relative to parent repository root. */
+    path: string;
+    /**
+     * The source object ref (full SHA) that was evaluated. This is the
+     * gitlink SHA from the parent treeish being pushed.
+     */
+    sourceObjectRef: string;
+    /** Canonical remote URL for the submodule. */
+    canonicalUrl: string;
+    /** The resolved mapped target branch from branchMappings, if any. */
+    mappedBranch?: string;
+    /** Whether the enforcement scope included this submodule. */
+    enforcementMatched: boolean;
+    /** Whether the target-branch ref was successfully published. */
+    published: boolean;
+    /** Error detail if publication or verification failed. */
+    error?: string;
+}
+/**
+ * Result of evaluating and applying the target-branch publication policy.
+ */
+export interface NativeGitSubmoduleTargetBranchResult {
+    status: "passed" | "blocked" | "skipped";
+    summary: string;
+    /** Submodule refs successfully published to target branches. */
+    published: Array<{
+        path: string;
+        sha: string;
+        canonicalUrl: string;
+        targetBranch: string;
+    }>;
+    /** Submodule refs that could not be published to target branches. */
+    blocked: Array<{
+        path: string;
+        sha: string;
+        reason: string;
+    }>;
+    /** Per-submodule diagnostic records. */
+    diagnostics: NativeGitSubmoduleTargetBranchDiagnostic[];
+}
+/**
+ * Environment variable that can supply additional trusted submodule URL
+ * patterns for target-branch publication, layered on top of the policy's
+ * built-in patterns. Value may be a JSON array of strings or a
+ * newline/comma-delimited list.
+ */
+export declare const TRUSTED_SUBMODULE_TARGET_BRANCH_URL_PATTERNS_ENV = "AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_TARGET_BRANCH_URL_PATTERNS";
+/**
+ * Default target-branch policy for auto-allocated remote closeout.
+ * - enforcementScope is "final-tree": only submodules in the final tree
+ *   are enforced.
+ * - branchMappings is empty: the default remote branch is used for all
+ *   submodules.
+ * - trustedSubmoduleTargetBranchUrlPatterns is empty: only URLs that
+ *   match the closeout policy's trusted patterns are published.
+ * - verifyRemoteReachability is true: fails if remote verification fails.
+ */
+export declare const DEFAULT_SUBMODULE_TARGET_BRANCH_POLICY: NativeGitSubmoduleTargetBranchPolicy;
+/**
+ * Resolves a {@link NativeGitSubmoduleTargetBranchPolicy} by merging
+ * environment-configured trusted URL patterns.
+ */
+export declare function resolveSubmoduleTargetBranchPolicy(policy: NativeGitSubmoduleTargetBranchPolicy, options?: {
+    env?: NodeJS.ProcessEnv;
+}): NativeGitSubmoduleTargetBranchPolicy;
 export interface ChangedSubmoduleGitlink {
     path: string;
     status: "added" | "modified" | "deleted" | "renamed";
