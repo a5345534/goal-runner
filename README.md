@@ -402,9 +402,9 @@ unblock/resume command is needed; just fix the workspace and retry.
 ## Submodule target-branch closeout policy
 
 For auto-allocated (and certain explicit) remote closeout workflows, the
-controller enforces submodule gitlink durability by pushing changed submodule
-SHAs to their project target branches (e.g. `main`, `release/*`) before the
-goal is marked complete. This is separate from retained-ref publishing: a
+controller enforces submodule gitlink durability by verifying every policy-covered
+final-tree submodule SHA is on its project target branch (e.g. `main`,
+`release/*`) before the goal is marked complete. This is separate from retained-ref publishing: a
 retained-ref (`refs/heads/goal-runner/retained/*`) is a transient build artifact
 that preserves individual SHAs, while target-branch publication promotes each
 submodule gitlink into the branch the submodule's project considers canonical.
@@ -426,8 +426,8 @@ branches verified and published:
 
 | Scope | Behavior |
 |-------|----------|
-| `final-tree` (default) | Only submodules reachable in the final treeish being pushed are enforced. Deleted submodules are skipped. Added/modified gitlinks must be durably published to their target branches. |
-| `all-submodules` | Every registered submodule is enforced, regardless of whether it changed. This is stricter and can block closeout for pre-existing unpushed gitlinks. |
+| `final-tree` (default) | Every submodule gitlink reachable in the final promoted tree is enforced. Deleted submodules are skipped. Added/modified and pre-existing gitlinks must be durably published to their target branches. |
+| `changed-gitlinks` | Explicit compatibility mode that enforces only gitlinks changed by the current promotion diff. Diagnostics note that pre-existing retained-only final-tree pins are not repaired. |
 | `none` | No target-branch enforcement. Submodule gitlinks are published only through retained-refs or left as-is based on the closeout policy's submodule-publish mode. |
 
 ### Target branch resolution
@@ -441,7 +441,8 @@ The target branch for each submodule is resolved in this priority order:
 3. **Remote default branch** — the remote's HEAD symref, resolved via
    `git ls-remote --symref`.
 4. **Parent target branch fallback** — the parent project's own target branch
-   (e.g. `main`) used when no other strategy produces a result.
+   (e.g. `main`) used only when `allowParentTargetBranchFallback` is explicitly
+   enabled by policy.
 
 If none of the above produces a result, the submodule is blocked with a
 "cannot resolve target branch" diagnostic.
@@ -454,29 +455,22 @@ This means:
 
 - **Pre-existing gitlinks** that were never durably published to their target
   branch are detected and enforced at closeout.
-- **Deleted submodules** are skipped in `final-tree` scope but included in
-  `all-submodules` scope for diagnostic completeness.
+- **Deleted submodules** are skipped in `final-tree` scope.
 - **Nested submodules** within a changed top-level submodule are recursively
   scanned when `verifyNestedSubmodules` is enabled (default: `true`).
 
-This is the "changed-gitlinks compatibility mode": the same durable-publish
-engine handles integration-phase (staged diff) and closeout-phase (full-tree)
-scans by switching between `git diff` and `git ls-tree` as the scan strategy.
+`changed-gitlinks` is an explicit compatibility mode: it scans a promotion diff
+with `git diff` instead of the final tree with `git ls-tree`, and therefore does
+not guarantee repair of pre-existing retained-only final-tree pins.
 
 ### Trust configuration
 
-Target-branch publication requires explicit trust for each submodule URL.
-The policy checks two layers:
-
-1. **Target-branch-specific patterns** — the policy's
-   `trustedSubmoduleTargetBranchUrlPatterns` array, fed from
-   `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_TARGET_BRANCH_URL_PATTERNS` env var.
-2. **Closeout policy patterns** — inherited from
-   `NativeGitCloseoutPolicy.trustedSubmoduleUrlPatterns` (the
-   `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_URL_PATTERNS` patterns).
-
-The final effective trust list is the union of both layers. Patterns require
-exact match unless they end in `*`, which performs prefix matching.
+Target-branch publication requires explicit target-branch trust for each
+submodule URL. The policy uses the `trustedSubmoduleTargetBranchUrlPatterns`
+array, fed from `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_TARGET_BRANCH_URL_PATTERNS`.
+Retained-ref trust (`AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_URL_PATTERNS`) is
+not inherited. Patterns require exact match unless they end in `*`, which
+performs prefix matching.
 
 ### Missing-target-object diagnostics
 
@@ -519,7 +513,7 @@ goal if pre-closeout blocking.
 | Blocking diagnostic | Cause | Remediation |
 |---|---|---|
 | `URL <url> not in trusted patterns` | Submodule URL is not in `trustedSubmoduleTargetBranchUrlPatterns`. | Set `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_TARGET_BRANCH_URL_PATTERNS` before starting the controller. |
-| `cannot resolve target branch` | No mapping, gitmodules branch, remote default, or parent fallback. | Add an explicit `branchMappings` entry or a `branch` key in `.gitmodules`. |
+| `cannot resolve target branch` | No mapping, gitmodules branch, remote default, or explicitly allowed parent fallback. | Add an explicit `branchMappings` entry, a `branch` key in `.gitmodules`, or explicitly allow parent-target fallback by policy. |
 | `target branch <branch> does not exist on remote` | The resolved target branch does not exist upstream. | Create the branch on the remote or change the branch mapping. |
 | `cannot publish <sha> to <branch>: not a fast-forward` | The SHA would require a non-fast-forward push (diverged branch tip). | Rebase, merge forward, or create a new branch head that contains the SHA as a descendant. |
 | `missing target object <sha>` | SHA not available in any source workspace or remote ref. | Fetch/push the SHA so the closeout collector can locate it (see above). |
@@ -550,6 +544,7 @@ For auto-allocated controller workspaces, the default target-branch policy is:
   "enforcementScope": "final-tree",
   "branchMappings": [],
   "trustedSubmoduleTargetBranchUrlPatterns": [],
+  "allowParentTargetBranchFallback": false,
   "verifyRemoteReachability": true
 }
 ```
@@ -557,8 +552,9 @@ For auto-allocated controller workspaces, the default target-branch policy is:
 This means:
 
 - Only submodules reachable in the final tree are enforced.
-- No explicit branch mappings: target branches are resolved from `.gitmodules`,
-  remote defaults, or the parent target branch.
+- No explicit branch mappings: target branches are resolved from `.gitmodules`
+  or remote defaults. Parent target branch fallback is disabled unless policy
+  explicitly enables it.
 - No target-branch URL trust by default: the operator must configure
   `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_TARGET_BRANCH_URL_PATTERNS` for
   target-branch publication to succeed.

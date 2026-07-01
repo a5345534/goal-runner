@@ -301,17 +301,18 @@ function uniqueNonEmptyStrings(values: string[]): string[] {
  * Controls which submodules have their target branches enforced during
  * closeout of an auto-allocated remote.
  *
- * - "final-tree": Only submodules that are reachable in the final treeish
- *   (the parent commit being pushed) are enforced. This is the default for
+ * - "final-tree": Every submodule gitlink reachable in the final treeish
+ *   (the parent commit being pushed) is enforced. This is the default for
  *   auto-allocated remote closeout.
- * - "all-submodules": All registered submodules are enforced, regardless of
- *   whether they changed in the current operation.
+ * - "changed-gitlinks": Compatibility mode that only enforces gitlinks changed
+ *   by the current promotion diff. It does not repair pre-existing retained-only
+ *   pins in the final parent tree.
  * - "none": No target-branch enforcement; submodule gitlinks are published
  *   without target-branch verification.
  */
 export type NativeGitTargetBranchEnforcementScope =
   | "final-tree"
-  | "all-submodules"
+  | "changed-gitlinks"
   | "none";
 
 /**
@@ -350,10 +351,15 @@ export interface NativeGitSubmoduleTargetBranchPolicy {
   branchMappings: NativeGitSubmoduleTargetBranchMapping[];
   /**
    * URL patterns for submodules whose remote URLs are trusted to receive
-   * target-branch pushes. Inherited from or layered on top of
-   * {@link NativeGitCloseoutPolicy.trustedSubmoduleUrlPatterns}.
+   * target-branch pushes. This is intentionally separate from retained-ref
+   * publication trust.
    */
   trustedSubmoduleTargetBranchUrlPatterns: string[];
+  /**
+   * Whether the parent target branch may be used when no mapping,
+   * `.gitmodules` branch, or remote default branch resolves. Defaults to false.
+   */
+  allowParentTargetBranchFallback: boolean;
   /**
    * Whether to verify that the published target-branch commit is reachable
    * on the remote after push. Defaults to true.
@@ -424,14 +430,15 @@ export const TRUSTED_SUBMODULE_TARGET_BRANCH_URL_PATTERNS_ENV =
  *   are enforced.
  * - branchMappings is empty: the default remote branch is used for all
  *   submodules.
- * - trustedSubmoduleTargetBranchUrlPatterns is empty: only URLs that
- *   match the closeout policy's trusted patterns are published.
+ * - trustedSubmoduleTargetBranchUrlPatterns is empty: no target branch
+ *   mutation is allowed until target-branch-specific trust is configured.
  * - verifyRemoteReachability is true: fails if remote verification fails.
  */
 export const DEFAULT_SUBMODULE_TARGET_BRANCH_POLICY: NativeGitSubmoduleTargetBranchPolicy = {
   enforcementScope: "final-tree",
   branchMappings: [],
   trustedSubmoduleTargetBranchUrlPatterns: [],
+  allowParentTargetBranchFallback: false,
   verifyRemoteReachability: true,
 };
 
@@ -454,6 +461,7 @@ export function resolveSubmoduleTargetBranchPolicy(
       ...policy.trustedSubmoduleTargetBranchUrlPatterns,
       ...configuredPatterns,
     ]),
+    allowParentTargetBranchFallback: policy.allowParentTargetBranchFallback ?? false,
     verifyRemoteReachability: policy.verifyRemoteReachability ?? true,
   };
 }
@@ -468,7 +476,7 @@ export function resolveSubmoduleTargetBranchPolicy(
  *    parent tree).
  * 3. The remote default branch of the submodule&#39;s canonical URL
  *    (via `git ls-remote --symref`).
- * 4. The parent target branch, if one is provided, as a controlled fallback.
+ * 4. The parent target branch, only when policy explicitly allows fallback.
  *
  * Returns the resolved branch name or undefined when no resolution strategy
  * produces a result.
@@ -495,8 +503,8 @@ export function resolveSubmoduleTargetBranch(
     if (remoteDefault) return remoteDefault;
   }
 
-  // Priority 4: parent target branch fallback
-  if (parentTargetBranch) return parentTargetBranch;
+  // Priority 4: parent target branch fallback, only when explicitly allowed.
+  if (policy.allowParentTargetBranchFallback && parentTargetBranch) return parentTargetBranch;
 
   return undefined;
 }
@@ -632,6 +640,15 @@ export function branchContainsCommitRemotely(
 ): { contained: boolean; error?: string } {
   const tmpDir = resolve("/tmp", `goal-target-branch-contains-${uniqueTempSuffix()}`);
   try {
+    const advertised = execFileSync("git", ["ls-remote", "--heads", canonicalUrl, `refs/heads/${targetBranch}`], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30_000,
+    }).trim();
+    if (!advertised) {
+      return { contained: false, error: `target branch ${targetBranch} does not exist on remote ${canonicalUrl}` };
+    }
+
     mkdirSync(tmpDir, { recursive: true });
     git(tmpDir, ["init", "--bare"]);
 
@@ -647,7 +664,11 @@ export function branchContainsCommitRemotely(
     const isAncestor = gitIsAncestor(tmpDir, sha, fetchedSha);
     return { contained: isAncestor };
   } catch (error) {
-    return { contained: false, error: `failed to inspect remote branch ${targetBranch}: ${gitErrorMessage(error)}` };
+    const message = gitErrorMessage(error);
+    if (/could(n't| not) find remote ref|couldn't find remote ref|fatal: couldn't find remote ref|not found/i.test(message)) {
+      return { contained: false, error: `target branch ${targetBranch} does not exist on remote ${canonicalUrl}` };
+    }
+    return { contained: false, error: `failed to inspect remote branch ${targetBranch}: ${message}` };
   } finally {
     rmRecursiveSafe(tmpDir);
   }
@@ -887,10 +908,10 @@ export function evaluateSubmoduleTargetBranchPolicy(
   } = {},
 ): NativeGitSubmoduleTargetBranchResult {
   const treeish = options.treeish ?? "HEAD";
-  const remoteName = options.remoteName ?? "origin";
   const parentTargetBranch = options.parentTargetBranch;
 
-  // Determine which submodules to enforce
+  // The caller supplies the correct gitlink set for the selected scope. Final-tree
+  // callers must pass a full-tree scan; changed-gitlinks callers pass a diff scan.
   let enforcedGitlinks: ChangedSubmoduleGitlink[];
   if (policy.enforcementScope === "none") {
     return {
@@ -901,16 +922,7 @@ export function evaluateSubmoduleTargetBranchPolicy(
       diagnostics: [],
     };
   }
-
-  if (policy.enforcementScope === "final-tree") {
-    // Only submodules present in the final tree with a new SHA (added or modified)
-    enforcedGitlinks = submoduleGitlinks.filter(
-      (g) => g.status !== "deleted" && g.newSha,
-    );
-  } else {
-    // "all-submodules": include all gitlinks (even deleted, for diagnostic)
-    enforcedGitlinks = submoduleGitlinks;
-  }
+  enforcedGitlinks = submoduleGitlinks.filter((g) => g.status !== "deleted" && g.newSha);
 
   if (enforcedGitlinks.length === 0) {
     return {
@@ -946,23 +958,6 @@ export function evaluateSubmoduleTargetBranchPolicy(
       diagnostics.push(diagnostic);
       if (sha) {
         blocked.push({ path: submodulePath, sha, reason: "cannot resolve canonical URL for submodule" });
-      }
-      continue;
-    }
-
-    // URL trust check: must match target-branch-trusted patterns or closeout policy
-    if (!isSubmoduleUrlTrustedByPolicy(canonicalUrl, policy)) {
-      const diagnostic: NativeGitSubmoduleTargetBranchDiagnostic = {
-        path: submodulePath,
-        sourceObjectRef: sha ?? "",
-        canonicalUrl,
-        enforcementMatched: true,
-        published: false,
-        error: `submodule URL ${canonicalUrl} is not trusted for target-branch publication`,
-      };
-      diagnostics.push(diagnostic);
-      if (sha) {
-        blocked.push({ path: submodulePath, sha, reason: `URL ${canonicalUrl} not in trusted patterns` });
       }
       continue;
     }
@@ -1021,8 +1016,10 @@ export function evaluateSubmoduleTargetBranchPolicy(
       continue;
     }
 
-    // Branch missing on remote
-    if (containment.error?.includes("does not exist")) {
+    // Branch missing or uninspectable on remote. Read-only verification never
+    // requires publish trust, but it must fail closed if the branch cannot be
+    // inspected or does not exist.
+    if (containment.error) {
       const diagnostic: NativeGitSubmoduleTargetBranchDiagnostic = {
         path: submodulePath,
         sourceObjectRef: sha,
@@ -1034,6 +1031,23 @@ export function evaluateSubmoduleTargetBranchPolicy(
       };
       diagnostics.push(diagnostic);
       blocked.push({ path: submodulePath, sha, reason: containment.error });
+      continue;
+    }
+
+    // URL trust is required only when mutation would be needed. Already-contained
+    // read-only verification passed above without consulting trust policy.
+    if (!isSubmoduleUrlTrustedByPolicy(canonicalUrl, policy)) {
+      const diagnostic: NativeGitSubmoduleTargetBranchDiagnostic = {
+        path: submodulePath,
+        sourceObjectRef: sha,
+        canonicalUrl,
+        mappedBranch: targetBranch,
+        enforcementMatched: true,
+        published: false,
+        error: `submodule URL ${canonicalUrl} is not trusted for target-branch publication`,
+      };
+      diagnostics.push(diagnostic);
+      blocked.push({ path: submodulePath, sha, reason: `URL ${canonicalUrl} not in trusted patterns` });
       continue;
     }
 
@@ -1072,7 +1086,18 @@ export function evaluateSubmoduleTargetBranchPolicy(
       policy,
     );
 
-    if (publishResult.published || publishResult.alreadyContained) {
+    if (publishResult.verificationError) {
+      diagnostics.push({
+        path: submodulePath,
+        sourceObjectRef: sha,
+        canonicalUrl,
+        mappedBranch: targetBranch,
+        enforcementMatched: true,
+        published: false,
+        error: publishResult.verificationError,
+      });
+      blocked.push({ path: submodulePath, sha, reason: publishResult.verificationError });
+    } else if (publishResult.published || publishResult.alreadyContained) {
       diagnostics.push({
         path: submodulePath,
         sourceObjectRef: sha,
@@ -1080,13 +1105,8 @@ export function evaluateSubmoduleTargetBranchPolicy(
         mappedBranch: targetBranch,
         enforcementMatched: true,
         published: true,
-        error: publishResult.verificationError,
       });
-      if (!publishResult.alreadyContained) {
-        published.push({ path: submodulePath, sha, canonicalUrl, targetBranch });
-      } else {
-        published.push({ path: submodulePath, sha, canonicalUrl, targetBranch });
-      }
+      published.push({ path: submodulePath, sha, canonicalUrl, targetBranch });
     } else {
       const errorMessage = publishResult.error ?? "unknown publication error";
       diagnostics.push({
@@ -1123,7 +1143,7 @@ export function evaluateSubmoduleTargetBranchPolicy(
 
 /**
  * Checks whether a canonical URL is trusted for target-branch publication.
- * Checks both the target-branch-specific patterns and the closeout policy patterns.
+ * Retained-ref trust is intentionally not reused for lifecycle branch mutation.
  */
 function isSubmoduleUrlTrustedByPolicy(
   url: string,
@@ -1163,6 +1183,18 @@ export interface NativeGitSubmodulePublishResult {
   published: PublishedSubmoduleRef[];
   verified: VerifiedSubmoduleRef[];
   blockers: SubmodulePublishBlocker[];
+}
+
+export interface NativeGitSubmoduleTargetBranchPublicationRequest {
+  parentWorkspacePath: string;
+  sourceWorkspacePaths: string[];
+  /** Base tree for changed-gitlinks compatibility mode. Ignored for final-tree. */
+  baseTreeish?: string;
+  /** Final promoted treeish to verify/publish. Defaults to HEAD. */
+  targetTreeish?: string;
+  /** Parent target branch, only used when policy.allowParentTargetBranchFallback is true. */
+  parentTargetBranch?: string;
+  policy: NativeGitSubmoduleTargetBranchPolicy;
 }
 
 export interface PublishedSubmoduleRef {
@@ -2112,6 +2144,42 @@ export class NativeGitWorkspaceManager {
       verified,
       blockers,
     };
+  }
+
+  enforceSubmoduleTargetBranchPublication(
+    request: NativeGitSubmoduleTargetBranchPublicationRequest,
+  ): NativeGitSubmoduleTargetBranchResult {
+    const policy = request.policy;
+    if (policy.enforcementScope === "none") {
+      return evaluateSubmoduleTargetBranchPolicy(
+        request.parentWorkspacePath,
+        policy,
+        [],
+        request.sourceWorkspacePaths,
+        { treeish: request.targetTreeish ?? "HEAD", parentTargetBranch: request.parentTargetBranch },
+      );
+    }
+
+    const targetTreeish = request.targetTreeish ?? "HEAD";
+    const gitlinks = policy.enforcementScope === "final-tree"
+      ? scanChangedSubmoduleGitlinks(request.parentWorkspacePath, "ALL", targetTreeish)
+      : scanChangedSubmoduleGitlinks(request.parentWorkspacePath, request.baseTreeish ?? "HEAD", targetTreeish);
+
+    const result = evaluateSubmoduleTargetBranchPolicy(
+      request.parentWorkspacePath,
+      policy,
+      gitlinks,
+      request.sourceWorkspacePaths,
+      { treeish: targetTreeish, parentTargetBranch: request.parentTargetBranch },
+    );
+
+    if (policy.enforcementScope === "changed-gitlinks" && result.status !== "skipped") {
+      return {
+        ...result,
+        summary: `${result.summary}; enforcementScope=changed-gitlinks does not repair pre-existing retained-only final-tree pins`,
+      };
+    }
+    return result;
   }
 
   preflightPromotionTargetBeforeControllerStart(

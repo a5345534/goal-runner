@@ -190,15 +190,16 @@ export declare function parseTrustedSubmoduleUrlPatterns(value: string | undefin
  * Controls which submodules have their target branches enforced during
  * closeout of an auto-allocated remote.
  *
- * - "final-tree": Only submodules that are reachable in the final treeish
- *   (the parent commit being pushed) are enforced. This is the default for
+ * - "final-tree": Every submodule gitlink reachable in the final treeish
+ *   (the parent commit being pushed) is enforced. This is the default for
  *   auto-allocated remote closeout.
- * - "all-submodules": All registered submodules are enforced, regardless of
- *   whether they changed in the current operation.
+ * - "changed-gitlinks": Compatibility mode that only enforces gitlinks changed
+ *   by the current promotion diff. It does not repair pre-existing retained-only
+ *   pins in the final parent tree.
  * - "none": No target-branch enforcement; submodule gitlinks are published
  *   without target-branch verification.
  */
-export type NativeGitTargetBranchEnforcementScope = "final-tree" | "all-submodules" | "none";
+export type NativeGitTargetBranchEnforcementScope = "final-tree" | "changed-gitlinks" | "none";
 /**
  * Maps a submodule path to a specific target branch for publication.
  * When no mapping exists for a submodule, the default branch of its
@@ -234,10 +235,15 @@ export interface NativeGitSubmoduleTargetBranchPolicy {
     branchMappings: NativeGitSubmoduleTargetBranchMapping[];
     /**
      * URL patterns for submodules whose remote URLs are trusted to receive
-     * target-branch pushes. Inherited from or layered on top of
-     * {@link NativeGitCloseoutPolicy.trustedSubmoduleUrlPatterns}.
+     * target-branch pushes. This is intentionally separate from retained-ref
+     * publication trust.
      */
     trustedSubmoduleTargetBranchUrlPatterns: string[];
+    /**
+     * Whether the parent target branch may be used when no mapping,
+     * `.gitmodules` branch, or remote default branch resolves. Defaults to false.
+     */
+    allowParentTargetBranchFallback: boolean;
     /**
      * Whether to verify that the published target-branch commit is reachable
      * on the remote after push. Defaults to true.
@@ -303,8 +309,8 @@ export declare const TRUSTED_SUBMODULE_TARGET_BRANCH_URL_PATTERNS_ENV = "AGENT_G
  *   are enforced.
  * - branchMappings is empty: the default remote branch is used for all
  *   submodules.
- * - trustedSubmoduleTargetBranchUrlPatterns is empty: only URLs that
- *   match the closeout policy's trusted patterns are published.
+ * - trustedSubmoduleTargetBranchUrlPatterns is empty: no target branch
+ *   mutation is allowed until target-branch-specific trust is configured.
  * - verifyRemoteReachability is true: fails if remote verification fails.
  */
 export declare const DEFAULT_SUBMODULE_TARGET_BRANCH_POLICY: NativeGitSubmoduleTargetBranchPolicy;
@@ -323,7 +329,7 @@ export declare function resolveSubmoduleTargetBranchPolicy(policy: NativeGitSubm
  *    parent tree).
  * 3. The remote default branch of the submodule&#39;s canonical URL
  *    (via `git ls-remote --symref`).
- * 4. The parent target branch, if one is provided, as a controlled fallback.
+ * 4. The parent target branch, only when policy explicitly allows fallback.
  *
  * Returns the resolved branch name or undefined when no resolution strategy
  * produces a result.
@@ -430,6 +436,17 @@ export interface NativeGitSubmodulePublishResult {
     published: PublishedSubmoduleRef[];
     verified: VerifiedSubmoduleRef[];
     blockers: SubmodulePublishBlocker[];
+}
+export interface NativeGitSubmoduleTargetBranchPublicationRequest {
+    parentWorkspacePath: string;
+    sourceWorkspacePaths: string[];
+    /** Base tree for changed-gitlinks compatibility mode. Ignored for final-tree. */
+    baseTreeish?: string;
+    /** Final promoted treeish to verify/publish. Defaults to HEAD. */
+    targetTreeish?: string;
+    /** Parent target branch, only used when policy.allowParentTargetBranchFallback is true. */
+    parentTargetBranch?: string;
+    policy: NativeGitSubmoduleTargetBranchPolicy;
 }
 export interface PublishedSubmoduleRef {
     path: string;
@@ -548,6 +565,7 @@ export declare class NativeGitWorkspaceManager {
     integrateSubagentBranch(request: NativeGitSubagentBranchIntegrationRequest): NativeGitSubagentBranchIntegrationResult;
     promoteControllerBranch(request: NativeGitControllerBranchPromotionRequest): NativeGitControllerBranchPromotionResult;
     ensureSubmoduleGitlinksDurablyPublished(request: NativeGitSubmodulePublishRequest): NativeGitSubmodulePublishResult;
+    enforceSubmoduleTargetBranchPublication(request: NativeGitSubmoduleTargetBranchPublicationRequest): NativeGitSubmoduleTargetBranchResult;
     preflightPromotionTargetBeforeControllerStart(request: NativeGitPromotionTargetPreflightRequest): NativeGitPromotionTargetPreflightResult;
     normalizePromotionTarget(request: NativeGitControllerBranchPromotionRequest, policy: NativeGitCloseoutPolicy): {
         ok: true;

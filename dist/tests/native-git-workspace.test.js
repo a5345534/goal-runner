@@ -2219,6 +2219,7 @@ function defaultTargetBranchPolicy(overrides = {}) {
         enforcementScope: "final-tree",
         branchMappings: [],
         trustedSubmoduleTargetBranchUrlPatterns: [],
+        allowParentTargetBranchFallback: false,
         verifyRemoteReachability: false,
         ...overrides,
     };
@@ -2252,14 +2253,16 @@ test("resolveSubmoduleTargetBranch falls back to remote default branch", () => {
         rmSync(root, { recursive: true, force: true });
     }
 });
-test("resolveSubmoduleTargetBranch uses parent fallback when no other strategy resolves", () => {
+test("resolveSubmoduleTargetBranch uses parent fallback only when policy allows it", () => {
     const { root, parent } = createTargetBranchFixture();
     try {
         writeFileSync(join(parent, ".gitmodules"), `[submodule "deps/sub"]\n\tpath = deps/sub\n`);
         git(parent, ["add", ".gitmodules"]);
         git(parent, ["commit", "-m", "remove url from gitmodules"]);
-        const result = resolveSubmoduleTargetBranch("deps/sub", defaultTargetBranchPolicy(), parent, "HEAD", "develop");
-        assert.equal(result, "develop", "must fall back to parent target branch when URL is missing");
+        const blocked = resolveSubmoduleTargetBranch("deps/sub", defaultTargetBranchPolicy(), parent, "HEAD", "develop");
+        assert.equal(blocked, undefined, "parent target fallback must be disabled by default");
+        const allowed = resolveSubmoduleTargetBranch("deps/sub", defaultTargetBranchPolicy({ allowParentTargetBranchFallback: true }), parent, "HEAD", "develop");
+        assert.equal(allowed, "develop", "must fall back to parent target branch when policy explicitly allows it");
     }
     finally {
         rmSync(root, { recursive: true, force: true });
@@ -2442,15 +2445,22 @@ test("evaluateSubmoduleTargetBranchPolicy enforces final-tree scope only", () =>
         rmSync(root, { recursive: true, force: true });
     }
 });
-test("evaluateSubmoduleTargetBranchPolicy blocks untrusted submodule URL", () => {
-    const { root, parent, subRemote, initialSha } = createTargetBranchFixture();
+test("evaluateSubmoduleTargetBranchPolicy allows already-contained verification without publish trust", () => {
+    const { root, parent, initialSha } = createTargetBranchFixture();
     try {
-        const gitlinks = [
-            { path: "deps/sub", status: "modified", newSha: initialSha },
-        ];
-        const result = evaluateSubmoduleTargetBranchPolicy(parent, defaultTargetBranchPolicy({
-            trustedSubmoduleTargetBranchUrlPatterns: [], // empty = not trusted
-        }), gitlinks, [parent]);
+        const result = evaluateSubmoduleTargetBranchPolicy(parent, defaultTargetBranchPolicy({ trustedSubmoduleTargetBranchUrlPatterns: [] }), [{ path: "deps/sub", status: "modified", newSha: initialSha }], [parent]);
+        assert.equal(result.status, "passed");
+        assert.equal(result.blocked.length, 0);
+        assert.equal(result.published[0].sha, initialSha);
+    }
+    finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+test("evaluateSubmoduleTargetBranchPolicy blocks untrusted submodule URL when publication is required", () => {
+    const { root, parent, nextSha } = createTargetBranchPublishFixture();
+    try {
+        const result = evaluateSubmoduleTargetBranchPolicy(parent, defaultTargetBranchPolicy({ trustedSubmoduleTargetBranchUrlPatterns: [] }), [{ path: "deps/sub", status: "modified", newSha: nextSha }], [parent]);
         assert.equal(result.status, "blocked");
         assert.match(result.summary, /not in trusted patterns/i);
         assert.equal(result.blocked.length, 1);
@@ -2539,24 +2549,78 @@ test("evaluateSubmoduleTargetBranchPolicy resolves branch via .gitmodules and pu
         rmSync(root, { recursive: true, force: true });
     }
 });
-test("evaluateSubmoduleTargetBranchPolicy supports all-submodules enforcement scope", () => {
+test("evaluateSubmoduleTargetBranchPolicy blocks when .gitmodules branch is missing on remote", () => {
     const { root, parent, subRemote, initialSha } = createTargetBranchFixture();
     try {
-        const gitlinks = [
-            { path: "deps/sub", status: "deleted", oldSha: initialSha },
-        ];
+        writeFileSync(join(parent, ".gitmodules"), `[submodule "deps/sub"]\n\tpath = deps/sub\n\turl = ${subRemote}\n\tbranch = release/v1\n`);
+        git(parent, ["add", ".gitmodules"]);
+        git(parent, ["commit", "-m", "configure missing release branch"]);
+        const result = evaluateSubmoduleTargetBranchPolicy(parent, defaultTargetBranchPolicy({ trustedSubmoduleTargetBranchUrlPatterns: [subRemote] }), [{ path: "deps/sub", status: "modified", newSha: initialSha }], [parent], { treeish: "HEAD" });
+        assert.equal(result.status, "blocked");
+        assert.match(result.summary, /target branch release\/v1 does not exist/i);
+    }
+    finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+test("evaluateSubmoduleTargetBranchPolicy changed-gitlinks scope evaluates only supplied changed gitlinks", () => {
+    const { root, parent, subRemote, initialSha } = createTargetBranchFixture();
+    try {
         const result = evaluateSubmoduleTargetBranchPolicy(parent, defaultTargetBranchPolicy({
-            enforcementScope: "all-submodules",
+            enforcementScope: "changed-gitlinks",
             trustedSubmoduleTargetBranchUrlPatterns: [subRemote],
-        }), gitlinks, [parent], { parentTargetBranch: "main" });
-        // Deleted submodules with no newSha will be skipped for publication
-        // but evaluated for diagnostics.
-        assert.equal(result.blocked.length, 0);
-        // deleted submodules should still appear in diagnostics
-        assert.ok(result.diagnostics.length > 0);
-        const deletedDiag = result.diagnostics.find((d) => d.path === "deps/sub");
-        assert.ok(deletedDiag, "deleted submodule should appear in diagnostics");
-        assert.match(deletedDiag?.error ?? "", /deleted submodule|missing SHA/i);
+        }), [
+            { path: "deps/sub", status: "modified", newSha: initialSha },
+            { path: "deps/removed", status: "deleted", oldSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+        ], [parent]);
+        assert.equal(result.status, "passed");
+        assert.deepEqual(result.published.map((item) => item.path), ["deps/sub"]);
+    }
+    finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+test("NativeGitWorkspaceManager target-branch gate scans final promoted tree", () => {
+    const { root, parent, subWorktree, subRemote, parentSha, nextSha } = createTargetBranchPublishFixture();
+    try {
+        git(parent, ["update-index", "--cacheinfo", `160000,${nextSha},deps/sub`]);
+        git(parent, ["commit", "-m", "pin submodule next sha"]);
+        const manager = new NativeGitWorkspaceManager({ fetch: false });
+        const result = manager.enforceSubmoduleTargetBranchPublication({
+            parentWorkspacePath: parent,
+            sourceWorkspacePaths: [parent, subWorktree],
+            targetTreeish: "HEAD",
+            policy: defaultTargetBranchPolicy({ trustedSubmoduleTargetBranchUrlPatterns: [subRemote] }),
+        });
+        assert.equal(result.status, "passed");
+        assert.equal(result.published[0].sha, nextSha);
+        assert.notEqual(parentSha, nextSha);
+        const remoteMain = git("/tmp", ["ls-remote", "--refs", subRemote, "refs/heads/main"]);
+        assert.ok(remoteMain.startsWith(nextSha), "final-tree gate must publish the final gitlink SHA to submodule main");
+    }
+    finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+test("NativeGitWorkspaceManager changed-gitlinks compatibility mode does not repair pre-existing final-tree pins", () => {
+    const { root, parent, subWorktree, subRemote, parentSha, nextSha } = createTargetBranchPublishFixture();
+    try {
+        git(parent, ["update-index", "--cacheinfo", `160000,${nextSha},deps/sub`]);
+        git(parent, ["commit", "-m", "pin submodule next sha"]);
+        const manager = new NativeGitWorkspaceManager({ fetch: false });
+        const result = manager.enforceSubmoduleTargetBranchPublication({
+            parentWorkspacePath: parent,
+            sourceWorkspacePaths: [parent, subWorktree],
+            baseTreeish: "HEAD",
+            targetTreeish: "HEAD",
+            policy: defaultTargetBranchPolicy({
+                enforcementScope: "changed-gitlinks",
+                trustedSubmoduleTargetBranchUrlPatterns: [subRemote],
+            }),
+        });
+        assert.equal(result.status, "skipped");
+        const remoteMain = git("/tmp", ["ls-remote", "--refs", subRemote, "refs/heads/main"]);
+        assert.ok(remoteMain.startsWith(parentSha), "changed-gitlinks mode must not repair a pre-existing final-tree pin");
     }
     finally {
         rmSync(root, { recursive: true, force: true });
@@ -2627,7 +2691,18 @@ test("evaluateSubmoduleTargetBranchPolicy blocks gitmodules URL change without t
     const { root, parent, subRemote, initialSha } = createTargetBranchFixture();
     try {
         const evilRemote = join(root, "evil.git");
+        const evilWorktree = join(root, "evil-worktree");
         git(root, ["init", "--bare", evilRemote]);
+        execFileSync("git", ["symbolic-ref", "HEAD", "refs/heads/main"], { cwd: evilRemote, encoding: "utf8" });
+        mkdirSync(evilWorktree, { recursive: true });
+        git(evilWorktree, ["init", "-b", "main"]);
+        git(evilWorktree, ["config", "user.email", "goal@example.test"]);
+        git(evilWorktree, ["config", "user.name", "Goal Test"]);
+        git(evilWorktree, ["remote", "add", "origin", evilRemote]);
+        writeFileSync(join(evilWorktree, "unrelated.txt"), "untrusted remote\n");
+        git(evilWorktree, ["add", "unrelated.txt"]);
+        git(evilWorktree, ["commit", "-m", "unrelated evil remote head"]);
+        git(evilWorktree, ["push", "-u", "origin", "main"]);
         writeFileSync(join(parent, ".gitmodules"), `[submodule "deps/sub"]
 	path = deps/sub
 	url = ${evilRemote}

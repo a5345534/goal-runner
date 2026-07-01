@@ -8,6 +8,7 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 import { Type } from "typebox";
 import {
   AUTO_ALLOCATED_DEFAULT_CLOSEOUT_POLICY,
+  DEFAULT_SUBMODULE_TARGET_BRANCH_POLICY,
   GoalRuntime,
   NativeGitWorkspaceManager,
   buildGoalDebugReport,
@@ -26,6 +27,7 @@ import {
   renderActiveGoalReminderPrompt,
   resolveControllerModelClass,
   resolveNativeGitCloseoutPolicy,
+  resolveSubmoduleTargetBranchPolicy,
   resolveDefaultStateRoot,
   resolveGoalModelForHarness,
   selectModelScenarioForNode,
@@ -1231,6 +1233,60 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
         return true;
       }
 
+      const pushTarget = manager.normalizePromotionTarget(
+        { controllerWorkspacePath: binding.workspace, controllerBranch: binding.branch, targetRef: binding.promotionTargetRef },
+        closeoutPolicy,
+      );
+      if (!pushTarget.ok) {
+        await recordPiControllerEvent(runtime, goalId, "parentPush.blocked", {
+          reason: pushTarget.reason,
+        });
+        await runtime.blockGoalFromControllerCloseout(goalId, `parent push target normalization blocked: ${pushTarget.reason}`, {
+          reason: pushTarget.reason,
+        });
+        if (options.notify !== false) safeNotify(ctx, `Goal ${goalId.slice(0, 8)} blocked during parent push target resolution: ${pushTarget.reason}`, "warning");
+        stopPiGoalBackgroundResources(goalId, { state, workspaceRoot: binding.workspace });
+        return true;
+      }
+
+      const targetBranchPolicy = resolveSubmoduleTargetBranchPolicy(DEFAULT_SUBMODULE_TARGET_BRANCH_POLICY, { env: process.env });
+      await recordPiControllerEvent(runtime, goalId, "submoduleTargetBranch.started", {
+        enforcementScope: targetBranchPolicy.enforcementScope,
+        targetTreeish: targetForReverify,
+        parentTargetBranch: pushTarget.value.remoteBranch,
+      });
+      const targetBranchPublication = manager.enforceSubmoduleTargetBranchPublication({
+        parentWorkspacePath: pushTarget.value.targetWorkspacePath,
+        sourceWorkspacePaths: [targetWorkspace, binding.workspace],
+        baseTreeish: promotion.result?.targetHead,
+        targetTreeish: targetForReverify,
+        parentTargetBranch: pushTarget.value.remoteBranch,
+        policy: targetBranchPolicy,
+      });
+      if (targetBranchPublication.status === "blocked") {
+        await recordPiControllerEvent(runtime, goalId, "submoduleTargetBranch.blocked", {
+          summary: targetBranchPublication.summary,
+          enforcementScope: targetBranchPolicy.enforcementScope,
+          blocked: targetBranchPublication.blocked,
+          diagnostics: targetBranchPublication.diagnostics,
+        });
+        await runtime.blockGoalFromControllerCloseout(goalId, `submodule target-branch publication blocked: ${targetBranchPublication.summary}`, {
+          targetBranchPublicationStatus: "blocked",
+          blockedCount: targetBranchPublication.blocked.length,
+          diagnostics: targetBranchPublication.diagnostics,
+        });
+        if (options.notify !== false) safeNotify(ctx, `Goal ${goalId.slice(0, 8)} blocked during submodule target-branch publication: ${targetBranchPublication.summary}`, "warning");
+        stopPiGoalBackgroundResources(goalId, { state, workspaceRoot: binding.workspace });
+        return true;
+      }
+      await recordPiControllerEvent(runtime, goalId, "submoduleTargetBranch.passed", {
+        status: targetBranchPublication.status,
+        summary: targetBranchPublication.summary,
+        enforcementScope: targetBranchPolicy.enforcementScope,
+        published: targetBranchPublication.published,
+        diagnostics: targetBranchPublication.diagnostics,
+      });
+
       // Pre-push recursive checkout simulation
       if (closeoutPolicy.prePushCheckoutSimulation) {
         const parentRemoteUrl = getParentRemoteUrl(binding.workspace, closeoutPolicy.parentRemote ?? "origin");
@@ -1265,22 +1321,6 @@ async function finalizeAndCleanupPiGoalIfDagTerminal(
       }
 
       // Parent push
-      const pushTarget = manager.normalizePromotionTarget(
-        { controllerWorkspacePath: binding.workspace, controllerBranch: binding.branch, targetRef: binding.promotionTargetRef },
-        closeoutPolicy,
-      );
-      if (!pushTarget.ok) {
-        await recordPiControllerEvent(runtime, goalId, "parentPush.blocked", {
-          reason: pushTarget.reason,
-        });
-        await runtime.blockGoalFromControllerCloseout(goalId, `parent push target normalization blocked: ${pushTarget.reason}`, {
-          reason: pushTarget.reason,
-        });
-        if (options.notify !== false) safeNotify(ctx, `Goal ${goalId.slice(0, 8)} blocked during parent push target resolution: ${pushTarget.reason}`, "warning");
-        stopPiGoalBackgroundResources(goalId, { state, workspaceRoot: binding.workspace });
-        return true;
-      }
-
       const parentPush = manager.pushParentTargetBranch({
         targetWorkspacePath: pushTarget.value.targetWorkspacePath,
         remoteName: pushTarget.value.remoteName,

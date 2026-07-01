@@ -50,7 +50,7 @@ are persisted in a JSON file under `AGENT_GOAL_STATE_HOME` (by default
 | `modelBindingJson` | `model-binding-json` | `AGENT_GOAL_MODEL_BINDING_JSON` | — | json | Inline binding catalog JSON. |
 | `trustedSubmoduleUrlPatterns` | `trusted-submodule-url-patterns` | `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_URL_PATTERNS` | — | string | Trusted submodule URL patterns for retained-ref publishing. JSON array or comma/newline-separated patterns. |
 | `trustedSubmoduleTargetBranchUrlPatterns` | `trusted-submodule-target-branch-url-patterns` | `AGENT_GOAL_NATIVE_GIT_TRUSTED_SUBMODULE_TARGET_BRANCH_URL_PATTERNS` | — | string | Trusted submodule URL patterns for target-branch publication (separate from retained-ref trust). JSON array or comma/newline-separated patterns. |
-| `submoduleTargetEnforcementScope` | `submodule-target-enforcement-scope` | _(env not supported; configure per policy)_ | `final-tree` | string | Enforcement scope for submodule target-branch closeout: `final-tree` (only submodules in the promoted tree), `all-submodules` (every registered submodule), or `none` (skip target-branch enforcement). |
+| `submoduleTargetEnforcementScope` | `submodule-target-enforcement-scope` | _(env not supported; configure per policy)_ | `final-tree` | string | Enforcement scope for submodule target-branch closeout: `final-tree` (every submodule in the promoted tree), `changed-gitlinks` (explicit compatibility mode), or `none` (skip target-branch enforcement). |
 | `controllerAuditModel` | `controller-audit-model` | `AGENT_GOAL_CONTROLLER_AUDIT_MODEL`, `AGENT_GOAL_PI_CONTROLLER_AUDIT_MODEL`, `PI_GOAL_CONTROLLER_AUDIT_MODEL` | — | string (secret) | Optional controller-audit model id. |
 
 ## Precedence
@@ -65,8 +65,8 @@ controller process to take effect for env-affected code paths.
 ## Target-branch closeout configuration
 
 The target-branch closeout policy controls whether and how the controller
-promotes submodule gitlinks to their project target branches during goal
-finalization. This is a **separate concern** from retained-ref publishing
+verifies and, when trusted, promotes policy-covered submodule gitlinks to their
+project target branches during goal finalization. This is a **separate concern** from retained-ref publishing
 (which preserves SHAs under `refs/heads/goal-runner/retained/*`). Trusting a
 URL for retained-ref publishing does **not** authorize target-branch mutation.
 
@@ -91,8 +91,8 @@ must be restarted to pick up environment changes.
 
 | Scope | Description |
 |-------|-------------|
-| `final-tree` (default) | Only submodules reachable in the final promoted tree are enforced. Deleted submodules are not published. Added/modified gitlinks must publish to target branches. |
-| `all-submodules` | Every registered submodule is enforced regardless of whether it changed. Stricter — can expose pre-existing unpushed gitlinks. |
+| `final-tree` (default) | Every submodule gitlink reachable in the final promoted tree is enforced. Deleted submodules are not published. Added/modified and pre-existing gitlinks must publish to target branches. |
+| `changed-gitlinks` | Explicit compatibility mode that checks only gitlinks changed by the current promotion diff and does not repair pre-existing retained-only final-tree pins. |
 | `none` | No target-branch enforcement. Only retained-ref publication is performed based on the closeout policy's `submodulePublishMode`. |
 
 ### Target branch resolution order
@@ -100,7 +100,7 @@ must be restarted to pick up environment changes.
 1. Explicit `branchMappings` (longest path match wins; supports `*` glob)
 2. `.gitmodules` `branch` key (from the versioned treeish)
 3. Remote default branch (`git ls-remote --symref HEAD`)
-4. Parent target branch fallback
+4. Parent target branch fallback, only when `allowParentTargetBranchFallback` is explicitly enabled by policy
 
 If none resolves, the submodule is blocked with a "cannot resolve target branch"
 diagnostic.
